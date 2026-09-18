@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>UK Bus Tracker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <nav class="app-tabs" aria-label="Main">
+          <button type="button" class="app-tab is-on" data-tab="map">Map</button>
+          <button type="button" class="app-tab" data-tab="fleet">Fleet</button>
+        </nav>
+        <form id="search-form" class="search">
+          <label class="sr-only" for="query">Search place, postcode or vehicle</label>
+          <input
+            id="query"
+            name="query"
+            type="search"
+            placeholder="Place, postcode or vehicle"
+            autocomplete="off"
+          />
+          <button type="submit">Search</button>
+        </form>
+        <label class="announce-toggle">
+          <input id="announce-toggle" type="checkbox" />
+          <span>Announcements</span>
+        </label>
+        <label class="announce-toggle">
+          <input id="stops-toggle" type="checkbox" />
+          <span>Stops</span>
+        </label>
+        <button type="button" id="follow-chip" class="follow-chip" hidden></button>
+        <div id="playback-bar" class="playback-bar" hidden>
+          <span id="playback-label" class="playback-label"></span>
+          <button type="button" id="playback-stop" class="playback-btn">Clear</button>
+        </div>
+        <time id="uk-clock" datetime="" aria-live="polite"></time>
+        <p id="message" class="message" hidden></p>
+      </header>
+      <main class="map-wrap" data-view="map">
+        <div id="map"></div>
+        <section id="fleet-panel" class="fleet-panel" hidden aria-label="Staffordshire fleet">
+          <div class="fleet-toolbar">
+            <form id="fleet-search-form" class="fleet-search">
+              <label class="sr-only" for="fleet-query">Search companies or vehicles</label>
+              <input
+                id="fleet-query"
+                type="search"
+                placeholder="Search Staffordshire companies or vehicles"
+                autocomplete="off"
+              />
+              <button type="submit">Search</button>
+            </form>
+            <p class="fleet-scope">Staffordshire only</p>
+          </div>
+          <div id="fleet-content" class="fleet-content"></div>
+        </section>
+        <aside id="donate-box" class="donate-box" aria-label="Donate">
+          <button type="button" id="donate-close" class="donate-close" aria-label="Dismiss donation box">×</button>
+          <p class="donate-kicker">Support the tracker</p>
+          <p class="donate-title">Buy me a coffee</p>
+          <p class="donate-lead">Keeps the map running and updated. Thanks.</p>
+          <div class="donate-amounts" role="group" aria-label="Donation amount">
+            <a class="donate-amount" data-amount="3" href="#" target="_blank" rel="noopener noreferrer">£3</a>
+            <a class="donate-amount" data-amount="5" href="#" target="_blank" rel="noopener noreferrer">£5</a>
+            <a class="donate-amount" data-amount="10" href="#" target="_blank" rel="noopener noreferrer">£10</a>
+          </div>
+          <a id="donate-link" class="donate-btn" href="#" target="_blank" rel="noopener noreferrer">Donate</a>
+          <p id="donate-hint" class="donate-hint" hidden>Set <code>VITE_DONATE_URL</code> in <code>.env</code> to your PayPal / Ko-fi link.</p>
+        </aside>
+      </main>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

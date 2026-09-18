@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: uk-bus-tracker
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    envVars:
+      - key: BODS_API_KEY
+        sync: false
+      - key: VITE_DONATE_URL
+        value: https://paypal.me/OwenJay450
+      - key: NODE_VERSION
+        value: "22"
