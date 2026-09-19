@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>Approve bus photos · UK Bus Tracker</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #0f172a;
+        --muted: #64748b;
+        --line: #e2e8f0;
+        --ok: #15803d;
+        --bad: #b91c1c;
+        --bg: #f8fafc;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+      }
+      header {
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+        background: #fff;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: end;
+      }
+      h1 {
+        margin: 0;
+        font-size: 1.15rem;
+        flex: 1 1 auto;
+      }
+      label {
+        display: grid;
+        gap: 4px;
+        font-size: 0.78rem;
+        color: var(--muted);
+        font-weight: 650;
+      }
+      input[type="password"] {
+        min-width: min(280px, 70vw);
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        font: inherit;
+      }
+      button {
+        font: inherit;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: #fff;
+        padding: 8px 12px;
+        cursor: pointer;
+        font-weight: 650;
+      }
+      button.primary { background: #0f172a; color: #fff; border-color: #0f172a; }
+      button.ok { background: #dcfce7; color: var(--ok); border-color: #86efac; }
+      button.bad { background: #fee2e2; color: var(--bad); border-color: #fca5a5; }
+      main { padding: 16px 20px 40px; max-width: 960px; margin: 0 auto; }
+      .msg { color: var(--muted); margin: 0 0 14px; }
+      .err { color: var(--bad); }
+      .card {
+        display: grid;
+        grid-template-columns: 160px 1fr;
+        gap: 14px;
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 12px;
+        margin-bottom: 12px;
+      }
+      .card img {
+        width: 160px;
+        height: 120px;
+        object-fit: cover;
+        border-radius: 8px;
+        background: #e2e8f0;
+      }
+      .meta { font-size: 0.9rem; line-height: 1.4; }
+      .meta strong { font-size: 1rem; }
+      .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+      @media (max-width: 560px) {
+        .card { grid-template-columns: 1fr; }
+        .card img { width: 100%; height: 180px; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Bus photo approvals</h1>
+      <label>
+        AUTH_SECRET
+        <input id="secret" type="password" autocomplete="off" placeholder="Paste AUTH_SECRET" />
+      </label>
+      <button type="button" class="primary" id="load">Load pending</button>
+    </header>
+    <main>
+      <p class="msg" id="status">Enter your AUTH_SECRET to review Plus member photo submissions.</p>
+      <div id="list"></div>
+    </main>
+    <script>
+      const secretEl = document.getElementById("secret");
+      const statusEl = document.getElementById("status");
+      const listEl = document.getElementById("list");
+      const KEY = "uk-bus-photo-admin-secret";
+
+      secretEl.value = localStorage.getItem(KEY) || "";
+
+      function secret() {
+        const value = secretEl.value.trim();
+        if (value) localStorage.setItem(KEY, value);
+        return value;
+      }
+
+      function authHeaders() {
+        return { Authorization: `Bearer ${secret()}`, "Content-Type": "application/json" };
+      }
+
+      function imageUrl(photo) {
+        return `${photo.url}?secret=${encodeURIComponent(secret())}`;
+      }
+
+      async function loadPending() {
+        listEl.innerHTML = "";
+        statusEl.className = "msg";
+        statusEl.textContent = "Loading…";
+        try {
+          const res = await fetch("/api/bus-photos/admin/pending", { headers: authHeaders() });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || `Failed (${res.status})`);
+          const photos = data.photos || [];
+          if (!photos.length) {
+            statusEl.textContent = "No photos waiting for approval.";
+            return;
+          }
+          statusEl.textContent = `${photos.length} photo${photos.length === 1 ? "" : "s"} waiting.`;
+          for (const photo of photos) {
+            const card = document.createElement("article");
+            card.className = "card";
+            card.innerHTML = `
+              <img src="${imageUrl(photo)}" alt="Submitted bus photo" loading="lazy" />
+              <div class="meta">
+                <div><strong>${photo.reg}</strong>${photo.fleet ? ` · #${photo.fleet}` : ""}</div>
+                <div>${photo.operator || "Operator unknown"}</div>
+                <div>From ${photo.uploaderName ? `${photo.uploaderName} · ` : ""}${photo.uploaderEmail || "unknown"} · ${photo.createdAt ? new Date(photo.createdAt).toLocaleString("en-GB") : ""}</div>
+                ${photo.note ? `<div>${photo.note}</div>` : ""}
+                <div class="actions">
+                  <button type="button" class="ok" data-act="approve" data-id="${photo.id}">Approve</button>
+                  <button type="button" class="bad" data-act="reject" data-id="${photo.id}">Reject</button>
+                  <button type="button" data-act="delete" data-id="${photo.id}">Delete</button>
+                </div>
+              </div>
+            `;
+            listEl.appendChild(card);
+          }
+        } catch (error) {
+          statusEl.className = "msg err";
+          statusEl.textContent = error.message || "Could not load";
+        }
+      }
+
+      document.getElementById("load").addEventListener("click", loadPending);
+
+      listEl.addEventListener("click", async (event) => {
+        const btn = event.target.closest("[data-act]");
+        if (!btn) return;
+        const id = btn.dataset.id;
+        const act = btn.dataset.act;
+        btn.disabled = true;
+        try {
+          let res;
+          if (act === "delete") {
+            res = await fetch(`/api/bus-photos/admin/${id}`, { method: "DELETE", headers: authHeaders() });
+          } else {
+            res = await fetch(`/api/bus-photos/admin/${id}/${act}`, {
+              method: "POST",
+              headers: authHeaders(),
+              body: "{}",
+            });
+          }
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || `Failed (${res.status})`);
+          await loadPending();
+        } catch (error) {
+          statusEl.className = "msg err";
+          statusEl.textContent = error.message || "Action failed";
+          btn.disabled = false;
+        }
+      });
+
+      if (secretEl.value) loadPending();
+    </script>
+  </body>
+</html>

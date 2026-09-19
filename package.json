@@ -15,11 +15,13 @@
   },
   "dependencies": {
     "@mapbox/vector-tile": "^3.0.0",
+    "compression": "^1.8.2",
     "express": "^5.1.0",
     "http-proxy-middleware": "^3.0.5",
     "leaflet": "^1.9.4",
     "leaflet.markercluster": "^1.5.3",
-    "pbf": "^5.1.2"
+    "pbf": "^5.1.2",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "vite": "^7.1.5"

@@ -2,8 +2,48 @@
 <html lang="en-GB">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>UK Bus Tracker</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>UK Bus Tracker — Live bus map across Britain</title>
+    <meta
+      name="description"
+      content="Free live UK bus tracker. See buses on a map in real time, search by place, postcode or registration, and follow fleet movements across Britain."
+    />
+    <meta name="robots" content="index, follow" />
+    <meta name="google-site-verification" content="peWrrmLki3FHbG9VWWBpd09GEJ1D1MA8Cc_ka4m0F0w" />
+    <meta name="theme-color" content="#0b1f33" />
+    <link rel="canonical" href="https://ukbustracker.up.railway.app/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="UK Bus Tracker" />
+    <meta property="og:title" content="UK Bus Tracker — Live bus map across Britain" />
+    <meta
+      property="og:description"
+      content="Free live UK bus tracker. See buses on a map in real time, search by place, postcode or registration."
+    />
+    <meta property="og:url" content="https://ukbustracker.up.railway.app/" />
+    <meta property="og:locale" content="en_GB" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="UK Bus Tracker — Live bus map across Britain" />
+    <meta
+      name="twitter:description"
+      content="Free live UK bus tracker. See buses on a map in real time across Britain."
+    />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "UK Bus Tracker",
+        "url": "https://ukbustracker.up.railway.app/",
+        "description": "Free live UK bus tracker with a real-time map of buses across Britain.",
+        "applicationCategory": "TravelApplication",
+        "operatingSystem": "Any",
+        "browserRequirements": "Requires JavaScript",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "GBP"
+        }
+      }
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -12,6 +52,12 @@
     />
   </head>
   <body>
+    <noscript>
+      <p>
+        UK Bus Tracker is a free live map of buses across Britain. Enable JavaScript to view
+        real-time vehicle positions, search by place or postcode, and follow fleets.
+      </p>
+    </noscript>
     <div id="app">
       <header class="topbar">
         <nav class="app-tabs" aria-label="Main">
@@ -19,24 +65,30 @@
           <button type="button" class="app-tab" data-tab="fleet">Fleet</button>
         </nav>
         <form id="search-form" class="search">
-          <label class="sr-only" for="query">Search place, postcode or vehicle</label>
+          <label class="sr-only" for="query">Search place, postcode or registration</label>
           <input
             id="query"
             name="query"
             type="search"
-            placeholder="Place, postcode or vehicle"
+            placeholder="Place, postcode or reg"
             autocomplete="off"
           />
           <button type="submit">Search</button>
         </form>
         <label class="announce-toggle">
           <input id="announce-toggle" type="checkbox" />
-          <span>Announcements</span>
+          <span>Announcements <span class="plus-tag" title="Plus feature">Plus</span></span>
         </label>
         <label class="announce-toggle">
           <input id="stops-toggle" type="checkbox" />
           <span>Stops</span>
         </label>
+        <label class="announce-toggle">
+          <input id="stop-board-toggle" type="checkbox" />
+          <span>Stop board <span class="plus-tag" title="Plus feature">Plus</span></span>
+        </label>
+        <button type="button" id="account-btn" class="account-btn">Account</button>
+        <button type="button" id="plus-btn" class="plus-btn" aria-pressed="false">Go Plus</button>
         <button type="button" id="follow-chip" class="follow-chip" hidden></button>
         <div id="playback-bar" class="playback-bar" hidden>
           <span id="playback-label" class="playback-label"></span>
@@ -47,21 +99,55 @@
       </header>
       <main class="map-wrap" data-view="map">
         <div id="map"></div>
-        <section id="fleet-panel" class="fleet-panel" hidden aria-label="Staffordshire fleet">
+        <aside id="map-welcome" class="map-welcome" hidden>
+          <button type="button" id="map-welcome-close" class="map-welcome-close" aria-label="Dismiss">×</button>
+          <p class="map-welcome-brand">UK Bus Tracker</p>
+          <p class="map-welcome-lead">Live buses across Britain</p>
+          <ol class="map-welcome-steps">
+            <li>Search a place, postcode or reg</li>
+            <li>Zoom into a town to load buses</li>
+            <li>Tap a bus for details and route</li>
+          </ol>
+          <button type="button" id="map-welcome-gotit" class="map-welcome-gotit">Got it</button>
+        </aside>
+        <aside id="maintenance-banner" class="maintenance-banner" hidden role="status" aria-live="polite">
+          <p class="maintenance-kicker">Scheduled maintenance</p>
+          <p class="maintenance-title">We’re updating the tracker</p>
+          <p class="maintenance-lead">
+            Live map work is underway from <strong>21:30–22:00</strong> UK time. Some buses or features may briefly lag or go offline.
+          </p>
+          <p class="maintenance-time" id="maintenance-window">21:30 – 22:00 UK</p>
+        </aside>
+        <section id="fleet-panel" class="fleet-panel" hidden aria-label="Staffordshire fleet" data-fleet-tab="fleet">
           <div class="fleet-toolbar">
             <form id="fleet-search-form" class="fleet-search">
-              <label class="sr-only" for="fleet-query">Search companies or vehicles</label>
+              <label class="sr-only" for="fleet-query">Search companies, vehicles or registration</label>
               <input
                 id="fleet-query"
                 type="search"
-                placeholder="Search Staffordshire companies or vehicles"
+                placeholder="Search companies, vehicles or reg"
                 autocomplete="off"
               />
               <button type="submit">Search</button>
             </form>
-            <p class="fleet-scope">Staffordshire only</p>
+            <form id="fleet-route-form" class="fleet-route-form">
+              <label class="sr-only" for="fleet-route-query">Route number</label>
+              <input
+                id="fleet-route-query"
+                type="search"
+                placeholder="Press a route no. e.g. 23"
+                autocomplete="off"
+                inputmode="text"
+              />
+              <button type="submit">Routes</button>
+            </form>
+            <p class="fleet-scope">Staffs companies · UK-wide reg · route history</p>
           </div>
           <div id="fleet-content" class="fleet-content"></div>
+          <nav class="fleet-bottom-tabs" aria-label="Fleet sections">
+            <button type="button" class="fleet-bottom-tab is-on" data-fleet-tab="fleet">Fleet</button>
+            <button type="button" class="fleet-bottom-tab" data-fleet-tab="private-hire">Private hire</button>
+          </nav>
         </section>
         <aside id="donate-box" class="donate-box" aria-label="Donate">
           <button type="button" id="donate-close" class="donate-close" aria-label="Dismiss donation box">×</button>
@@ -76,7 +162,109 @@
           <a id="donate-link" class="donate-btn" href="#" target="_blank" rel="noopener noreferrer">Donate</a>
           <p id="donate-hint" class="donate-hint" hidden>Set <code>VITE_DONATE_URL</code> in <code>.env</code> to your PayPal / Ko-fi link.</p>
         </aside>
+        <aside id="stop-board" class="stop-board" hidden aria-label="Virtual bus stop display">
+          <div class="stop-board-shell">
+            <div class="stop-board-hood" aria-hidden="true"></div>
+            <div class="stop-board-screen">
+              <aside class="stop-board-rail" aria-hidden="true">
+                <div class="stop-board-rail-top">
+                  <div class="stop-board-logo stop-board-logo-gov" title="Funded by UK Government">
+                    <img src="/logos/royal-arms.png" alt="" width="36" height="36" decoding="async" />
+                    <span>Funded by<br />UK Government</span>
+                  </div>
+                  <div class="stop-board-logo stop-board-logo-stoke" title="Stoke-on-Trent City Council">
+                    <img src="/logos/stoke-arms.svg" alt="" width="42" height="52" decoding="async" />
+                    <span>Stoke-on-Trent<br />City Council</span>
+                  </div>
+                </div>
+                <p class="stop-board-rail-name" id="stop-board-rail-name">Bus stop</p>
+                <time id="stop-board-clock-stoke" class="stop-board-clock stop-board-clock-stoke" datetime="">00:00</time>
+              </aside>
+              <div class="stop-board-main">
+                <button type="button" id="stop-board-close" class="stop-board-close" aria-label="Close stop board">×</button>
+                <header class="stop-board-header">
+                  <p id="stop-board-name" class="stop-board-stopname">Bus stop</p>
+                  <time id="stop-board-clock" class="stop-board-clock" datetime="">00:00</time>
+                </header>
+                <div id="stop-board-rows" class="stop-board-rows" role="list"></div>
+                <aside class="stop-board-legend" aria-hidden="true">
+                  <p class="stop-board-legend-note">Some buses in this zone now have real-time predictions</p>
+                  <p class="stop-board-legend-item">
+                    <span class="stop-board-ico stop-board-ico-live"></span> Real-time
+                  </p>
+                  <p class="stop-board-legend-item">
+                    <span class="stop-board-ico stop-board-ico-clock"></span> Scheduled times
+                  </p>
+                </aside>
+                <div id="stop-board-cover" class="stop-board-cover" hidden>
+                  <p class="stop-board-cover-text">No services currently running from this stop</p>
+                </div>
+                <p id="stop-board-status" class="stop-board-status sr-only">Live departures</p>
+              </div>
+            </div>
+          </div>
+        </aside>
       </main>
+    </div>
+    <div id="plus-modal" class="plus-modal" hidden role="dialog" aria-modal="true" aria-labelledby="plus-modal-title">
+      <div class="plus-dialog">
+        <button type="button" class="plus-dialog-close" data-plus-close aria-label="Close">×</button>
+        <p class="plus-kicker">UK Bus Tracker</p>
+        <h2 id="plus-modal-title" class="plus-dialog-title">Go Plus</h2>
+        <p class="plus-dialog-lead">Free keeps the live map and fleet. Plus unlocks the extras — sign in so it works on every device.</p>
+        <p class="plus-feature-note" data-plus-feature hidden></p>
+        <p class="plus-expiry" data-plus-expiry hidden></p>
+        <div class="plus-account" data-plus-account></div>
+        <div class="plus-compare">
+          <div class="plus-col">
+            <h3>Free</h3>
+            <ul>
+              <li>Live map &amp; search</li>
+              <li>Fleet browser</li>
+              <li>Today’s vehicle history</li>
+              <li>Bus stops on the map</li>
+            </ul>
+          </div>
+          <div class="plus-col plus-col-on">
+            <h3>Plus · <span data-plus-price>£4.99/month</span></h3>
+            <ul>
+              <li>Live spoken announcements</li>
+              <li>Virtual stop board</li>
+              <li>3-day &amp; 7-day history</li>
+              <li>Add bus photos (after approval)</li>
+              <li>No donation prompt</li>
+            </ul>
+          </div>
+        </div>
+        <button type="button" class="plus-checkout-btn" data-plus-checkout>Pay with PayPal · <span data-plus-price>£4.99/month</span></button>
+        <button type="button" class="plus-cancel-btn" data-plus-cancel hidden>Cancel Plus</button>
+        <p class="plus-error" data-plus-error hidden></p>
+        <button type="button" class="plus-later" data-plus-close>Not now</button>
+      </div>
+    </div>
+    <div id="auth-modal" class="plus-modal auth-modal" hidden role="dialog" aria-modal="true" aria-labelledby="auth-modal-title" data-mode="signup">
+      <div class="plus-dialog auth-dialog">
+        <button type="button" class="plus-dialog-close" data-auth-close aria-label="Close">×</button>
+        <p class="plus-kicker">UK Bus Tracker</p>
+        <h2 id="auth-modal-title" class="plus-dialog-title">Create account</h2>
+        <div data-auth-logged-in hidden>
+          <p class="plus-dialog-lead">Signed in as <strong data-auth-email></strong></p>
+          <p class="plus-dialog-lead">Use the same email and password on another phone or computer to keep Plus with you.</p>
+          <button type="button" class="plus-checkout-btn" data-auth-logout>Log out</button>
+          <button type="button" class="plus-cancel-btn" data-auth-cancel-plus hidden>Cancel Plus</button>
+          <button type="button" class="plus-later" data-auth-close>Close</button>
+        </div>
+        <form data-auth-form class="auth-form">
+          <p class="plus-dialog-lead">Free account — required before paying so Plus is saved to you, not just this phone.</p>
+          <label class="auth-label" for="auth-email">Email</label>
+          <input id="auth-email" name="email" type="email" autocomplete="email" required placeholder="you@example.com" />
+          <label class="auth-label" for="auth-password">Password</label>
+          <input id="auth-password" name="password" type="password" autocomplete="current-password" required minlength="8" placeholder="At least 8 characters" />
+          <button type="submit" class="plus-checkout-btn" data-auth-submit>Sign up</button>
+          <button type="button" class="plus-later" data-auth-switch>Already have an account? Log in</button>
+          <p class="plus-error" data-auth-error hidden></p>
+        </form>
+      </div>
     </div>
     <script type="module" src="/src/main.js"></script>
   </body>

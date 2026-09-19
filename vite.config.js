@@ -21,6 +21,11 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   return {
   plugins: [bodsOccupancyPlugin(env.BODS_API_KEY)],
+  build: {
+    target: "es2022",
+    cssCodeSplit: true,
+    reportCompressedSize: false,
+  },
   server: {
     host: true,
     port: 5173,

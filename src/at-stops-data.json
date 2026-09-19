@@ -1,0 +1,2406 @@
+{
+  "generatedAt": "2026-09-18T20:11:03.677Z",
+  "note": "Official AT departure times are employee-only (D&G). Stops from D&G route guides; coordinates matched to Bustimes NaPTAN stops.",
+  "routes": {
+    "AT1": [
+      {
+        "name": "Fenton, opp Foley Place",
+        "atco": "3890D013201",
+        "lat": 52.99305645,
+        "lng": -2.142577359,
+        "label": "Foley Arms, Fenton",
+        "seq": 0
+      },
+      {
+        "name": "Fenton, opp Royal Street",
+        "atco": "3890D013102",
+        "lat": 52.994776487,
+        "lng": -2.147395283,
+        "label": "Royal Street, Fenton",
+        "seq": 1
+      },
+      {
+        "name": "Fenton, opp Duke Street",
+        "atco": "3890D013001",
+        "lat": 52.995806972,
+        "lng": -2.150006115,
+        "label": "Duke Street, Fenton",
+        "seq": 2
+      },
+      {
+        "name": "Fenton, adj Victoria Place",
+        "atco": "3890D030501",
+        "lat": 52.999021559,
+        "lng": -2.159612917,
+        "label": "Victoria Place, Fenton",
+        "seq": 3
+      },
+      {
+        "name": "Fenton, adj Travers Court",
+        "atco": "3890D037202",
+        "lat": 52.999757722,
+        "lng": -2.166842291,
+        "label": "Travers Court, Fenton",
+        "seq": 4
+      },
+      {
+        "name": "Fenton, adj Smithpool Road",
+        "atco": "3890D037102",
+        "lat": 53.000311737,
+        "lng": -2.16918381,
+        "label": "Smithpool Road, Fenton",
+        "seq": 5
+      },
+      {
+        "name": "Fenton Manor (adj)",
+        "atco": "3890D037001",
+        "lat": 53.000991554,
+        "lng": -2.171525889,
+        "label": "Fenton Manor",
+        "seq": 6
+      },
+      {
+        "name": "Stoke-upon-Trent, opp Hancock Street",
+        "atco": "3890D031302",
+        "lat": 53.006032979,
+        "lng": -2.178639485,
+        "label": "Hancock Street, Stoke-upon-Trent",
+        "seq": 7
+      },
+      {
+        "name": "Joiners Square, adj Leek Road",
+        "atco": "3890D029901",
+        "lat": 53.016482532,
+        "lng": -2.169679427,
+        "label": "Leek Road, Joiners Square",
+        "seq": 8
+      },
+      {
+        "name": "Hanley, adj Clifford Street",
+        "atco": "3890D029802",
+        "lat": 53.018844676,
+        "lng": -2.17107505,
+        "label": "Clifford Street, Hanley",
+        "seq": 9
+      },
+      {
+        "name": "Hanley Stafford Street (stop S1)",
+        "atco": "3890D000201",
+        "lat": 53.026566951,
+        "lng": -2.1768011,
+        "label": "Bernard Street, Hanley",
+        "seq": 10
+      },
+      {
+        "name": "Hanley bus station (arrivals)",
+        "atco": "3890D000100",
+        "lat": 53.022534073,
+        "lng": -2.174607994,
+        "label": "stop B 3, Hanley",
+        "seq": 11
+      },
+      {
+        "name": "Hanley, adj St Ann Street",
+        "atco": "3890D003101",
+        "lat": 53.025493114,
+        "lng": -2.167239913,
+        "label": "St Ann Street, Hanley",
+        "seq": 12
+      },
+      {
+        "name": "Hanley, adj Somerset Road",
+        "atco": "3890D003201",
+        "lat": 53.025273577,
+        "lng": -2.163511785,
+        "label": "Somerset Road, Hanley",
+        "seq": 13
+      },
+      {
+        "name": "Hanley, opp Ivy House Road",
+        "atco": "3890D003301",
+        "lat": 53.024910378,
+        "lng": -2.159574438,
+        "label": "Ivy House Road, Hanley",
+        "seq": 14
+      },
+      {
+        "name": "Bucknall, adj New Finney Gardens",
+        "atco": "3890D003401",
+        "lat": 53.023344204,
+        "lng": -2.154335785,
+        "label": "New Finney Gardens, Bucknall",
+        "seq": 15
+      },
+      {
+        "name": "Bucknall, opp Trent Bridge",
+        "atco": "3890D027401",
+        "lat": 53.023267785,
+        "lng": -2.150846942,
+        "label": "Trent Bridge, Bucknall",
+        "seq": 16
+      },
+      {
+        "name": "Bucknall, adj Northfleet Street",
+        "atco": "3890D027501",
+        "lat": 53.023828432,
+        "lng": -2.148210077,
+        "label": "Northfleet Street, Bucknall",
+        "seq": 17
+      },
+      {
+        "name": "Bucknall, adj Central Avenue",
+        "atco": "3890D027601",
+        "lat": 53.025237704,
+        "lng": -2.142519642,
+        "label": "Central Avenue, Bucknall",
+        "seq": 18
+      },
+      {
+        "name": "Bucknall, adj Chapel Street",
+        "atco": "3890D027701",
+        "lat": 53.025288072,
+        "lng": -2.136805868,
+        "label": "Chapel Street, Bucknall",
+        "seq": 19
+      },
+      {
+        "name": "Townsend, adj Eaves Lane",
+        "atco": "3890D027801",
+        "lat": 53.024871282,
+        "lng": -2.132931967,
+        "label": "Eaves Lane, Townsend",
+        "seq": 20
+      },
+      {
+        "name": "Townsend, adj Jessica Grove",
+        "atco": "3890D027901",
+        "lat": 53.022837156,
+        "lng": -2.127081662,
+        "label": "Jessica Grove, Townsend",
+        "seq": 21
+      },
+      {
+        "name": "Townsend, adj Brookhouse Lane",
+        "atco": "3890D028001",
+        "lat": 53.022300433,
+        "lng": -2.124605341,
+        "label": "Brookhouse Lane, Townsend",
+        "seq": 22
+      },
+      {
+        "name": "Ash Bank, adj Green's Lane",
+        "atco": "3800C860901",
+        "lat": 53.021122576,
+        "lng": -2.120427739,
+        "label": "Green's Lane, Ash Bank",
+        "seq": 23
+      },
+      {
+        "name": "Ash Bank, adj No. 101",
+        "atco": "3800C860801",
+        "lat": 53.021145401,
+        "lng": -2.115552991,
+        "label": "No. 101, Ash Bank",
+        "seq": 24
+      },
+      {
+        "name": "Ash Bank, adj New Road",
+        "atco": "3800C863801",
+        "lat": 53.020951112,
+        "lng": -2.111929921,
+        "label": "New Road, Ash Bank",
+        "seq": 25
+      },
+      {
+        "name": "The Ash Bank (opp)",
+        "atco": "3800C860601",
+        "lat": 53.021621822,
+        "lng": -2.1059238,
+        "label": "Ash Bank Hotel",
+        "seq": 26
+      },
+      {
+        "name": "Werrington, opp Clough Lane",
+        "atco": "3800C815500",
+        "lat": 53.0212934,
+        "lng": -2.101137613,
+        "label": "Clough Lane, Werrington",
+        "seq": 27
+      },
+      {
+        "name": "Werrington, adj Washerwall Lane",
+        "atco": "3800C860401",
+        "lat": 53.02307959,
+        "lng": -2.09340437,
+        "label": "Washerwall Lane, Werrington",
+        "seq": 28
+      },
+      {
+        "name": "Werrington, adj Johnstone Avenue",
+        "atco": "3800C813600",
+        "lat": 53.024566733,
+        "lng": -2.088264036,
+        "label": "Johnstone Avenue, Werrington",
+        "seq": 29
+      },
+      {
+        "name": "Werrington, adj Rownall Road",
+        "atco": "3800C814500",
+        "lat": 53.026756889,
+        "lng": -2.080098054,
+        "label": "Rownall Road, Werrington",
+        "seq": 30
+      },
+      {
+        "name": "Cellarhead, opp Southlowe Road",
+        "atco": "3800C860101",
+        "lat": 53.026588995,
+        "lng": -2.075684514,
+        "label": "Southlowe Road, Cellarhead",
+        "seq": 31
+      },
+      {
+        "name": "Cellarhead, adj Moorside High School",
+        "atco": "3800C815100",
+        "lat": 53.026062401,
+        "lng": -2.069540929,
+        "label": "Moorside High School, Cellarhead",
+        "seq": 32
+      },
+      {
+        "name": "Cellarhead, adj Crossroads",
+        "atco": "3800C804500",
+        "lat": 53.025417937,
+        "lng": -2.064679507,
+        "label": "Crossroads, Cellarhead",
+        "seq": 33
+      },
+      {
+        "name": "Cellarhead, opp March Lane",
+        "atco": "3800C854201",
+        "lat": 53.023712588,
+        "lng": -2.059757121,
+        "label": "March Lane, Cellarhead",
+        "seq": 34
+      },
+      {
+        "name": "Cellarhead, adj New Park Farm",
+        "atco": "3800C825701",
+        "lat": 53.022582993,
+        "lng": -2.053404674,
+        "label": "New Park Farm, Cellarhead",
+        "seq": 35
+      },
+      {
+        "name": "Blakeley Lane, opp Cheadle Road",
+        "atco": "3800C854302",
+        "lat": 53.021374375,
+        "lng": -2.041104279,
+        "label": "Cheadle Road, Blakeley Lane",
+        "seq": 36
+      },
+      {
+        "name": "Blakeley Lane, opp East View",
+        "atco": "3800C838400",
+        "lat": 53.020135602,
+        "lng": -2.035796086,
+        "label": "East View, Blakeley Lane",
+        "seq": 37
+      },
+      {
+        "name": "Kingsley Moor, opp Broad Oak Lane",
+        "atco": "3800C838500",
+        "lat": 53.017962767,
+        "lng": -2.026134814,
+        "label": "Broad Oak Lane, Kingsley Moor",
+        "seq": 38
+      },
+      {
+        "name": "Kingsley Moor, opp Broad Oak Lane",
+        "atco": "3800C838500",
+        "lat": 53.017962767,
+        "lng": -2.026134814,
+        "label": "Kingsley Road, Kingsley Moor",
+        "seq": 39
+      },
+      {
+        "name": "Kingsley Moor, opp Broad Oak Lane",
+        "atco": "3800C838500",
+        "lat": 53.017962767,
+        "lng": -2.026134814,
+        "label": "Leek Road, Kingsley Moor",
+        "seq": 40
+      },
+      {
+        "name": "Kingsley Moor, opp Harveys Lane",
+        "atco": "3800C824301",
+        "lat": 53.016634661,
+        "lng": -2.012107348,
+        "label": "Harveys Lane, Kingsley Moor",
+        "seq": 41
+      },
+      {
+        "name": "Kingsley Moor, adj Hollins Lane",
+        "atco": "3800C838701",
+        "lat": 53.018810336,
+        "lng": -2.008724111,
+        "label": "Hollins Lane, Kingsley Moor",
+        "seq": 42
+      },
+      {
+        "name": "Kingsley, opp Johnson Crescent",
+        "atco": "3800C838801",
+        "lat": 53.020185379,
+        "lng": -1.987451622,
+        "label": "Johnson Crescent, Kingsley",
+        "seq": 43
+      },
+      {
+        "name": "Froghall Road (opp)",
+        "atco": "3800C807300",
+        "lat": 53.022949099,
+        "lng": -1.963344126,
+        "label": "Froghall Road",
+        "seq": 44
+      },
+      {
+        "name": "Cotton, opp Ramshorn Road",
+        "atco": "3800C805900",
+        "lat": 53.007472894,
+        "lng": -1.904132769,
+        "label": "Ramshorn Road, Cotton",
+        "seq": 45
+      },
+      {
+        "name": "Alton Towers, adj Farley Gates",
+        "atco": "3800C806500",
+        "lat": 52.993279981,
+        "lng": -1.894644241,
+        "label": "Alton Towers Hotel",
+        "seq": 46
+      },
+      {
+        "name": "Alton Towers Entrance (adj)",
+        "atco": "3800C800400",
+        "lat": 52.991550903,
+        "lng": -1.891132632,
+        "label": "Alton Towers Entrance",
+        "seq": 47
+      }
+    ],
+    "AT2": [
+      {
+        "name": "Fenton, opp Foley Place",
+        "atco": "3890D013201",
+        "lat": 52.99305645,
+        "lng": -2.142577359,
+        "label": "Foley Arms, Fenton",
+        "seq": 0
+      },
+      {
+        "name": "Fenton, opp Royal Street",
+        "atco": "3890D013102",
+        "lat": 52.994776487,
+        "lng": -2.147395283,
+        "label": "Royal Street, Fenton",
+        "seq": 1
+      },
+      {
+        "name": "Fenton, opp Duke Street",
+        "atco": "3890D013001",
+        "lat": 52.995806972,
+        "lng": -2.150006115,
+        "label": "Duke Street, Fenton",
+        "seq": 2
+      },
+      {
+        "name": "Fenton, adj Victoria Place",
+        "atco": "3890D030501",
+        "lat": 52.999021559,
+        "lng": -2.159612917,
+        "label": "Victoria Place, Fenton",
+        "seq": 3
+      },
+      {
+        "name": "Fenton, adj Travers Court",
+        "atco": "3890D037202",
+        "lat": 52.999757722,
+        "lng": -2.166842291,
+        "label": "Travers Court, Fenton",
+        "seq": 4
+      },
+      {
+        "name": "Fenton, adj Smithpool Road",
+        "atco": "3890D037102",
+        "lat": 53.000311737,
+        "lng": -2.16918381,
+        "label": "Smithpool Road, Fenton",
+        "seq": 5
+      },
+      {
+        "name": "Fenton Manor (adj)",
+        "atco": "3890D037001",
+        "lat": 53.000991554,
+        "lng": -2.171525889,
+        "label": "Fenton Manor",
+        "seq": 6
+      },
+      {
+        "name": "Stoke-upon-Trent, opp Hancock Street",
+        "atco": "3890D031302",
+        "lat": 53.006032979,
+        "lng": -2.178639485,
+        "label": "Hancock Street, Stoke-upon-Trent",
+        "seq": 7
+      },
+      {
+        "name": "Joiners Square, adj Leek Road",
+        "atco": "3890D029901",
+        "lat": 53.016482532,
+        "lng": -2.169679427,
+        "label": "Leek Road, Joiners Square",
+        "seq": 8
+      },
+      {
+        "name": "Hanley, adj Clifford Street",
+        "atco": "3890D029802",
+        "lat": 53.018844676,
+        "lng": -2.17107505,
+        "label": "Clifford Street, Hanley",
+        "seq": 9
+      },
+      {
+        "name": "Hanley Stafford Street (stop S1)",
+        "atco": "3890D000201",
+        "lat": 53.026566951,
+        "lng": -2.1768011,
+        "label": "Bernard Street, Hanley",
+        "seq": 10
+      },
+      {
+        "name": "Hanley bus station (arrivals)",
+        "atco": "3890D000100",
+        "lat": 53.022534073,
+        "lng": -2.174607994,
+        "label": "stop B 3, Hanley",
+        "seq": 11
+      },
+      {
+        "name": "Hanley, adj St Ann Street",
+        "atco": "3890D003101",
+        "lat": 53.025493114,
+        "lng": -2.167239913,
+        "label": "St Ann Street, Hanley",
+        "seq": 12
+      },
+      {
+        "name": "Hanley, adj Somerset Road",
+        "atco": "3890D003201",
+        "lat": 53.025273577,
+        "lng": -2.163511785,
+        "label": "Somerset Road, Hanley",
+        "seq": 13
+      },
+      {
+        "name": "Hanley, opp Ivy House Road",
+        "atco": "3890D003301",
+        "lat": 53.024910378,
+        "lng": -2.159574438,
+        "label": "Ivy House Road, Hanley",
+        "seq": 14
+      },
+      {
+        "name": "Bucknall, adj New Finney Gardens",
+        "atco": "3890D003401",
+        "lat": 53.023344204,
+        "lng": -2.154335785,
+        "label": "New Finney Gardens, Bucknall",
+        "seq": 15
+      },
+      {
+        "name": "Bucknall, adj Christine Street",
+        "atco": "3890D003501",
+        "lat": 53.021821239,
+        "lng": -2.150290295,
+        "label": "Christine Street, Bucknall",
+        "seq": 16
+      },
+      {
+        "name": "Bucknall, opp Trent Tavern",
+        "atco": "3890D003601",
+        "lat": 53.020610297,
+        "lng": -2.148228844,
+        "label": "Trent Tavern, Bucknall",
+        "seq": 17
+      },
+      {
+        "name": "Bucknall, adj Foundry Lane",
+        "atco": "3890D003701",
+        "lat": 53.020022695,
+        "lng": -2.143605565,
+        "label": "Foundry Lane, Bucknall",
+        "seq": 18
+      },
+      {
+        "name": "Bentilee, adj Twigg Street",
+        "atco": "3890D005501",
+        "lat": 53.019245163,
+        "lng": -2.139816593,
+        "label": "Twigg Street, Bentilee",
+        "seq": 19
+      },
+      {
+        "name": "Bentilee, opp Sundorne Place",
+        "atco": "3890D006601",
+        "lat": 53.018051583,
+        "lng": -2.13812828,
+        "label": "Sundorne Place, Bentilee",
+        "seq": 20
+      },
+      {
+        "name": "Bentilee, adj Latimer Way",
+        "atco": "3890D006701",
+        "lat": 53.016150842,
+        "lng": -2.13379947,
+        "label": "Latimer Way, Bentilee",
+        "seq": 21
+      },
+      {
+        "name": "Bentilee, adj Brassington Way",
+        "atco": "3890D006801",
+        "lat": 53.014212746,
+        "lng": -2.130603731,
+        "label": "Brassington Way, Bentilee",
+        "seq": 22
+      },
+      {
+        "name": "Bentilee, adj Devonshire Square",
+        "atco": "3890D006901",
+        "lat": 53.013198622,
+        "lng": -2.129095264,
+        "label": "Devonshire Square, Bentilee",
+        "seq": 23
+      },
+      {
+        "name": "Bentilee, adj Tyson Green",
+        "atco": "3890D007001",
+        "lat": 53.011017375,
+        "lng": -2.126197329,
+        "label": "Tyson Green, Bentilee",
+        "seq": 24
+      },
+      {
+        "name": "Bentilee, opp Croftfield Street",
+        "atco": "3890D007101",
+        "lat": 53.009006291,
+        "lng": -2.123836699,
+        "label": "Croftfield Street, Bentilee",
+        "seq": 25
+      },
+      {
+        "name": "Bentilee, adj Homestead Street",
+        "atco": "3890D007201",
+        "lat": 53.007687886,
+        "lng": -2.120926824,
+        "label": "Homestead Street, Bentilee",
+        "seq": 26
+      },
+      {
+        "name": "Bentilee, adj Cowley Way",
+        "atco": "3890D006501",
+        "lat": 53.00554832,
+        "lng": -2.121069855,
+        "label": "Cowley Way, Bentilee",
+        "seq": 27
+      },
+      {
+        "name": "Adderley Green, opp First bus depot",
+        "atco": "3890D004501",
+        "lat": 53.002178814,
+        "lng": -2.1196597,
+        "label": "First bus depot, Adderley Green",
+        "seq": 28
+      },
+      {
+        "name": "Adderley Green, opp Mossfield Road",
+        "atco": "3890D007301",
+        "lat": 52.998615978,
+        "lng": -2.122719212,
+        "label": "Mossfield Road, Adderley Green",
+        "seq": 29
+      },
+      {
+        "name": "Sandford Hill, adj St Mary's Road",
+        "atco": "3890D008501",
+        "lat": 52.996743652,
+        "lng": -2.125187172,
+        "label": "St Mary's Road, Sandford Hill",
+        "seq": 30
+      },
+      {
+        "name": "Sandford Hill, adj Somerton Way",
+        "atco": "3890D008601",
+        "lat": 52.994844771,
+        "lng": -2.12722278,
+        "label": "Somerton Way, Sandford Hill",
+        "seq": 31
+      },
+      {
+        "name": "Sandford Hill, adj Amison Street",
+        "atco": "3890D008701",
+        "lat": 52.992991141,
+        "lng": -2.128945487,
+        "label": "Amison Street, Sandford Hill",
+        "seq": 32
+      },
+      {
+        "name": "Sandford Hill, adj Forrister Street",
+        "atco": "3890D008801",
+        "lat": 52.991423535,
+        "lng": -2.130292801,
+        "label": "Forrister Street, Sandford Hill",
+        "seq": 33
+      },
+      {
+        "name": "Longton Police Station (opp)",
+        "atco": "3890D009201",
+        "lat": 52.988321431,
+        "lng": -2.132864196,
+        "label": "Longton Police Station",
+        "seq": 34
+      },
+      {
+        "name": "Longton, adj Landon Street",
+        "atco": "3890D009101",
+        "lat": 52.987120231,
+        "lng": -2.129836622,
+        "label": "Landon Street, Longton",
+        "seq": 35
+      },
+      {
+        "name": "Longton, adj Adderley Works",
+        "atco": "3890D009002",
+        "lat": 52.98625593,
+        "lng": -2.126825048,
+        "label": "Adderley Works, Longton",
+        "seq": 36
+      },
+      {
+        "name": "Meir Hay, opp Weston Coyney Road",
+        "atco": "3890D010001",
+        "lat": 52.985129607,
+        "lng": -2.123138877,
+        "label": "Weston Coyney Road, Meir Hay",
+        "seq": 37
+      },
+      {
+        "name": "Meir Hay, adj Tunnicliffe Close",
+        "atco": "3890D010102",
+        "lat": 52.985486031,
+        "lng": -2.11953899,
+        "label": "Tunnicliffe Close, Meir Hay",
+        "seq": 38
+      },
+      {
+        "name": "Meir Hay, adj Farnworth Road",
+        "atco": "3890D010202",
+        "lat": 52.98614535,
+        "lng": -2.116412732,
+        "label": "Farnworth Road, Meir Hay",
+        "seq": 39
+      },
+      {
+        "name": "Westonfields Drive (opp)",
+        "atco": "3890D010302",
+        "lat": 52.987389423,
+        "lng": -2.112721863,
+        "label": "Westonfields Drive, Weston Coyney",
+        "seq": 40
+      },
+      {
+        "name": "Weston Coyney, adj Westfield Lodge",
+        "atco": "3890D044602",
+        "lat": 52.988623076,
+        "lng": -2.108147747,
+        "label": "Westfield Lodge, Weston Coyney",
+        "seq": 41
+      },
+      {
+        "name": "Weston Coyney, adj Carberry Way",
+        "atco": "3890D010402",
+        "lat": 52.989662327,
+        "lng": -2.104385566,
+        "label": "Carberry Way, Weston Coyney",
+        "seq": 42
+      },
+      {
+        "name": "Weston Coyney, adj New Kingsway",
+        "atco": "3890D011501",
+        "lat": 52.989513146,
+        "lng": -2.100169416,
+        "label": "New Kingsway, Weston Coyney",
+        "seq": 43
+      },
+      {
+        "name": "Weston Coyney, opp Coyney Grove",
+        "atco": "3890D011601",
+        "lat": 52.986896857,
+        "lng": -2.100684704,
+        "label": "Coyney Grove, Weston Coyney",
+        "seq": 44
+      },
+      {
+        "name": "Meir, adj Penfleet Avenue",
+        "atco": "3890D011901",
+        "lat": 52.980154659,
+        "lng": -2.101041328,
+        "label": "Penfleet Avenue, Meir",
+        "seq": 45
+      },
+      {
+        "name": "Meir Heath, adj Grange Road",
+        "atco": "3800C727401",
+        "lat": 52.960860458,
+        "lng": -2.099567026,
+        "label": "Uttoxeter Road, Meir",
+        "seq": 46
+      },
+      {
+        "name": "Blythe Bridge, adj Tesco Roundabout",
+        "atco": "3800C731001",
+        "lat": 52.973248393,
+        "lng": -2.087146535,
+        "label": "Tesco Roundabout, Blythe Bridge",
+        "seq": 47
+      },
+      {
+        "name": "Blythe Bridge, adj Greenacres Avenue",
+        "atco": "3800C891001",
+        "lat": 52.972585324,
+        "lng": -2.084196787,
+        "label": "Greenacres Avenue, Blythe Bridge",
+        "seq": 48
+      },
+      {
+        "name": "Blythe Bridge, adj Adamthwaite Drive",
+        "atco": "3800C727701",
+        "lat": 52.97159923,
+        "lng": -2.080278631,
+        "label": "Adamthwaite Drive, Blythe Bridge",
+        "seq": 49
+      },
+      {
+        "name": "Blythe Bridge, opp Portland School",
+        "atco": "3800C728001",
+        "lat": 52.969653191,
+        "lng": -2.073142726,
+        "label": "Portland School, Blythe Bridge",
+        "seq": 50
+      },
+      {
+        "name": "Blythe Bridge, adj Grindley Lane",
+        "atco": "3800C728301",
+        "lat": 52.968683946,
+        "lng": -2.070520511,
+        "label": "Grindley Lane, Blythe Bridge",
+        "seq": 51
+      },
+      {
+        "name": "Blythe Bridge, adj Railway Station",
+        "atco": "3800C802700",
+        "lat": 52.967940401,
+        "lng": -2.066082266,
+        "label": "Railway Station, Blythe Bridge",
+        "seq": 52
+      },
+      {
+        "name": "Blythe Bridge Library (adj)",
+        "atco": "3800C863701",
+        "lat": 52.967016602,
+        "lng": -2.062224589,
+        "label": "Blythe Bridge Library",
+        "seq": 53
+      },
+      {
+        "name": "Blythe Bridge, opp High School",
+        "atco": "3800C802800",
+        "lat": 52.966981342,
+        "lng": -2.060884525,
+        "label": "High School, Blythe Bridge",
+        "seq": 54
+      },
+      {
+        "name": "Forsbrook, opp Bridgwood Road",
+        "atco": "3800C806900",
+        "lat": 52.97036383,
+        "lng": -2.055722401,
+        "label": "Bridgwood Road, Forsbrook",
+        "seq": 55
+      },
+      {
+        "name": "Boundary, adj Red Lion Inn",
+        "atco": "3800C803001",
+        "lat": 52.982077187,
+        "lng": -2.02965776,
+        "label": "Red Lion Inn, Boundary",
+        "seq": 56
+      },
+      {
+        "name": "Brookhouses, adj Brookhouse Road",
+        "atco": "3800C821401",
+        "lat": 52.983132473,
+        "lng": -2.006869777,
+        "label": "Brookhouse Road, Brookhouses",
+        "seq": 57
+      },
+      {
+        "name": "Brookhouses, opp Dilhorne Road",
+        "atco": "3800C823401",
+        "lat": 52.983905746,
+        "lng": -2.00135881,
+        "label": "Dilhorne Road, Brookhouses",
+        "seq": 58
+      },
+      {
+        "name": "Cheadle, opp Lid Lane",
+        "atco": "3800C823201",
+        "lat": 52.985164209,
+        "lng": -1.996845587,
+        "label": "Lid Lane, Cheadle",
+        "seq": 59
+      },
+      {
+        "name": "Cheadle, opp Cross Street",
+        "atco": "3800C804700",
+        "lat": 52.98660216,
+        "lng": -1.990559473,
+        "label": "Cross Street, Cheadle Town Centre",
+        "seq": 60
+      },
+      {
+        "name": "Cheadle, opp Greyhound Walk",
+        "atco": "3800C804701",
+        "lat": 52.987420054,
+        "lng": -1.989099486,
+        "label": "Greyhound Walk, Cheadle Town Centre",
+        "seq": 61
+      },
+      {
+        "name": "Cheadle, adj Tape Street",
+        "atco": "3800C823600",
+        "lat": 52.988201861,
+        "lng": -1.986581815,
+        "label": "Tape Street, Cheadle Town Centre",
+        "seq": 62
+      },
+      {
+        "name": "Cheadle, opp Moor Lane",
+        "atco": "3800C823701",
+        "lat": 52.989908568,
+        "lng": -1.978119849,
+        "label": "Moor Lane, Cheadle Town Centre",
+        "seq": 63
+      },
+      {
+        "name": "Cheadle, adj Hales View Farm",
+        "atco": "3800C824101",
+        "lat": 52.991596664,
+        "lng": -1.969538049,
+        "label": "Hales View Farm, Cheadle",
+        "seq": 64
+      },
+      {
+        "name": "Greendale Lane (adj)",
+        "atco": "3800C837201",
+        "lat": 52.994778157,
+        "lng": -1.943075933,
+        "label": "Greendale Lane",
+        "seq": 65
+      },
+      {
+        "name": "Oakamoor, adj Churnet Bridge",
+        "atco": "3800C810900",
+        "lat": 53.001228663,
+        "lng": -1.920790773,
+        "label": "Churnet Bridge, Oakamoor",
+        "seq": 66
+      },
+      {
+        "name": "Cotton, opp Ramshorn Road",
+        "atco": "3800C805900",
+        "lat": 53.007472894,
+        "lng": -1.904132769,
+        "label": "Ramshorn Road, Cotton",
+        "seq": 67
+      },
+      {
+        "name": "Alton Towers, adj Farley Gates",
+        "atco": "3800C806500",
+        "lat": 52.993279981,
+        "lng": -1.894644241,
+        "label": "Alton Towers Hotel",
+        "seq": 68
+      },
+      {
+        "name": "Alton Towers Entrance (adj)",
+        "atco": "3800C800400",
+        "lat": 52.991550903,
+        "lng": -1.891132632,
+        "label": "Alton Towers Entrance",
+        "seq": 69
+      }
+    ],
+    "AT3": [
+      {
+        "name": "Bentilee, adj Twigg Street",
+        "atco": "3890D005501",
+        "lat": 53.019245163,
+        "lng": -2.139816593,
+        "label": "Twigg Street, Bentilee",
+        "seq": 0
+      },
+      {
+        "name": "Bentilee, opp Sundorne Place",
+        "atco": "3890D006601",
+        "lat": 53.018051583,
+        "lng": -2.13812828,
+        "label": "Sundorne Place, Bentilee",
+        "seq": 1
+      },
+      {
+        "name": "Bentilee, adj Latimer Way",
+        "atco": "3890D006701",
+        "lat": 53.016150842,
+        "lng": -2.13379947,
+        "label": "Latimer Way, Bentilee",
+        "seq": 2
+      },
+      {
+        "name": "Bentilee, adj Brassington Way",
+        "atco": "3890D006801",
+        "lat": 53.014212746,
+        "lng": -2.130603731,
+        "label": "Brassington Way, Bentilee",
+        "seq": 3
+      },
+      {
+        "name": "Bentilee, adj Devonshire Square",
+        "atco": "3890D006901",
+        "lat": 53.013198622,
+        "lng": -2.129095264,
+        "label": "Devonshire Square, Bentilee",
+        "seq": 4
+      },
+      {
+        "name": "Bentilee, adj Tyson Green",
+        "atco": "3890D007001",
+        "lat": 53.011017375,
+        "lng": -2.126197329,
+        "label": "Tyson Green, Bentilee",
+        "seq": 5
+      },
+      {
+        "name": "Bentilee, opp Croftfield Street",
+        "atco": "3890D007101",
+        "lat": 53.009006291,
+        "lng": -2.123836699,
+        "label": "Croftfield Street, Bentilee",
+        "seq": 6
+      },
+      {
+        "name": "Bentilee, adj Homestead Street",
+        "atco": "3890D007201",
+        "lat": 53.007687886,
+        "lng": -2.120926824,
+        "label": "Homestead Street, Bentilee",
+        "seq": 7
+      },
+      {
+        "name": "Bentilee, adj Cowley Way",
+        "atco": "3890D006501",
+        "lat": 53.00554832,
+        "lng": -2.121069855,
+        "label": "Cowley Way, Bentilee",
+        "seq": 8
+      },
+      {
+        "name": "Adderley Green, opp First bus depot",
+        "atco": "3890D004501",
+        "lat": 53.002178814,
+        "lng": -2.1196597,
+        "label": "First bus depot, Adderley Green",
+        "seq": 9
+      },
+      {
+        "name": "Adderley Green, opp Mossfield Road",
+        "atco": "3890D007301",
+        "lat": 52.998615978,
+        "lng": -2.122719212,
+        "label": "Mossfield Road, Adderley Green",
+        "seq": 10
+      },
+      {
+        "name": "Sandford Hill, adj St Mary's Road",
+        "atco": "3890D008501",
+        "lat": 52.996743652,
+        "lng": -2.125187172,
+        "label": "St Mary's Road, Sandford Hill",
+        "seq": 11
+      },
+      {
+        "name": "Sandford Hill, adj Somerton Way",
+        "atco": "3890D008601",
+        "lat": 52.994844771,
+        "lng": -2.12722278,
+        "label": "Somerton Way, Sandford Hill",
+        "seq": 12
+      },
+      {
+        "name": "Sandford Hill, adj Amison Street",
+        "atco": "3890D008701",
+        "lat": 52.992991141,
+        "lng": -2.128945487,
+        "label": "Amison Street, Sandford Hill",
+        "seq": 13
+      },
+      {
+        "name": "Sandford Hill, adj Forrister Street",
+        "atco": "3890D008801",
+        "lat": 52.991423535,
+        "lng": -2.130292801,
+        "label": "Forrister Street, Sandford Hill",
+        "seq": 14
+      },
+      {
+        "name": "Longton Police Station (opp)",
+        "atco": "3890D009201",
+        "lat": 52.988321431,
+        "lng": -2.132864196,
+        "label": "Longton Police Station",
+        "seq": 15
+      },
+      {
+        "name": "Longton, adj Landon Street",
+        "atco": "3890D009101",
+        "lat": 52.987120231,
+        "lng": -2.129836622,
+        "label": "Landon Street, Longton",
+        "seq": 16
+      },
+      {
+        "name": "Longton, adj Adderley Works",
+        "atco": "3890D009002",
+        "lat": 52.98625593,
+        "lng": -2.126825048,
+        "label": "Adderley Works, Longton",
+        "seq": 17
+      },
+      {
+        "name": "Meir Hay, opp Weston Coyney Road",
+        "atco": "3890D010001",
+        "lat": 52.985129607,
+        "lng": -2.123138877,
+        "label": "Weston Coyney Road, Meir Hay",
+        "seq": 18
+      },
+      {
+        "name": "Meir Hay, adj Tunnicliffe Close",
+        "atco": "3890D010102",
+        "lat": 52.985486031,
+        "lng": -2.11953899,
+        "label": "Tunnicliffe Close, Meir Hay",
+        "seq": 19
+      },
+      {
+        "name": "Meir Hay, adj Farnworth Road",
+        "atco": "3890D010202",
+        "lat": 52.98614535,
+        "lng": -2.116412732,
+        "label": "Farnworth Road, Meir Hay",
+        "seq": 20
+      },
+      {
+        "name": "Westonfields Drive (opp)",
+        "atco": "3890D010302",
+        "lat": 52.987389423,
+        "lng": -2.112721863,
+        "label": "Westonfields Drive, Weston Coyney",
+        "seq": 21
+      },
+      {
+        "name": "Weston Coyney, adj Westfield Lodge",
+        "atco": "3890D044602",
+        "lat": 52.988623076,
+        "lng": -2.108147747,
+        "label": "Westfield Lodge, Weston Coyney",
+        "seq": 22
+      },
+      {
+        "name": "Weston Coyney, adj Carberry Way",
+        "atco": "3890D010402",
+        "lat": 52.989662327,
+        "lng": -2.104385566,
+        "label": "Carberry Way, Weston Coyney",
+        "seq": 23
+      },
+      {
+        "name": "Weston Coyney, adj New Kingsway",
+        "atco": "3890D011501",
+        "lat": 52.989513146,
+        "lng": -2.100169416,
+        "label": "New Kingsway, Weston Coyney",
+        "seq": 24
+      },
+      {
+        "name": "Weston Coyney, opp Coyney Grove",
+        "atco": "3890D011601",
+        "lat": 52.986896857,
+        "lng": -2.100684704,
+        "label": "Coyney Grove, Weston Coyney",
+        "seq": 25
+      },
+      {
+        "name": "Meir, adj Penfleet Avenue",
+        "atco": "3890D011901",
+        "lat": 52.980154659,
+        "lng": -2.101041328,
+        "label": "Penfleet Avenue, Meir",
+        "seq": 26
+      },
+      {
+        "name": "Meir Heath, adj Grange Road",
+        "atco": "3800C727401",
+        "lat": 52.960860458,
+        "lng": -2.099567026,
+        "label": "Uttoxeter Road, Meir",
+        "seq": 27
+      },
+      {
+        "name": "Blythe Bridge, adj Tesco Roundabout",
+        "atco": "3800C731001",
+        "lat": 52.973248393,
+        "lng": -2.087146535,
+        "label": "Tesco Roundabout, Blythe Bridge",
+        "seq": 28
+      },
+      {
+        "name": "Blythe Bridge, adj Greenacres Avenue",
+        "atco": "3800C891001",
+        "lat": 52.972585324,
+        "lng": -2.084196787,
+        "label": "Greenacres Avenue, Blythe Bridge",
+        "seq": 29
+      },
+      {
+        "name": "Blythe Bridge, adj Adamthwaite Drive",
+        "atco": "3800C727701",
+        "lat": 52.97159923,
+        "lng": -2.080278631,
+        "label": "Adamthwaite Drive, Blythe Bridge",
+        "seq": 30
+      },
+      {
+        "name": "Blythe Bridge, opp Portland School",
+        "atco": "3800C728001",
+        "lat": 52.969653191,
+        "lng": -2.073142726,
+        "label": "Portland School, Blythe Bridge",
+        "seq": 31
+      },
+      {
+        "name": "Blythe Bridge, adj Grindley Lane",
+        "atco": "3800C728301",
+        "lat": 52.968683946,
+        "lng": -2.070520511,
+        "label": "Grindley Lane, Blythe Bridge",
+        "seq": 32
+      },
+      {
+        "name": "Blythe Bridge, adj Railway Station",
+        "atco": "3800C802700",
+        "lat": 52.967940401,
+        "lng": -2.066082266,
+        "label": "Railway Station, Blythe Bridge",
+        "seq": 33
+      },
+      {
+        "name": "Blythe Bridge Library (adj)",
+        "atco": "3800C863701",
+        "lat": 52.967016602,
+        "lng": -2.062224589,
+        "label": "Blythe Bridge Library",
+        "seq": 34
+      },
+      {
+        "name": "Blythe Bridge, opp High School",
+        "atco": "3800C802800",
+        "lat": 52.966981342,
+        "lng": -2.060884525,
+        "label": "High School, Blythe Bridge",
+        "seq": 35
+      },
+      {
+        "name": "Forsbrook, opp Bridgwood Road",
+        "atco": "3800C806900",
+        "lat": 52.97036383,
+        "lng": -2.055722401,
+        "label": "Bridgwood Road, Forsbrook",
+        "seq": 36
+      },
+      {
+        "name": "Boundary, adj Red Lion Inn",
+        "atco": "3800C803001",
+        "lat": 52.982077187,
+        "lng": -2.02965776,
+        "label": "Red Lion Inn, Boundary",
+        "seq": 37
+      },
+      {
+        "name": "Brookhouses, adj Brookhouse Road",
+        "atco": "3800C821401",
+        "lat": 52.983132473,
+        "lng": -2.006869777,
+        "label": "Brookhouse Road, Brookhouses",
+        "seq": 38
+      },
+      {
+        "name": "Brookhouses, opp Dilhorne Road",
+        "atco": "3800C823401",
+        "lat": 52.983905746,
+        "lng": -2.00135881,
+        "label": "Dilhorne Road, Brookhouses",
+        "seq": 39
+      },
+      {
+        "name": "Cheadle, opp Lid Lane",
+        "atco": "3800C823201",
+        "lat": 52.985164209,
+        "lng": -1.996845587,
+        "label": "Lid Lane, Cheadle",
+        "seq": 40
+      },
+      {
+        "name": "Cheadle, opp Cross Street",
+        "atco": "3800C804700",
+        "lat": 52.98660216,
+        "lng": -1.990559473,
+        "label": "Cross Street, Cheadle Town Centre",
+        "seq": 41
+      },
+      {
+        "name": "Cheadle, opp Greyhound Walk",
+        "atco": "3800C804701",
+        "lat": 52.987420054,
+        "lng": -1.989099486,
+        "label": "Greyhound Walk, Cheadle Town Centre",
+        "seq": 42
+      },
+      {
+        "name": "Cheadle, adj Tape Street",
+        "atco": "3800C823600",
+        "lat": 52.988201861,
+        "lng": -1.986581815,
+        "label": "Tape Street, Cheadle Town Centre",
+        "seq": 43
+      },
+      {
+        "name": "Cheadle, opp Moor Lane",
+        "atco": "3800C823701",
+        "lat": 52.989908568,
+        "lng": -1.978119849,
+        "label": "Moor Lane, Cheadle Town Centre",
+        "seq": 44
+      },
+      {
+        "name": "Cheadle, adj Hales View Farm",
+        "atco": "3800C824101",
+        "lat": 52.991596664,
+        "lng": -1.969538049,
+        "label": "Hales View Farm, Cheadle",
+        "seq": 45
+      },
+      {
+        "name": "Greendale Lane (adj)",
+        "atco": "3800C837201",
+        "lat": 52.994778157,
+        "lng": -1.943075933,
+        "label": "Greendale Lane",
+        "seq": 46
+      },
+      {
+        "name": "Oakamoor, adj Churnet Bridge",
+        "atco": "3800C810900",
+        "lat": 53.001228663,
+        "lng": -1.920790773,
+        "label": "Churnet Bridge, Oakamoor",
+        "seq": 47
+      },
+      {
+        "name": "Cotton, opp Ramshorn Road",
+        "atco": "3800C805900",
+        "lat": 53.007472894,
+        "lng": -1.904132769,
+        "label": "Ramshorn Road, Cotton",
+        "seq": 48
+      },
+      {
+        "name": "Alton Towers, adj Farley Gates",
+        "atco": "3800C806500",
+        "lat": 52.993279981,
+        "lng": -1.894644241,
+        "label": "Alton Towers Hotel",
+        "seq": 49
+      },
+      {
+        "name": "Alton Towers Entrance (adj)",
+        "atco": "3800C800400",
+        "lat": 52.991550903,
+        "lng": -1.891132632,
+        "label": "Alton Towers Entrance",
+        "seq": 50
+      }
+    ]
+  },
+  "stops": [
+    {
+      "name": "Fenton, opp Foley Place",
+      "atco": "3890D013201",
+      "lat": 52.99305645,
+      "lng": -2.142577359,
+      "label": "Foley Arms, Fenton",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Fenton, opp Royal Street",
+      "atco": "3890D013102",
+      "lat": 52.994776487,
+      "lng": -2.147395283,
+      "label": "Royal Street, Fenton",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Fenton, opp Duke Street",
+      "atco": "3890D013001",
+      "lat": 52.995806972,
+      "lng": -2.150006115,
+      "label": "Duke Street, Fenton",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Fenton, adj Victoria Place",
+      "atco": "3890D030501",
+      "lat": 52.999021559,
+      "lng": -2.159612917,
+      "label": "Victoria Place, Fenton",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Fenton, adj Travers Court",
+      "atco": "3890D037202",
+      "lat": 52.999757722,
+      "lng": -2.166842291,
+      "label": "Travers Court, Fenton",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Fenton, adj Smithpool Road",
+      "atco": "3890D037102",
+      "lat": 53.000311737,
+      "lng": -2.16918381,
+      "label": "Smithpool Road, Fenton",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Fenton Manor (adj)",
+      "atco": "3890D037001",
+      "lat": 53.000991554,
+      "lng": -2.171525889,
+      "label": "Fenton Manor",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Stoke-upon-Trent, opp Hancock Street",
+      "atco": "3890D031302",
+      "lat": 53.006032979,
+      "lng": -2.178639485,
+      "label": "Hancock Street, Stoke-upon-Trent",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Joiners Square, adj Leek Road",
+      "atco": "3890D029901",
+      "lat": 53.016482532,
+      "lng": -2.169679427,
+      "label": "Leek Road, Joiners Square",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Hanley, adj Clifford Street",
+      "atco": "3890D029802",
+      "lat": 53.018844676,
+      "lng": -2.17107505,
+      "label": "Clifford Street, Hanley",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Hanley Stafford Street (stop S1)",
+      "atco": "3890D000201",
+      "lat": 53.026566951,
+      "lng": -2.1768011,
+      "label": "Bernard Street, Hanley",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Hanley bus station (arrivals)",
+      "atco": "3890D000100",
+      "lat": 53.022534073,
+      "lng": -2.174607994,
+      "label": "stop B 3, Hanley",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Hanley, adj St Ann Street",
+      "atco": "3890D003101",
+      "lat": 53.025493114,
+      "lng": -2.167239913,
+      "label": "St Ann Street, Hanley",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Hanley, adj Somerset Road",
+      "atco": "3890D003201",
+      "lat": 53.025273577,
+      "lng": -2.163511785,
+      "label": "Somerset Road, Hanley",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Hanley, opp Ivy House Road",
+      "atco": "3890D003301",
+      "lat": 53.024910378,
+      "lng": -2.159574438,
+      "label": "Ivy House Road, Hanley",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Bucknall, adj New Finney Gardens",
+      "atco": "3890D003401",
+      "lat": 53.023344204,
+      "lng": -2.154335785,
+      "label": "New Finney Gardens, Bucknall",
+      "lines": [
+        "AT1",
+        "AT2"
+      ]
+    },
+    {
+      "name": "Bucknall, opp Trent Bridge",
+      "atco": "3890D027401",
+      "lat": 53.023267785,
+      "lng": -2.150846942,
+      "label": "Trent Bridge, Bucknall",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Bucknall, adj Northfleet Street",
+      "atco": "3890D027501",
+      "lat": 53.023828432,
+      "lng": -2.148210077,
+      "label": "Northfleet Street, Bucknall",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Bucknall, adj Central Avenue",
+      "atco": "3890D027601",
+      "lat": 53.025237704,
+      "lng": -2.142519642,
+      "label": "Central Avenue, Bucknall",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Bucknall, adj Chapel Street",
+      "atco": "3890D027701",
+      "lat": 53.025288072,
+      "lng": -2.136805868,
+      "label": "Chapel Street, Bucknall",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Townsend, adj Eaves Lane",
+      "atco": "3890D027801",
+      "lat": 53.024871282,
+      "lng": -2.132931967,
+      "label": "Eaves Lane, Townsend",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Townsend, adj Jessica Grove",
+      "atco": "3890D027901",
+      "lat": 53.022837156,
+      "lng": -2.127081662,
+      "label": "Jessica Grove, Townsend",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Townsend, adj Brookhouse Lane",
+      "atco": "3890D028001",
+      "lat": 53.022300433,
+      "lng": -2.124605341,
+      "label": "Brookhouse Lane, Townsend",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Ash Bank, adj Green's Lane",
+      "atco": "3800C860901",
+      "lat": 53.021122576,
+      "lng": -2.120427739,
+      "label": "Green's Lane, Ash Bank",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Ash Bank, adj No. 101",
+      "atco": "3800C860801",
+      "lat": 53.021145401,
+      "lng": -2.115552991,
+      "label": "No. 101, Ash Bank",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Ash Bank, adj New Road",
+      "atco": "3800C863801",
+      "lat": 53.020951112,
+      "lng": -2.111929921,
+      "label": "New Road, Ash Bank",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "The Ash Bank (opp)",
+      "atco": "3800C860601",
+      "lat": 53.021621822,
+      "lng": -2.1059238,
+      "label": "Ash Bank Hotel",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Werrington, opp Clough Lane",
+      "atco": "3800C815500",
+      "lat": 53.0212934,
+      "lng": -2.101137613,
+      "label": "Clough Lane, Werrington",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Werrington, adj Washerwall Lane",
+      "atco": "3800C860401",
+      "lat": 53.02307959,
+      "lng": -2.09340437,
+      "label": "Washerwall Lane, Werrington",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Werrington, adj Johnstone Avenue",
+      "atco": "3800C813600",
+      "lat": 53.024566733,
+      "lng": -2.088264036,
+      "label": "Johnstone Avenue, Werrington",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Werrington, adj Rownall Road",
+      "atco": "3800C814500",
+      "lat": 53.026756889,
+      "lng": -2.080098054,
+      "label": "Rownall Road, Werrington",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Cellarhead, opp Southlowe Road",
+      "atco": "3800C860101",
+      "lat": 53.026588995,
+      "lng": -2.075684514,
+      "label": "Southlowe Road, Cellarhead",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Cellarhead, adj Moorside High School",
+      "atco": "3800C815100",
+      "lat": 53.026062401,
+      "lng": -2.069540929,
+      "label": "Moorside High School, Cellarhead",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Cellarhead, adj Crossroads",
+      "atco": "3800C804500",
+      "lat": 53.025417937,
+      "lng": -2.064679507,
+      "label": "Crossroads, Cellarhead",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Cellarhead, opp March Lane",
+      "atco": "3800C854201",
+      "lat": 53.023712588,
+      "lng": -2.059757121,
+      "label": "March Lane, Cellarhead",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Cellarhead, adj New Park Farm",
+      "atco": "3800C825701",
+      "lat": 53.022582993,
+      "lng": -2.053404674,
+      "label": "New Park Farm, Cellarhead",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Blakeley Lane, opp Cheadle Road",
+      "atco": "3800C854302",
+      "lat": 53.021374375,
+      "lng": -2.041104279,
+      "label": "Cheadle Road, Blakeley Lane",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Blakeley Lane, opp East View",
+      "atco": "3800C838400",
+      "lat": 53.020135602,
+      "lng": -2.035796086,
+      "label": "East View, Blakeley Lane",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Kingsley Moor, opp Broad Oak Lane",
+      "atco": "3800C838500",
+      "lat": 53.017962767,
+      "lng": -2.026134814,
+      "label": "Broad Oak Lane, Kingsley Moor",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Kingsley Moor, opp Harveys Lane",
+      "atco": "3800C824301",
+      "lat": 53.016634661,
+      "lng": -2.012107348,
+      "label": "Harveys Lane, Kingsley Moor",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Kingsley Moor, adj Hollins Lane",
+      "atco": "3800C838701",
+      "lat": 53.018810336,
+      "lng": -2.008724111,
+      "label": "Hollins Lane, Kingsley Moor",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Kingsley, opp Johnson Crescent",
+      "atco": "3800C838801",
+      "lat": 53.020185379,
+      "lng": -1.987451622,
+      "label": "Johnson Crescent, Kingsley",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Froghall Road (opp)",
+      "atco": "3800C807300",
+      "lat": 53.022949099,
+      "lng": -1.963344126,
+      "label": "Froghall Road",
+      "lines": [
+        "AT1"
+      ]
+    },
+    {
+      "name": "Cotton, opp Ramshorn Road",
+      "atco": "3800C805900",
+      "lat": 53.007472894,
+      "lng": -1.904132769,
+      "label": "Ramshorn Road, Cotton",
+      "lines": [
+        "AT1",
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Alton Towers, adj Farley Gates",
+      "atco": "3800C806500",
+      "lat": 52.993279981,
+      "lng": -1.894644241,
+      "label": "Alton Towers Hotel",
+      "lines": [
+        "AT1",
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Alton Towers Entrance (adj)",
+      "atco": "3800C800400",
+      "lat": 52.991550903,
+      "lng": -1.891132632,
+      "label": "Alton Towers Entrance",
+      "lines": [
+        "AT1",
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Bucknall, adj Christine Street",
+      "atco": "3890D003501",
+      "lat": 53.021821239,
+      "lng": -2.150290295,
+      "label": "Christine Street, Bucknall",
+      "lines": [
+        "AT2"
+      ]
+    },
+    {
+      "name": "Bucknall, opp Trent Tavern",
+      "atco": "3890D003601",
+      "lat": 53.020610297,
+      "lng": -2.148228844,
+      "label": "Trent Tavern, Bucknall",
+      "lines": [
+        "AT2"
+      ]
+    },
+    {
+      "name": "Bucknall, adj Foundry Lane",
+      "atco": "3890D003701",
+      "lat": 53.020022695,
+      "lng": -2.143605565,
+      "label": "Foundry Lane, Bucknall",
+      "lines": [
+        "AT2"
+      ]
+    },
+    {
+      "name": "Bentilee, adj Twigg Street",
+      "atco": "3890D005501",
+      "lat": 53.019245163,
+      "lng": -2.139816593,
+      "label": "Twigg Street, Bentilee",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Bentilee, opp Sundorne Place",
+      "atco": "3890D006601",
+      "lat": 53.018051583,
+      "lng": -2.13812828,
+      "label": "Sundorne Place, Bentilee",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Bentilee, adj Latimer Way",
+      "atco": "3890D006701",
+      "lat": 53.016150842,
+      "lng": -2.13379947,
+      "label": "Latimer Way, Bentilee",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Bentilee, adj Brassington Way",
+      "atco": "3890D006801",
+      "lat": 53.014212746,
+      "lng": -2.130603731,
+      "label": "Brassington Way, Bentilee",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Bentilee, adj Devonshire Square",
+      "atco": "3890D006901",
+      "lat": 53.013198622,
+      "lng": -2.129095264,
+      "label": "Devonshire Square, Bentilee",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Bentilee, adj Tyson Green",
+      "atco": "3890D007001",
+      "lat": 53.011017375,
+      "lng": -2.126197329,
+      "label": "Tyson Green, Bentilee",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Bentilee, opp Croftfield Street",
+      "atco": "3890D007101",
+      "lat": 53.009006291,
+      "lng": -2.123836699,
+      "label": "Croftfield Street, Bentilee",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Bentilee, adj Homestead Street",
+      "atco": "3890D007201",
+      "lat": 53.007687886,
+      "lng": -2.120926824,
+      "label": "Homestead Street, Bentilee",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Bentilee, adj Cowley Way",
+      "atco": "3890D006501",
+      "lat": 53.00554832,
+      "lng": -2.121069855,
+      "label": "Cowley Way, Bentilee",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Adderley Green, opp First bus depot",
+      "atco": "3890D004501",
+      "lat": 53.002178814,
+      "lng": -2.1196597,
+      "label": "First bus depot, Adderley Green",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Adderley Green, opp Mossfield Road",
+      "atco": "3890D007301",
+      "lat": 52.998615978,
+      "lng": -2.122719212,
+      "label": "Mossfield Road, Adderley Green",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Sandford Hill, adj St Mary's Road",
+      "atco": "3890D008501",
+      "lat": 52.996743652,
+      "lng": -2.125187172,
+      "label": "St Mary's Road, Sandford Hill",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Sandford Hill, adj Somerton Way",
+      "atco": "3890D008601",
+      "lat": 52.994844771,
+      "lng": -2.12722278,
+      "label": "Somerton Way, Sandford Hill",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Sandford Hill, adj Amison Street",
+      "atco": "3890D008701",
+      "lat": 52.992991141,
+      "lng": -2.128945487,
+      "label": "Amison Street, Sandford Hill",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Sandford Hill, adj Forrister Street",
+      "atco": "3890D008801",
+      "lat": 52.991423535,
+      "lng": -2.130292801,
+      "label": "Forrister Street, Sandford Hill",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Longton Police Station (opp)",
+      "atco": "3890D009201",
+      "lat": 52.988321431,
+      "lng": -2.132864196,
+      "label": "Longton Police Station",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Longton, adj Landon Street",
+      "atco": "3890D009101",
+      "lat": 52.987120231,
+      "lng": -2.129836622,
+      "label": "Landon Street, Longton",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Longton, adj Adderley Works",
+      "atco": "3890D009002",
+      "lat": 52.98625593,
+      "lng": -2.126825048,
+      "label": "Adderley Works, Longton",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Meir Hay, opp Weston Coyney Road",
+      "atco": "3890D010001",
+      "lat": 52.985129607,
+      "lng": -2.123138877,
+      "label": "Weston Coyney Road, Meir Hay",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Meir Hay, adj Tunnicliffe Close",
+      "atco": "3890D010102",
+      "lat": 52.985486031,
+      "lng": -2.11953899,
+      "label": "Tunnicliffe Close, Meir Hay",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Meir Hay, adj Farnworth Road",
+      "atco": "3890D010202",
+      "lat": 52.98614535,
+      "lng": -2.116412732,
+      "label": "Farnworth Road, Meir Hay",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Westonfields Drive (opp)",
+      "atco": "3890D010302",
+      "lat": 52.987389423,
+      "lng": -2.112721863,
+      "label": "Westonfields Drive, Weston Coyney",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Weston Coyney, adj Westfield Lodge",
+      "atco": "3890D044602",
+      "lat": 52.988623076,
+      "lng": -2.108147747,
+      "label": "Westfield Lodge, Weston Coyney",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Weston Coyney, adj Carberry Way",
+      "atco": "3890D010402",
+      "lat": 52.989662327,
+      "lng": -2.104385566,
+      "label": "Carberry Way, Weston Coyney",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Weston Coyney, adj New Kingsway",
+      "atco": "3890D011501",
+      "lat": 52.989513146,
+      "lng": -2.100169416,
+      "label": "New Kingsway, Weston Coyney",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Weston Coyney, opp Coyney Grove",
+      "atco": "3890D011601",
+      "lat": 52.986896857,
+      "lng": -2.100684704,
+      "label": "Coyney Grove, Weston Coyney",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Meir, adj Penfleet Avenue",
+      "atco": "3890D011901",
+      "lat": 52.980154659,
+      "lng": -2.101041328,
+      "label": "Penfleet Avenue, Meir",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Meir Heath, adj Grange Road",
+      "atco": "3800C727401",
+      "lat": 52.960860458,
+      "lng": -2.099567026,
+      "label": "Uttoxeter Road, Meir",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Blythe Bridge, adj Tesco Roundabout",
+      "atco": "3800C731001",
+      "lat": 52.973248393,
+      "lng": -2.087146535,
+      "label": "Tesco Roundabout, Blythe Bridge",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Blythe Bridge, adj Greenacres Avenue",
+      "atco": "3800C891001",
+      "lat": 52.972585324,
+      "lng": -2.084196787,
+      "label": "Greenacres Avenue, Blythe Bridge",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Blythe Bridge, adj Adamthwaite Drive",
+      "atco": "3800C727701",
+      "lat": 52.97159923,
+      "lng": -2.080278631,
+      "label": "Adamthwaite Drive, Blythe Bridge",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Blythe Bridge, opp Portland School",
+      "atco": "3800C728001",
+      "lat": 52.969653191,
+      "lng": -2.073142726,
+      "label": "Portland School, Blythe Bridge",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Blythe Bridge, adj Grindley Lane",
+      "atco": "3800C728301",
+      "lat": 52.968683946,
+      "lng": -2.070520511,
+      "label": "Grindley Lane, Blythe Bridge",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Blythe Bridge, adj Railway Station",
+      "atco": "3800C802700",
+      "lat": 52.967940401,
+      "lng": -2.066082266,
+      "label": "Railway Station, Blythe Bridge",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Blythe Bridge Library (adj)",
+      "atco": "3800C863701",
+      "lat": 52.967016602,
+      "lng": -2.062224589,
+      "label": "Blythe Bridge Library",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Blythe Bridge, opp High School",
+      "atco": "3800C802800",
+      "lat": 52.966981342,
+      "lng": -2.060884525,
+      "label": "High School, Blythe Bridge",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Forsbrook, opp Bridgwood Road",
+      "atco": "3800C806900",
+      "lat": 52.97036383,
+      "lng": -2.055722401,
+      "label": "Bridgwood Road, Forsbrook",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Boundary, adj Red Lion Inn",
+      "atco": "3800C803001",
+      "lat": 52.982077187,
+      "lng": -2.02965776,
+      "label": "Red Lion Inn, Boundary",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Brookhouses, adj Brookhouse Road",
+      "atco": "3800C821401",
+      "lat": 52.983132473,
+      "lng": -2.006869777,
+      "label": "Brookhouse Road, Brookhouses",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Brookhouses, opp Dilhorne Road",
+      "atco": "3800C823401",
+      "lat": 52.983905746,
+      "lng": -2.00135881,
+      "label": "Dilhorne Road, Brookhouses",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Cheadle, opp Lid Lane",
+      "atco": "3800C823201",
+      "lat": 52.985164209,
+      "lng": -1.996845587,
+      "label": "Lid Lane, Cheadle",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Cheadle, opp Cross Street",
+      "atco": "3800C804700",
+      "lat": 52.98660216,
+      "lng": -1.990559473,
+      "label": "Cross Street, Cheadle Town Centre",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Cheadle, opp Greyhound Walk",
+      "atco": "3800C804701",
+      "lat": 52.987420054,
+      "lng": -1.989099486,
+      "label": "Greyhound Walk, Cheadle Town Centre",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Cheadle, adj Tape Street",
+      "atco": "3800C823600",
+      "lat": 52.988201861,
+      "lng": -1.986581815,
+      "label": "Tape Street, Cheadle Town Centre",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Cheadle, opp Moor Lane",
+      "atco": "3800C823701",
+      "lat": 52.989908568,
+      "lng": -1.978119849,
+      "label": "Moor Lane, Cheadle Town Centre",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Cheadle, adj Hales View Farm",
+      "atco": "3800C824101",
+      "lat": 52.991596664,
+      "lng": -1.969538049,
+      "label": "Hales View Farm, Cheadle",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Greendale Lane (adj)",
+      "atco": "3800C837201",
+      "lat": 52.994778157,
+      "lng": -1.943075933,
+      "label": "Greendale Lane",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    },
+    {
+      "name": "Oakamoor, adj Churnet Bridge",
+      "atco": "3800C810900",
+      "lat": 53.001228663,
+      "lng": -1.920790773,
+      "label": "Churnet Bridge, Oakamoor",
+      "lines": [
+        "AT2",
+        "AT3"
+      ]
+    }
+  ]
+}

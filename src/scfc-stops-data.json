@@ -1,0 +1,162 @@
+{
+  "generatedAt": "2026-09-19T15:30:00.000Z",
+  "note": "First Potteries BS1–BS2 Stoke City FC matchday shuttles. Times from firstbus.co.uk (relative to kick-off). Stops matched to Bustimes NaPTAN.",
+  "routes": {
+    "BS1": [
+      {
+        "name": "Stoke-upon-Trent, adj Glebe Street",
+        "atco": "3890D002001",
+        "lat": 53.003888091,
+        "lng": -2.18223684,
+        "label": "Glebe Street, Stoke",
+        "seq": 0,
+        "role": "origin"
+      },
+      {
+        "name": "Trentham Lakes, adj bet365 Stadium",
+        "atco": "3890D041804",
+        "lat": 52.987648412,
+        "lng": -2.173722266,
+        "label": "bet365 Stadium",
+        "seq": 1,
+        "role": "destination"
+      }
+    ],
+    "BS2": [
+      {
+        "name": "Hanley bus station (stand S)",
+        "atco": "3890D000119",
+        "lat": 53.022030333,
+        "lng": -2.174844485,
+        "label": "Hanley Bus Station",
+        "seq": 0,
+        "role": "origin"
+      },
+      {
+        "name": "Trentham Lakes, adj bet365 Stadium",
+        "atco": "3890D041804",
+        "lat": 52.987648412,
+        "lng": -2.173722266,
+        "label": "bet365 Stadium",
+        "seq": 1,
+        "role": "destination"
+      }
+    ]
+  },
+  "stops": [
+    {
+      "name": "Stoke-upon-Trent, adj Glebe Street",
+      "atco": "3890D002001",
+      "lat": 53.003888091,
+      "lng": -2.18223684,
+      "label": "Glebe Street, Stoke",
+      "lines": ["BS1", "B1"]
+    },
+    {
+      "name": "Hanley bus station (stand S)",
+      "atco": "3890D000119",
+      "lat": 53.022030333,
+      "lng": -2.174844485,
+      "label": "Hanley Bus Station",
+      "lines": ["BS2", "B2"]
+    },
+    {
+      "name": "Hanley bus station (arrivals)",
+      "atco": "3890D000100",
+      "lat": 53.022534073,
+      "lng": -2.174607994,
+      "label": "Hanley Bus Station",
+      "lines": ["BS2", "B2"]
+    },
+    {
+      "name": "Trentham Lakes, adj bet365 Stadium",
+      "atco": "3890D041804",
+      "lat": 52.987648412,
+      "lng": -2.173722266,
+      "label": "bet365 Stadium",
+      "lines": ["BS1", "BS2", "B1", "B2"]
+    },
+    {
+      "name": "Trentham Lakes, opp bet365 Stadium",
+      "atco": "3890D041801",
+      "lat": 52.987414869,
+      "lng": -2.173602159,
+      "label": "bet365 Stadium",
+      "lines": ["BS1", "BS2", "B1", "B2"]
+    }
+  ],
+  "timetables": {
+    "BS1": {
+      "title": "Stoke (Glebe Street) ↔ bet365 Stadium",
+      "summary": "Every ~5 mins from 90 minutes before kick-off. After full time until fans are boarded.",
+      "outbound": {
+        "from": "Glebe Street",
+        "to": "bet365 Stadium",
+        "pattern": "every_5_from_ko_minus",
+        "startOffsetMin": -90,
+        "endOffsetMin": -5,
+        "intervalMin": 5
+      },
+      "inbound": {
+        "from": "bet365 Stadium",
+        "to": "Glebe Street",
+        "pattern": "every_5_from_ko_plus",
+        "startOffsetMin": 105,
+        "endOffsetMin": 150,
+        "intervalMin": 5,
+        "note": "From full time (~KO+105) until demand is cleared"
+      },
+      "examples": [
+        {
+          "kickOff": "12:30",
+          "outbound": ["11:00", "11:05", "11:10", "… every 5 mins …", "12:25"],
+          "inbound": ["from ~14:15"]
+        },
+        {
+          "kickOff": "15:00",
+          "outbound": ["13:30", "13:35", "13:40", "… every 5 mins …", "14:55"],
+          "inbound": ["from ~16:45"]
+        },
+        {
+          "kickOff": "19:45",
+          "outbound": ["18:15", "18:20", "18:25", "… every 5 mins …", "19:40"],
+          "inbound": ["from ~21:30"]
+        }
+      ]
+    },
+    "BS2": {
+      "title": "Hanley Bus Station → bet365 Stadium",
+      "summary": "Two fixed departures before kick-off from Hanley Bus Station; return after the match.",
+      "outbound": {
+        "from": "Hanley Bus Station",
+        "to": "bet365 Stadium",
+        "pattern": "fixed_offsets",
+        "offsetsMin": [-120, -70]
+      },
+      "inbound": {
+        "from": "bet365 Stadium",
+        "to": "Hanley Bus Station",
+        "pattern": "fixed_offsets",
+        "offsetsMin": [125],
+        "note": "Published return for a 15:00 kick-off is 17:05"
+      },
+      "examples": [
+        {
+          "kickOff": "12:30",
+          "outbound": ["10:30", "11:20"],
+          "inbound": ["~14:35"]
+        },
+        {
+          "kickOff": "15:00",
+          "outbound": ["13:00", "13:50"],
+          "inbound": ["17:05"]
+        },
+        {
+          "kickOff": "19:45",
+          "outbound": ["17:45", "18:35"],
+          "inbound": ["~21:50"]
+        }
+      ]
+    }
+  }
+}
