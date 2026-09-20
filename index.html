@@ -89,12 +89,19 @@
         </label>
         <button type="button" id="account-btn" class="account-btn">Account</button>
         <button type="button" id="plus-btn" class="plus-btn" aria-pressed="false">Go Plus</button>
+        <button type="button" id="alerts-btn" class="alerts-btn" aria-pressed="false" aria-controls="alerts-panel">
+          Alerts
+          <span id="alerts-badge" class="alerts-badge" hidden>0</span>
+        </button>
         <button type="button" id="follow-chip" class="follow-chip" hidden></button>
         <div id="playback-bar" class="playback-bar" hidden>
           <span id="playback-label" class="playback-label"></span>
           <button type="button" id="playback-stop" class="playback-btn">Clear</button>
         </div>
-        <time id="uk-clock" datetime="" aria-live="polite"></time>
+        <div class="uk-clock-stack">
+          <time id="uk-clock" datetime="" aria-live="polite"></time>
+          <p id="live-bus-count" class="live-bus-count" aria-live="polite"></p>
+        </div>
         <p id="message" class="message" hidden></p>
       </header>
       <main class="map-wrap" data-view="map">
@@ -110,13 +117,36 @@
           </ol>
           <button type="button" id="map-welcome-gotit" class="map-welcome-gotit">Got it</button>
         </aside>
-        <aside id="maintenance-banner" class="maintenance-banner" hidden role="status" aria-live="polite">
-          <p class="maintenance-kicker">Scheduled maintenance</p>
-          <p class="maintenance-title">We’re updating the tracker</p>
-          <p class="maintenance-lead">
-            Live map work is underway from <strong>21:30–22:00</strong> UK time. Some buses or features may briefly lag or go offline.
-          </p>
-          <p class="maintenance-time" id="maintenance-window">21:30 – 22:00 UK</p>
+        <aside id="road-notice-alert" class="road-notice-alert" hidden role="dialog" aria-labelledby="road-notice-alert-title" aria-modal="true">
+          <button type="button" class="road-notice-alert-close" data-road-alert-close aria-label="Dismiss">×</button>
+          <p class="road-notice-alert-kicker">Service notice</p>
+          <p id="road-notice-alert-title" class="road-notice-alert-title" data-road-alert-title>Road closing · Longton</p>
+          <p class="road-notice-alert-body" data-road-alert-body></p>
+          <div class="road-notice-alert-actions">
+            <button type="button" class="road-notice-alert-map" data-road-alert-map>Show on map</button>
+            <button type="button" class="road-notice-alert-gotit" data-road-alert-close>Got it</button>
+          </div>
+        </aside>
+        <aside id="control-room-alert" class="control-room-alert" hidden role="dialog" aria-labelledby="control-room-alert-title" aria-modal="true">
+          <button type="button" class="control-room-alert-close" data-control-alert-close aria-label="Dismiss">×</button>
+          <p class="control-room-alert-kicker">Control room</p>
+          <p id="control-room-alert-title" class="control-room-alert-title"></p>
+          <p class="control-room-alert-body" data-control-alert-body></p>
+          <div class="control-room-alert-actions">
+            <button type="button" class="control-room-alert-all" data-control-alert-all>All alerts</button>
+            <button type="button" class="control-room-alert-gotit" data-control-alert-close>Got it</button>
+          </div>
+        </aside>
+        <aside id="alerts-panel" class="alerts-panel" hidden aria-label="Stoke-on-Trent service alerts">
+          <header class="alerts-panel-head">
+            <div>
+              <p class="alerts-panel-kicker">Stoke-on-Trent</p>
+              <h2 class="alerts-panel-title">Service alerts</h2>
+            </div>
+            <button type="button" id="alerts-panel-close" class="alerts-panel-close" aria-label="Close alerts">×</button>
+          </header>
+          <p class="alerts-panel-note">Control-room messages plus public updates from First Potteries and D&amp;G Bus for the Stoke area.</p>
+          <div id="alerts-panel-list" class="alerts-panel-list"></div>
         </aside>
         <section id="fleet-panel" class="fleet-panel" hidden aria-label="Staffordshire fleet" data-fleet-tab="fleet">
           <div class="fleet-toolbar">
@@ -250,6 +280,20 @@
         <div data-auth-logged-in hidden>
           <p class="plus-dialog-lead">Signed in as <strong data-auth-email></strong></p>
           <p class="plus-dialog-lead">Use the same email and password on another phone or computer to keep Plus with you.</p>
+          <details class="auth-reset" data-auth-reset>
+            <summary>Reset password</summary>
+            <form data-auth-change-password class="auth-form auth-reset-form">
+              <label class="auth-label" for="auth-current-password">Current password</label>
+              <input id="auth-current-password" name="currentPassword" type="password" autocomplete="current-password" required minlength="8" />
+              <label class="auth-label" for="auth-new-password">New password</label>
+              <input id="auth-new-password" name="newPassword" type="password" autocomplete="new-password" required minlength="8" placeholder="At least 8 characters" />
+              <label class="auth-label" for="auth-confirm-password">Confirm new password</label>
+              <input id="auth-confirm-password" name="confirmPassword" type="password" autocomplete="new-password" required minlength="8" />
+              <button type="submit" class="plus-checkout-btn" data-auth-change-submit>Update password</button>
+              <p class="plus-error" data-auth-change-error hidden></p>
+              <p class="plus-dialog-lead auth-reset-ok" data-auth-change-ok hidden>Password updated.</p>
+            </form>
+          </details>
           <button type="button" class="plus-checkout-btn" data-auth-logout>Log out</button>
           <button type="button" class="plus-cancel-btn" data-auth-cancel-plus hidden>Cancel Plus</button>
           <button type="button" class="plus-later" data-auth-close>Close</button>

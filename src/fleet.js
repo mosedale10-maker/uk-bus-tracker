@@ -33,7 +33,7 @@ export const STAFFS_OPERATORS = [
   { name: "Evolve Bus & Coach", slug: "evolve-bus-coach", noc: "EVOL", kind: "private-hire" },
   { name: "First Potteries", slug: "first-potteries", noc: "FPOT", note: "Includes BS1–BS2 Stoke City FC matchday shuttles" },
   { name: "Flexibus", slug: "flexibus", noc: null },
-  { name: "FlixBus", slug: "flixbus", noc: "FLIX", note: "UK + Europe coaches · live on map" },
+  { name: "FlixBus", slug: "flixbus", noc: "FLIX", note: "UK + Europe coaches · routes, timetables & live map" },
   { name: "High Peak", slug: "high-peak", noc: "HIPK" },
   { name: "Hotspur", slug: "hotspur", noc: "HOTS" },
   {
@@ -44,7 +44,7 @@ export const STAFFS_OPERATORS = [
     website: "https://www.leonsholidays.co.uk/",
     note: "Coach holidays & private hire · Stafford",
   },
-  { name: "National Express", slug: "national-express", noc: "NATX" },
+  { name: "National Express", slug: "national-express", noc: "NATX", note: "Coach routes · timetables & live map" },
   { name: "National Express West Midlands", slug: "national-express-west-midlands", noc: "TNXB" },
   { name: "Scraggs", slug: "scraggs-taxis-and-coaches", noc: "SCRT", kind: "private-hire" },
   {
@@ -71,6 +71,20 @@ export const STAFFS_OPERATORS = [
   { name: "Walsall Community Transport", slug: "walsall-community-transport", noc: "WACT" },
 ].sort((a, b) => a.name.localeCompare(b.name, "en-GB"));
 
+/** Operators where Map shows only that one bus + route (server-recorded tails). */
+const SINGLE_VEHICLE_ROUTE_NOCS = new Set(["FLIX", "NATX", "DAGC", "FPOT", "SOST"]);
+
+/** Operators that show a full route catalogue + timetable in fleet. */
+const ROUTE_CATALOGUE_NOCS = new Set(["DAGC", "FPOT", "SOST", "FLIX", "NATX"]);
+
+function isSingleVehicleRouteOperator(noc) {
+  return SINGLE_VEHICLE_ROUTE_NOCS.has(String(noc || "").trim().toUpperCase());
+}
+
+function isRouteCatalogueOperator(noc) {
+  return ROUTE_CATALOGUE_NOCS.has(String(noc || "").trim().toUpperCase());
+}
+
 /** Private-hire / coach operators that publish public AVL (fleet history + GPS tails). */
 export const TRACKED_HIRE_NOCS = new Set(
   STAFFS_OPERATORS.filter((op) => op.kind === "private-hire" && op.noc).map((op) => op.noc),
@@ -82,21 +96,21 @@ export const AT_ROUTES = [
     name: "Alton Towers employee-only AT1",
     origin: "Fenton",
     destination: "Alton Towers",
-    note: "Stops on map · timetable via D&G / line manager",
+    note: "Via Stoke, Hanley · D&G timetable",
   },
   {
     line: "AT2",
     name: "Alton Towers employee-only AT2",
     origin: "Fenton",
     destination: "Alton Towers",
-    note: "Via Bentilee, Longton, Meir, Cheadle",
+    note: "Via Bentilee, Longton, Meir, Cheadle · D&G timetable",
   },
   {
     line: "AT3",
     name: "Alton Towers employee-only AT3",
     origin: "Bentilee",
     destination: "Alton Towers",
-    note: "Via Longton, Meir, Cheadle",
+    note: "Via Longton, Meir, Cheadle · D&G timetable",
   },
 ];
 
@@ -125,7 +139,9 @@ export const STAFFS_SCHOOL_ROUTES = [
   { line: "14", name: "Newborough – John Taylor High School", operator: "South Staffs Coach Hire", noc: "LATR" },
 ].sort((a, b) => a.line.localeCompare(b.line, "en-GB", { numeric: true }));
 
-export const SCHOOL_LINE_SET = new Set(STAFFS_SCHOOL_ROUTES.map((row) => row.line));
+export const SCHOOL_LINE_SET = new Set(
+  STAFFS_SCHOOL_ROUTES.map((row) => String(row.line || "").toUpperCase()),
+);
 
 /** First Potteries matchday shuttles to bet365 Stadium (Stoke City FC). */
 export const STOKE_FC_SHUTTLE_ROUTES = [
@@ -278,8 +294,29 @@ function formatTrackedDate(value) {
   });
 }
 
+function formatTrackedTime(value) {
+  if (!value || (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value))) return "";
+  const d = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(d.getTime())) return "";
+  return d.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: UK_TZ,
+  });
+}
+
+function formatTrackedWhen(info) {
+  const raw = info?.trackedAt || info?.date || "";
+  if (!raw) return "";
+  const day = formatTrackedDate(raw);
+  const time = formatTrackedTime(info?.trackedAt || "");
+  if (day && time) return `${day} · ${time}`;
+  return time || day;
+}
+
 function lastTrackedHtml(info) {
-  const label = formatTrackedDate(info?.trackedAt || info?.date);
+  const label = formatTrackedWhen(info);
   if (!label) return "";
   return `<span class="fleet-last-tracked" title="Last tracked">${esc(label)}</span>`;
 }
@@ -308,7 +345,7 @@ function routeNumberBtn(line, { className = "" } = {}) {
 }
 
 function vehicleMainHtml(v) {
-  return `<span class="fleet-list-main">${esc(v.fleet_code || v.fleet_number || "—")} ${plateHtml(v.reg)}${lastTrackedHtml(v.lastRoute)}${lastRouteHtml(v.lastRoute)}</span>`;
+  return `<span class="fleet-list-main">${esc(v.fleet_code || v.fleet_number || "—")} ${plateHtml(v.reg)}${lastRouteHtml(v.lastRoute)}${lastTrackedHtml(v.lastRoute)}</span>`;
 }
 
 const lastRouteCache = new Map();
@@ -381,18 +418,23 @@ let schoolLiveCache = { at: 0, byLine: new Map(), meta: new Map(), vehicles: [] 
 let matchdayLiveCache = { at: 0, byLine: new Map(), meta: new Map(), vehicles: [] };
 
 function schoolRouteMeta(line) {
-  return STAFFS_SCHOOL_ROUTES.find((row) => row.line === line) || { line };
+  const code = String(line || "").toUpperCase();
+  return STAFFS_SCHOOL_ROUTES.find((row) => String(row.line).toUpperCase() === code) || { line: code };
 }
 
 export function isSchoolServiceLine(line) {
   return SCHOOL_LINE_SET.has(String(line || "").toUpperCase());
 }
 
+/** True only for registered Staffordshire school / college services (not other UK school buses). */
 export function isSchoolBusLive(bus = {}) {
   const line = String(bus.service?.line_name || "").toUpperCase();
-  if (SCHOOL_LINE_SET.has(line)) return true;
-  const hay = `${bus.destination || ""} ${bus.service?.url || ""}`;
-  return /school|college|academy|wolgarston|rodbaston|rawlett|john taylor|netherstowe|king edward/i.test(hay);
+  if (!SCHOOL_LINE_SET.has(line)) return false;
+  const meta = schoolRouteMeta(line);
+  const op = String(bus?.operator?.noc || bus?.operator?.id || "").toUpperCase();
+  // Same line number elsewhere (e.g. public 14 / 71) — require the Staffs school operator when known.
+  if (meta.noc && op && op !== String(meta.noc).toUpperCase()) return false;
+  return true;
 }
 
 export function normalizeStokeFcLine(line) {
@@ -523,6 +565,7 @@ export function enrichJourneyRow(row = {}, liveSource = null) {
     destination: dest || row.destination || "",
     diverted,
     extracted_route: fromDest || (diverted || row.live ? fromLive : "") || "",
+    direction: directionFromJourneyRow(row) || directionFromJourneyRow(liveSource || {}),
   };
 }
 
@@ -607,6 +650,11 @@ export function liveVehicleAsHistoryRow(bus, { trailKey = "" } = {}) {
       diverted: isDivertedText(dest),
       live: true,
       trailKey,
+      direction:
+        bus.direction ||
+        bus.directionRef ||
+        bus.currentJourney?.directionRef ||
+        "",
     },
     bus,
   );
@@ -672,6 +720,7 @@ async function ensureSchoolLive(maxAgeMs = 15000) {
           regLabel: parsed.reg,
           btId: bus.id != null ? String(bus.id) : "",
           recordedAtTime: bus.datetime || "",
+          direction: directionFromJourneyRow(bus),
           bus,
           operator: stokeFcRouteMeta(line).operator || "First Potteries",
         };
@@ -691,10 +740,12 @@ async function ensureSchoolLive(maxAgeMs = 15000) {
         if (info) info.live = (info.live || 0) + 1;
       }
 
-      if (!isSchoolBusLive(bus) && !SCHOOL_LINE_SET.has(rawLine)) continue;
-      const line = rawLine;
-      if (!line) continue;
-      const dest = bus.destination || schoolRouteMeta(line).name || "";
+      if (!SCHOOL_LINE_SET.has(rawLine)) continue;
+      const metaRow = schoolRouteMeta(rawLine);
+      const op = String(bus?.operator?.noc || bus?.operator?.id || "").toUpperCase();
+      if (metaRow.noc && op && op !== String(metaRow.noc).toUpperCase()) continue;
+      const line = metaRow.line || rawLine;
+      const dest = bus.destination || metaRow.name || "";
       const entry = {
         line,
         dest,
@@ -703,21 +754,13 @@ async function ensureSchoolLive(maxAgeMs = 15000) {
         regLabel: parsed.reg,
         btId: bus.id != null ? String(bus.id) : "",
         recordedAtTime: bus.datetime || "",
+        direction: directionFromJourneyRow(bus),
         bus,
-        operator: schoolRouteMeta(line).operator || "",
+        operator: metaRow.operator || "",
       };
       vehicles.push(entry);
       if (!byLine.has(line)) byLine.set(line, []);
       byLine.get(line).push(entry);
-      if (!meta.has(line)) {
-        meta.set(line, {
-          line,
-          name: dest || line,
-          operator: entry.operator || "School service",
-          noc: "",
-          live: 0,
-        });
-      }
       const info = meta.get(line);
       if (info) info.live = (info.live || 0) + 1;
     }
@@ -761,6 +804,7 @@ async function fetchLastRoute(vehicleOrId) {
         live: true,
         at: true,
         trackedAt: at.recordedAtTime || new Date().toISOString(),
+        direction: normalizeFleetDirection(at.direction || at.directionRef || ""),
       };
     }
     try {
@@ -777,6 +821,7 @@ async function fetchLastRoute(vehicleOrId) {
             live: true,
             diverted: isDivertedText(row.destination, row.service?.line_name),
             trackedAt: row.datetime || new Date().toISOString(),
+            direction: directionFromJourneyRow(row),
           };
         }
       }
@@ -797,6 +842,7 @@ async function fetchLastRoute(vehicleOrId) {
           diverted: enriched.diverted,
           trackedAt: row.datetime || "",
           date: row.date || "",
+          direction: enriched.direction || directionFromJourneyRow(row),
         };
       }
     } catch {
@@ -863,6 +909,459 @@ async function resolveAtVehicleId(entry) {
   return null;
 }
 
+function atDestForLine(line) {
+  const code = String(line || "").trim().toUpperCase();
+  const meta = AT_ROUTES.find((row) => row.line === code);
+  return meta?.destination || "Alton Towers";
+}
+
+/** Bustimes-style "To" label for an AT run (outbound → Towers, inbound → origin). */
+function atTripDestination(line, direction = "", fallback = "") {
+  const code = String(line || "").trim().toUpperCase();
+  const meta = AT_ROUTES.find((row) => row.line === code) || {};
+  const d = normalizeFleetDirection(direction);
+  if (d === "in") return meta.origin || fallback || "Inbound";
+  if (d === "out") return meta.destination || fallback || "Alton Towers";
+  if (fallback) return fallback;
+  return meta.destination || "Alton Towers";
+}
+
+function dayKeysForTrail(ms = Date.now()) {
+  const d = new Date(ms);
+  const utc = d.toISOString().slice(0, 10);
+  const uk = ukDateKey(d);
+  return utc === uk ? [utc] : [utc, uk];
+}
+
+function atTrailSegmentKeys(baseKey, line, { days = 7, date = "" } = {}) {
+  const primary = String(baseKey || "").trim();
+  const code = String(line || "").trim().toUpperCase();
+  if (!primary || !AT_LINE_SET.has(code)) return [];
+  const keys = [];
+  const pushDay = (day) => {
+    if (!day) return;
+    // Directed keys (inbound / outbound kept separate).
+    for (const dir of ["out", "in"]) {
+      keys.push(`at:${code}:${dir}:${primary}:${day}`);
+      keys.push(`run:${primary}:${code}:${dir}:${day}`);
+    }
+    // Legacy undirected keys (older recordings).
+    keys.push(`at:${code}:${primary}:${day}`);
+    keys.push(`run:${primary}:${code}:${day}`);
+  };
+  if (date) {
+    pushDay(String(date).trim());
+    return keys;
+  }
+  for (let i = 0; i < days; i += 1) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    for (const day of dayKeysForTrail(d.getTime())) pushDay(day);
+  }
+  return keys;
+}
+
+function trailKeyFromSegmentKey(key) {
+  const raw = String(key || "");
+  if (raw.startsWith("staff-") || /^\d+$/.test(raw) || raw.startsWith("reg:")) return raw;
+  // at:AT2:out:staff-xxx:2026-09-20  or  at:AT2:staff-xxx:2026-09-20
+  const atDir = raw.match(/^at:[^:]+:(?:in|out):(.+):\d{4}-\d{2}-\d{2}$/i);
+  if (atDir) return atDir[1];
+  const at = raw.match(/^at:[^:]+:(.+):\d{4}-\d{2}-\d{2}$/);
+  if (at) return at[1];
+  // run:staff-xxx:AT2:out:2026-09-20  or  run:staff-xxx:AT2:2026-09-20
+  const runDir = raw.match(/^run:(.+):[^:]+:(?:in|out):\d{4}-\d{2}-\d{2}$/i);
+  if (runDir) return runDir[1];
+  const run = raw.match(/^run:(.+):[^:]+:\d{4}-\d{2}-\d{2}$/);
+  if (run) return run[1];
+  return raw;
+}
+
+function identityFromTrailKey(key) {
+  const base = trailKeyFromSegmentKey(key);
+  if (base.startsWith("staff-")) {
+    const ref = base.slice("staff-".length);
+    const parsed = parseDgRef(ref);
+    return {
+      trailKey: base,
+      ref,
+      fleet: parsed.fleet,
+      reg: compactQuery(parsed.reg),
+      regLabel: parsed.reg,
+      btId: "",
+    };
+  }
+  if (base.startsWith("reg:")) {
+    const reg = base.slice(4);
+    return {
+      trailKey: base,
+      ref: "",
+      fleet: "",
+      reg: compactQuery(reg),
+      regLabel: reg.replace(/([A-Z]{2}\d{2})([A-Z]{3})/i, "$1 $2"),
+      btId: "",
+    };
+  }
+  if (/^\d+$/.test(base)) {
+    return { trailKey: base, ref: "", fleet: "", reg: "", regLabel: "", btId: base };
+  }
+  return { trailKey: base, ref: "", fleet: "", reg: "", regLabel: "", btId: "" };
+}
+
+function formatAtDirection(dir) {
+  const d = normalizeFleetDirection(dir);
+  if (d === "in") return "Inbound";
+  if (d === "out") return "Outbound";
+  return "";
+}
+
+/** Store / Map attribute form: in | out | "". */
+function normalizeFleetDirection(raw) {
+  const d = String(raw || "")
+    .trim()
+    .toLowerCase();
+  if (!d) return "";
+  if (/^(in|inbound|i|1)$/.test(d)) return "in";
+  if (/^(out|outbound|o|0)$/.test(d)) return "out";
+  if (raw === true || raw === 1) return "out";
+  if (raw === false || raw === 0) return "in";
+  return "";
+}
+
+function directionFromJourneyRow(row = {}) {
+  return normalizeFleetDirection(
+    row.direction ||
+      row.direction_id ||
+      row.directionRef ||
+      (row.outbound === true || row.Outbound === true
+        ? "out"
+        : row.outbound === false || row.Outbound === false
+          ? "in"
+          : ""),
+  );
+}
+
+/** Shared Map button attrs so every fleet replay stays inbound/outbound separate. */
+function fleetMapDataAttrs({
+  tripId = "",
+  journeyId = "",
+  vehicleId = "",
+  trailKey = "",
+  reg = "",
+  line = "",
+  operator = "",
+  direction = "",
+  dest = "",
+  datetime = "",
+} = {}) {
+  return `data-trip-id="${esc(tripId || "")}" data-journey-id="${esc(journeyId || "")}" data-vehicle-id="${esc(vehicleId || "")}" data-trail-key="${esc(trailKey || "")}" data-reg="${esc(reg || "")}" data-line="${esc(line || "")}" data-operator="${esc(operator || "")}" data-direction="${esc(normalizeFleetDirection(direction))}" data-dest="${esc(dest || "")}" data-datetime="${esc(datetime || "")}"`;
+}
+
+/**
+ * Vehicles that ran AT1/AT2/AT3 on a given day (from trail store + live D&G),
+ * each with journey segments so Map can replay.
+ */
+async function fetchAtVehiclesForDay(line, date = ukDateKey()) {
+  const code = String(line || "").trim().toUpperCase();
+  const wantDate = String(date || ukDateKey()).trim();
+  if (!AT_LINE_SET.has(code)) return [];
+
+  const baseKeys = new Set();
+  try {
+    const res = await fetch(
+      `/api/trails/keys?lines=${encodeURIComponent(code)}&days=2&limit=60`,
+    );
+    if (res.ok) {
+      const data = await res.json();
+      for (const row of Array.isArray(data?.keys) ? data.keys : []) {
+        const key = String(row?.key || "").trim();
+        if (!key) continue;
+        const base = trailKeyFromSegmentKey(key);
+        if (base.startsWith("staff-") || base.startsWith("reg:") || /^\d+$/.test(base)) {
+          baseKeys.add(base);
+        }
+      }
+    }
+  } catch {
+    /* trails optional */
+  }
+
+  const liveCache = await ensureAtLive(12_000);
+  const liveEntries = [...(liveCache.byLine.get(code) || [])];
+  for (const entry of liveEntries) {
+    if (entry.ref) baseKeys.add(`staff-${entry.ref}`);
+    await resolveAtVehicleId(entry);
+    if (entry.btId) baseKeys.add(String(entry.btId));
+    if (entry.reg) baseKeys.add(`reg:${entry.reg}`);
+  }
+
+  const byVehicle = new Map();
+  const mergeLive = (id, entry) => {
+    const cur = byVehicle.get(id) || {
+      id,
+      trailKey: "",
+      btId: "",
+      ref: "",
+      fleet: "",
+      reg: "",
+      regLabel: "",
+      live: false,
+      dest: atDestForLine(code),
+      journeys: [],
+      lastAt: "",
+    };
+    if (entry.ref) cur.ref = entry.ref;
+    if (entry.btId) cur.btId = String(entry.btId);
+    if (entry.fleet) cur.fleet = entry.fleet;
+    if (entry.reg) cur.reg = entry.reg;
+    if (entry.regLabel) cur.regLabel = entry.regLabel;
+    if (entry.trailKey) cur.trailKey = entry.trailKey;
+    if (entry.dest) cur.dest = entry.dest;
+    if (entry.direction) cur.direction = normalizeFleetDirection(entry.direction);
+    if (entry.live) cur.live = true;
+    if (entry.recordedAtTime && (!cur.lastAt || entry.recordedAtTime > cur.lastAt)) {
+      cur.lastAt = entry.recordedAtTime;
+    }
+    byVehicle.set(id, cur);
+    return cur;
+  };
+
+  for (const entry of liveEntries) {
+    const id =
+      (entry.btId && String(entry.btId)) ||
+      (entry.ref && `staff-${entry.ref}`) ||
+      (entry.reg && `reg:${entry.reg}`) ||
+      "";
+    if (!id) continue;
+    mergeLive(id, {
+      ...entry,
+      trailKey: entry.ref ? `staff-${entry.ref}` : entry.btId ? String(entry.btId) : `reg:${entry.reg}`,
+      live: true,
+    });
+  }
+
+  const bases = [...baseKeys].slice(0, 28);
+  for (const base of bases) {
+    const ident = identityFromTrailKey(base);
+    const liveHit = liveEntries.find(
+      (e) =>
+        (e.ref && `staff-${e.ref}` === base) ||
+        (e.btId && String(e.btId) === base) ||
+        (e.reg && `reg:${e.reg}` === base),
+    );
+    const id =
+      (liveHit?.btId && String(liveHit.btId)) ||
+      ident.btId ||
+      (ident.ref && `staff-${ident.ref}`) ||
+      (ident.reg && `reg:${ident.reg}`) ||
+      base;
+
+    const journeys = await fetchAtHistoryFromTrails({
+      trailKeys: [base, ...(liveHit?.btId ? [String(liveHit.btId)] : [])],
+      line: code,
+      date: wantDate,
+      days: 1,
+    });
+
+    if (!journeys.length && !liveHit) continue;
+
+    const cur = mergeLive(id, {
+      trailKey: base,
+      btId: liveHit?.btId || ident.btId,
+      ref: liveHit?.ref || ident.ref,
+      fleet: liveHit?.fleet || ident.fleet,
+      reg: liveHit?.reg || ident.reg,
+      regLabel: liveHit?.regLabel || ident.regLabel,
+      dest: liveHit?.dest || atDestForLine(code),
+      live: Boolean(liveHit),
+      recordedAtTime: liveHit?.recordedAtTime || journeys[0]?.datetime || "",
+    });
+
+    const seenJ = new Set(cur.journeys.map((j) => j.id));
+    for (const row of journeys) {
+      if (seenJ.has(row.id)) continue;
+      seenJ.add(row.id);
+      cur.journeys.push({
+        ...row,
+        trailKey: row.trailKey || base,
+      });
+    }
+    cur.journeys.sort((a, b) => String(b.datetime || "").localeCompare(String(a.datetime || "")));
+    if (cur.journeys[0]?.datetime) cur.lastAt = cur.journeys[0].datetime;
+  }
+
+  const list = [...byVehicle.values()].filter(
+    (v) => v.live || (Array.isArray(v.journeys) && v.journeys.length),
+  );
+  list.sort((a, b) => {
+    if (a.live !== b.live) return a.live ? -1 : 1;
+    return String(b.lastAt || "").localeCompare(String(a.lastAt || ""));
+  });
+  return list;
+}
+
+/**
+ * Build AT1–AT3 journey history from the server GPS trail store.
+ * Bustimes often has no AT employee journeys, so trail segments are the source of truth.
+ * /api/trails accepts at most 12 keys — prefer primary staff/vehicle keys.
+ */
+export async function fetchAtHistoryFromTrails({
+  trailKeys = [],
+  line = "",
+  date = "",
+  days = 7,
+} = {}) {
+  const wantLine = String(line || "").trim().toUpperCase();
+  const wantDate = String(date || "").trim();
+  const keepDays = Math.min(7, Math.max(1, Number(days) || 7));
+  const bases = [...new Set((trailKeys || []).map((k) => String(k || "").trim()).filter(Boolean))];
+  if (!bases.length) return [];
+  const primary = bases.find((k) => k.startsWith("staff-")) || bases[0];
+  const lines =
+    wantLine && AT_LINE_SET.has(wantLine) ? [wantLine] : AT_ROUTES.map((row) => row.line);
+  const keys = [primary];
+  // Stay within /api/trails 12-key cap: primary + directed AT segment keys (and legacy undirected).
+  for (const atLine of lines) {
+    const segs = atTrailSegmentKeys(primary, atLine, {
+      days: wantDate ? 1 : Math.min(keepDays, 2),
+      date: wantDate,
+    });
+    for (const key of segs) {
+      // Prefer at: keys; run: duplicates the same points under another prefix.
+      if (String(key).startsWith("run:")) continue;
+      keys.push(key);
+    }
+  }
+  for (const base of bases) {
+    if (base !== primary) keys.push(base);
+  }
+  const unique = [...new Set(keys.filter(Boolean))].slice(0, 12);
+  if (!unique.length) return [];
+  try {
+    const params = new URLSearchParams({
+      keys: unique.join(","),
+      days: String(keepDays),
+    });
+    const res = await fetch(`/api/trails?${params}`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const trails = data?.trails || {};
+    const segments = [];
+    for (const key of unique) {
+      const pts = Array.isArray(trails[key]) ? trails[key] : [];
+      let cur = null;
+      for (const p of pts) {
+        const t = Number(p.t);
+        if (!Number.isFinite(t)) continue;
+        const day = ukDateKey(t);
+        if (wantDate && day !== wantDate) {
+          if (cur && cur.n >= 2) segments.push(cur);
+          cur = null;
+          continue;
+        }
+        const pl = String(p.line || "").trim().toUpperCase();
+        if (wantLine && pl && pl !== wantLine) {
+          if (cur && cur.n >= 2) segments.push(cur);
+          cur = null;
+          continue;
+        }
+        if (!wantLine && pl && !AT_LINE_SET.has(pl)) {
+          if (cur && cur.n >= 2) segments.push(cur);
+          cur = null;
+          continue;
+        }
+        const jid = String(p.journeyId || p.journey_id || "").trim();
+        const dir = String(p.direction || "")
+          .trim()
+          .toLowerCase()
+          .replace(/^inbound$/, "in")
+          .replace(/^outbound$/, "out");
+        const gap = cur ? t - cur.lastT : Infinity;
+        const lineChanged = Boolean(cur?.line && pl && cur.line !== pl);
+        const journeyChanged = Boolean(cur?.journeyId && jid && cur.journeyId !== jid);
+        const directionChanged = Boolean(cur?.direction && dir && cur.direction !== dir);
+        if (!cur || lineChanged || journeyChanged || directionChanged || gap > 20 * 60_000) {
+          if (cur && cur.n >= 2) segments.push(cur);
+          cur = {
+            journeyId: jid,
+            line: pl || wantLine || "",
+            direction: dir || "",
+            date: day,
+            startT: t,
+            lastT: t,
+            n: 1,
+            trailKey: trailKeyFromSegmentKey(key),
+            rawKey: key,
+          };
+        } else {
+          cur.lastT = t;
+          cur.n += 1;
+          if (jid && !cur.journeyId) cur.journeyId = jid;
+          if (pl && !cur.line) cur.line = pl;
+          if (dir && !cur.direction) cur.direction = dir;
+        }
+      }
+      if (cur && cur.n >= 2) segments.push(cur);
+    }
+    const seen = new Set();
+    const rows = [];
+    for (const seg of segments) {
+      const lineCode = seg.line || wantLine || "";
+      if (wantLine && lineCode && lineCode !== wantLine) continue;
+      if (!lineCode || !AT_LINE_SET.has(lineCode)) continue;
+      const id = seg.journeyId
+        ? `at-jny-${seg.journeyId}`
+        : `at-trail-${seg.trailKey || seg.rawKey}-${seg.direction || "x"}-${seg.startT}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      rows.push({
+        id,
+        datetime: new Date(seg.startT).toISOString(),
+        date: seg.date,
+        route_name: lineCode,
+        destination: atTripDestination(lineCode, seg.direction || "", atDestForLine(lineCode)),
+        trip_id: null,
+        journey_id: seg.journeyId || "",
+        direction: seg.direction || "",
+        trailKey: seg.trailKey || seg.rawKey,
+        atTrail: true,
+      });
+    }
+    rows.sort((a, b) => String(b.datetime || "").localeCompare(String(a.datetime || "")));
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+export function mergeAtHistoryRows(journeys, atRows) {
+  const list = Array.isArray(journeys) ? [...journeys] : [];
+  const extra = Array.isArray(atRows) ? atRows : [];
+  if (!extra.length) return list;
+  const seen = new Set(
+    list.map((row) => String(row.id || `${row.datetime}|${row.route_name}`)),
+  );
+  for (const row of extra) {
+    const key = String(row.id || `${row.datetime}|${row.route_name}`);
+    if (seen.has(key)) continue;
+    // Skip if a bustimes row already covers this AT journey closely.
+    const rowMs = new Date(row.datetime).getTime();
+    const dup = list.some((existing) => {
+      if (!sameServiceLine(existing.route_name, row.route_name)) return false;
+      const existingMs = new Date(existing.datetime).getTime();
+      return (
+        Number.isFinite(rowMs) &&
+        Number.isFinite(existingMs) &&
+        Math.abs(existingMs - rowMs) < 25 * 60_000
+      );
+    });
+    if (dup) continue;
+    seen.add(key);
+    list.push(row);
+  }
+  return list.sort((a, b) => String(b.datetime || "").localeCompare(String(a.datetime || "")));
+}
+
 function liverySwatch(livery) {
   const colour = livery?.left || livery?.right || "#64748b";
   return `<span class="fleet-livery-swatch" style="background:${esc(colour)}" title="${esc(livery?.name || "")}"></span>`;
@@ -872,6 +1371,331 @@ async function fetchJson(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Request failed (${res.status})`);
   return res.json();
+}
+
+/** Rewrite absolute bustimes.org API URLs to our /api/bt-* proxies. */
+function toLocalBtApiUrl(url) {
+  if (!url) return "";
+  const raw = String(url);
+  if (raw.startsWith("/api/bt-")) return raw;
+  if (raw.startsWith("/api/services")) return `/api/bt-services${raw.slice("/api/services".length)}`;
+  if (raw.startsWith("/api/trips")) return `/api/bt-trips${raw.slice("/api/trips".length)}`;
+  try {
+    const u = new URL(raw, "https://bustimes.org");
+    if (!/bustimes\.org$/i.test(u.hostname)) return raw;
+    if (u.pathname.startsWith("/api/services")) {
+      return `/api/bt-services${u.pathname.slice("/api/services".length)}${u.search}`;
+    }
+    if (u.pathname.startsWith("/api/trips")) {
+      return `/api/bt-trips${u.pathname.slice("/api/trips".length)}${u.search}`;
+    }
+  } catch {
+    /* keep */
+  }
+  return raw;
+}
+
+function compareLineNames(a, b) {
+  return String(a || "").localeCompare(String(b || ""), "en-GB", {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
+const operatorServicesCache = new Map();
+
+async function fetchAllOperatorServices(noc) {
+  const code = String(noc || "").trim().toUpperCase();
+  if (!code) return [];
+  if (operatorServicesCache.has(code)) return operatorServicesCache.get(code);
+  const promise = (async () => {
+    const out = [];
+    let next = `/api/bt-services/?operator=${encodeURIComponent(code)}&limit=100`;
+    while (next && out.length < 400) {
+      const data = await fetchJson(next);
+      out.push(...(data.results || []));
+      next = data.next ? toLocalBtApiUrl(data.next) : null;
+    }
+    out.sort((a, b) => {
+      const byLine = compareLineNames(a.line_name, b.line_name);
+      if (byLine) return byLine;
+      return String(a.description || "").localeCompare(String(b.description || ""), "en-GB");
+    });
+    return out;
+  })();
+  operatorServicesCache.set(code, promise);
+  try {
+    return await promise;
+  } catch (error) {
+    operatorServicesCache.delete(code);
+    throw error;
+  }
+}
+
+function formatTripClock(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const m = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?/);
+  if (!m) return raw.slice(0, 5);
+  return `${String(Number(m[1])).padStart(2, "0")}:${m[2]}`;
+}
+
+/** AT1–AT3 full stop-by-stop timetable from the D&G Bus app feed. */
+async function fetchAtTimetableTrips(line, date, { allDays = true } = {}) {
+  const code = String(line || "").trim().toUpperCase();
+  if (!AT_LINE_SET.has(code)) return [];
+  const params = new URLSearchParams({ line: code });
+  if (allDays) params.set("all", "1");
+  else if (date) params.set("date", String(date));
+  const data = await fetchJson(`/api/dg-at-timetable?${params}`);
+  return Array.isArray(data?.trips) ? data.trips : [];
+}
+
+function atDayPatternLabel(days = []) {
+  const set = new Set((days || []).map((d) => String(d || "").toLowerCase()));
+  if (!set.size) return "Timetable";
+  const weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday"];
+  if (weekdays.every((d) => set.has(d)) && ![...set].some((d) => !weekdays.includes(d))) {
+    return "Monday–Friday";
+  }
+  if (set.size === 1 && set.has("saturday")) return "Saturday";
+  if (set.size === 1 && set.has("sunday")) return "Sunday";
+  if (set.size === 1 && set.has("friday")) return "Friday only";
+  return [...set]
+    .map((d) => d.charAt(0).toUpperCase() + d.slice(1))
+    .join(", ");
+}
+
+function groupAtTimetableTrips(trips) {
+  const byPattern = new Map();
+  for (const trip of trips || []) {
+    const pattern = atDayPatternLabel(trip.days);
+    const head = String(trip.headsign || trip.destination || "Service").trim() || "Service";
+    const key = `${pattern}||${head}`;
+    const list = byPattern.get(key) || { pattern, head, rows: [] };
+    list.rows.push(trip);
+    byPattern.set(key, list);
+  }
+  const order = ["Monday–Friday", "Friday only", "Saturday", "Sunday"];
+  return [...byPattern.values()].sort((a, b) => {
+    const ai = order.indexOf(a.pattern);
+    const bi = order.indexOf(b.pattern);
+    if (ai !== bi) return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+    return a.head.localeCompare(b.head, "en-GB");
+  });
+}
+
+function renderAtTimetableHtml(trips, { line = "", loading = false, error = "" } = {}) {
+  if (loading && !(trips || []).length) {
+    return `<section class="fleet-tt" aria-busy="true">
+      <h2 class="fleet-section-title">Timetable${line ? ` · ${esc(line)}` : ""}</h2>
+      <p class="fleet-muted">Loading D&amp;G Bus timetable…</p>
+    </section>`;
+  }
+  if (error && !(trips || []).length) {
+    return `<section class="fleet-tt">
+      <h2 class="fleet-section-title">Timetable${line ? ` · ${esc(line)}` : ""}</h2>
+      <p class="fleet-error">${esc(error)}</p>
+    </section>`;
+  }
+  const groups = groupAtTimetableTrips(trips);
+  if (!groups.length) {
+    return `<section class="fleet-tt">
+      <h2 class="fleet-section-title">Timetable${line ? ` · ${esc(line)}` : ""}</h2>
+      <p class="fleet-muted">No D&amp;G timetable journeys found for ${esc(line || "this route")}.</p>
+    </section>`;
+  }
+  const bodies = groups
+    .map(({ pattern, head, rows }) => {
+      const sorted = [...rows].sort((a, b) => String(a.start).localeCompare(String(b.start)));
+      const times = sorted
+        .map((trip) => formatTripClock(trip.start))
+        .filter(Boolean)
+        .map((t) => `<span class="fleet-tt-time">${esc(t)}</span>`)
+        .join("");
+      const table = renderStopByStopTable(sorted);
+      return `<div class="fleet-tt-direction">
+        <h3 class="fleet-tt-head">${esc(pattern)} · to ${esc(head)}</h3>
+        <div class="fleet-tt-times">${times}</div>
+        <p class="fleet-muted fleet-tt-count">${sorted.length} departure${sorted.length === 1 ? "" : "s"}</p>
+        ${
+          table
+            ? `<h4 class="fleet-tt-subhead">Stop-by-stop</h4>${table}`
+            : `<p class="fleet-muted">Stop times unavailable for these journeys.</p>`
+        }
+      </div>`;
+    })
+    .join("");
+  return `<section class="fleet-tt">
+    <h2 class="fleet-section-title">Timetable${line ? ` · ${esc(line)}` : ""}</h2>
+    <p class="fleet-muted fleet-section-note">Full D&amp;G Bus app timetable (employee-only)</p>
+    ${bodies}
+  </section>`;
+}
+
+async function fetchServiceTimetableTrips(serviceId, date) {
+  const id = String(serviceId || "").trim();
+  const day = String(date || ukDateKey()).trim();
+  if (!id || !day) return [];
+  const out = [];
+  let next = `/api/bt-trips/?service=${encodeURIComponent(id)}&date=${encodeURIComponent(day)}&limit=50`;
+  while (next && out.length < 300) {
+    const data = await fetchJson(next);
+    out.push(...(data.results || []));
+    next = data.next ? toLocalBtApiUrl(data.next) : null;
+  }
+  out.sort((a, b) => String(a.start || "").localeCompare(String(b.start || "")));
+  return out;
+}
+
+async function fetchTripWithStops(tripId) {
+  const id = String(tripId || "").trim();
+  if (!id) return null;
+  return fetchJson(`/api/bt-trips/${encodeURIComponent(id)}/`);
+}
+
+/** Load stop-by-stop times for timetable journeys (capped per direction). */
+async function enrichTripsWithStopTimes(trips, { perDirection = 32, concurrency = 5 } = {}) {
+  const list = Array.isArray(trips) ? trips : [];
+  if (!list.length) return list;
+  const groups = groupTimetableTrips(list);
+  const wantIds = new Set();
+  for (const [, rows] of groups) {
+    for (const trip of rows.slice(0, perDirection)) {
+      if (trip?.id != null) wantIds.add(String(trip.id));
+    }
+  }
+  const ids = [...wantIds];
+  const detailById = new Map();
+  for (let i = 0; i < ids.length; i += concurrency) {
+    const chunk = ids.slice(i, i + concurrency);
+    const rows = await Promise.all(
+      chunk.map(async (id) => {
+        try {
+          return await fetchTripWithStops(id);
+        } catch {
+          return null;
+        }
+      }),
+    );
+    for (const row of rows) {
+      if (row?.id != null) detailById.set(String(row.id), row);
+    }
+  }
+  return list.map((trip) => detailById.get(String(trip.id)) || trip);
+}
+
+function groupTimetableTrips(trips) {
+  const byHead = new Map();
+  for (const trip of trips || []) {
+    const head = String(trip.headsign || trip.destination || "Service").trim() || "Service";
+    const list = byHead.get(head) || [];
+    list.push(trip);
+    byHead.set(head, list);
+  }
+  return [...byHead.entries()].sort((a, b) => a[0].localeCompare(b[0], "en-GB"));
+}
+
+function tripStopClock(row) {
+  return formatTripClock(row?.aimed_departure_time || row?.aimed_arrival_time || "");
+}
+
+function stopKeyOf(row) {
+  return String(row?.stop?.atco_code || row?.stop?.name || "").trim();
+}
+
+function buildStopOrder(trips) {
+  const order = [];
+  const seen = new Set();
+  for (const trip of trips || []) {
+    for (const row of trip.times || []) {
+      const key = stopKeyOf(row);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      order.push({
+        key,
+        name: String(row.stop?.name || key).trim(),
+      });
+    }
+  }
+  return order;
+}
+
+function renderStopByStopTable(trips) {
+  const withTimes = (trips || []).filter((trip) => Array.isArray(trip.times) && trip.times.length);
+  if (!withTimes.length) return "";
+  const stops = buildStopOrder(withTimes);
+  if (!stops.length) return "";
+  const head = withTimes
+    .map((trip) => `<th scope="col">${esc(formatTripClock(trip.start) || "—")}</th>`)
+    .join("");
+  const body = stops
+    .map((stop) => {
+      const cells = withTimes
+        .map((trip) => {
+          const hit = (trip.times || []).find((row) => stopKeyOf(row) === stop.key);
+          const clock = hit ? tripStopClock(hit) : "";
+          return `<td>${clock ? esc(clock) : "·"}</td>`;
+        })
+        .join("");
+      return `<tr><th scope="row">${esc(stop.name)}</th>${cells}</tr>`;
+    })
+    .join("");
+  return `<div class="fleet-tt-scroll" tabindex="0">
+    <table class="fleet-tt-table">
+      <thead><tr><th scope="col">Stop</th>${head}</tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderServiceTimetableHtml(trips, { date = "", line = "", loading = false, error = "" } = {}) {
+  if (loading && !(trips || []).length) {
+    return `<section class="fleet-tt" aria-busy="true">
+      <h2 class="fleet-section-title">Timetable</h2>
+      <p class="fleet-muted">Loading timetable…</p>
+    </section>`;
+  }
+  if (error && !(trips || []).length) {
+    return `<section class="fleet-tt">
+      <h2 class="fleet-section-title">Timetable</h2>
+      <p class="fleet-error">${esc(error)}</p>
+    </section>`;
+  }
+  const groups = groupTimetableTrips(trips);
+  if (!groups.length) {
+    return `<section class="fleet-tt">
+      <h2 class="fleet-section-title">Timetable</h2>
+      <p class="fleet-muted">No timetable journeys found for ${esc(formatLongDate(date) || "this date")}.</p>
+    </section>`;
+  }
+  const bodies = groups
+    .map(([head, rows]) => {
+      const times = rows
+        .map((trip) => formatTripClock(trip.start))
+        .filter(Boolean)
+        .map((t) => `<span class="fleet-tt-time">${esc(t)}</span>`)
+        .join("");
+      const table = renderStopByStopTable(rows);
+      return `<div class="fleet-tt-direction">
+        <h3 class="fleet-tt-head">To ${esc(head)}</h3>
+        <div class="fleet-tt-times">${times}</div>
+        <p class="fleet-muted fleet-tt-count">${rows.length} departure${rows.length === 1 ? "" : "s"}</p>
+        ${
+          table
+            ? `<h4 class="fleet-tt-subhead">Stop-by-stop</h4>${table}`
+            : loading
+              ? `<p class="fleet-muted">Loading stop times…</p>`
+              : `<p class="fleet-muted">Stop times unavailable for these journeys.</p>`
+        }
+      </div>`;
+    })
+    .join("");
+  return `<section class="fleet-tt">
+    <h2 class="fleet-section-title">Timetable${line ? ` · ${esc(line)}` : ""}</h2>
+    <p class="fleet-muted fleet-section-note">Scheduled stop times for ${esc(formatLongDate(date) || date)}</p>
+    ${bodies}
+  </section>`;
 }
 
 function fleetNumberKey(vehicle) {
@@ -1018,30 +1842,51 @@ async function searchServicesByLine(line, { preferOperatorNoc = "" } = {}) {
   );
 }
 
-async function fetchServiceJourneyVehicles(serviceId, date, { maxPages = 10 } = {}) {
-  const byId = new Map();
+async function fetchServiceJourneyVehicles(serviceId, date, { maxPages = 20, includeAnonymous = false } = {}) {
+  // One row per trip (bustimes Vehicles tab) — do not collapse to latest per bus.
+  const trips = [];
   let url = `/api/bt-vehiclejourneys/?service=${encodeURIComponent(serviceId)}&date=${encodeURIComponent(date)}&limit=100`;
   for (let page = 0; page < maxPages && url; page += 1) {
     const data = await fetchJson(url);
     for (const row of data.results || []) {
       if (date && row.date && row.date !== date) continue;
       const vehicle = row.vehicle;
-      if (!vehicle?.id) continue;
-      const prev = byId.get(vehicle.id);
-      if (!prev || String(row.datetime || "") > String(prev.datetime || "")) {
-        byId.set(vehicle.id, {
-          id: vehicle.id,
-          fleet_code: vehicle.fleet_code || vehicle.fleet_number || "",
-          reg: vehicle.reg || "",
-          slug: vehicle.slug || "",
+      if (!vehicle?.id) {
+        // FlixBus / NATX journeys often have no vehicle object — still list the trip.
+        if (!includeAnonymous) continue;
+        trips.push({
+          id: "",
+          fleet_code: "",
+          reg: "",
+          slug: "",
           route_name: row.route_name || "",
           destination: row.destination || "",
           datetime: row.datetime || "",
           trip_id: row.trip_id || "",
           journey_id: row.id || "",
+          trailKey: row.id != null ? String(row.id) : "",
           service_id: serviceId,
+          direction: directionFromJourneyRow(row),
+          operator: null,
+          anonymous: true,
         });
+        continue;
       }
+      trips.push({
+        id: vehicle.id,
+        fleet_code: vehicle.fleet_code || vehicle.fleet_number || "",
+        reg: vehicle.reg || "",
+        slug: vehicle.slug || "",
+        route_name: row.route_name || "",
+        destination: row.destination || "",
+        datetime: row.datetime || "",
+        trip_id: row.trip_id || "",
+        journey_id: row.id || "",
+        trailKey: String(vehicle.id),
+        service_id: serviceId,
+        direction: directionFromJourneyRow(row),
+        operator: vehicle.operator || null,
+      });
     }
     if (!data.next) break;
     url = String(data.next).replace(
@@ -1049,7 +1894,83 @@ async function fetchServiceJourneyVehicles(serviceId, date, { maxPages = 10 } = 
       "/api/bt-vehiclejourneys",
     );
   }
-  return [...byId.values()].sort((a, b) => String(b.datetime || "").localeCompare(String(a.datetime || "")));
+  return trips.sort((a, b) => String(a.datetime || "").localeCompare(String(b.datetime || "")));
+}
+
+function serviceOperatorNoc(service) {
+  const op = Array.isArray(service?.operator) ? service.operator[0] : service?.operator;
+  return String(op || "")
+    .trim()
+    .toUpperCase();
+}
+
+function plateFromLiveVehicleName(name) {
+  const text = String(name || "").toUpperCase();
+  const match =
+    text.match(/\b([A-Z]{2}\d{2}\s*[A-Z]{3})\b/) || text.match(/\b([A-Z]\d{1,3}\s*[A-Z]{3})\b/);
+  return match ? match[1].replace(/\s+/g, " ").trim() : "";
+}
+
+function liveBusToRouteVehicle(bus, service = null) {
+  const noc = serviceOperatorNoc(service);
+  const plate =
+    String(bus?.vehicle?.reg || "").trim() || plateFromLiveVehicleName(bus?.vehicle?.name || "");
+  const journeyId = String(bus?.journey_id || bus?.id || "").trim();
+  return {
+    id: bus?.vehicle?.id || "",
+    fleet_code: bus?.vehicle?.fleet_code || "",
+    reg: plate,
+    slug: "",
+    live: true,
+    route_name: bus?.service?.line_name || service?.line_name || "",
+    destination: bus?.destination || "",
+    datetime: bus?.datetime || "",
+    trip_id: bus?.trip_id || "",
+    journey_id: journeyId,
+    trailKey: String(bus?.id || journeyId || ""),
+    service_id: bus?.service_id || service?.id || "",
+    direction: directionFromJourneyRow(bus),
+    operator: noc ? { id: noc, noc } : null,
+    label: plate || "Live coach",
+  };
+}
+
+/** Merge live AVL coaches onto journey rows (Flix/NATX hide vehicle ids on journeys). */
+function mergeRouteVehiclesWithLive(trips, liveBuses, service = null) {
+  const out = (Array.isArray(trips) ? trips : []).map((row) => ({ ...row }));
+  const byJourney = new Map();
+  const byTrip = new Map();
+  for (const row of out) {
+    const j = String(row.journey_id || "").trim();
+    const t = String(row.trip_id || "").trim();
+    if (j) byJourney.set(j, row);
+    if (t) byTrip.set(t, row);
+  }
+  for (const bus of Array.isArray(liveBuses) ? liveBuses : []) {
+    const jny = String(bus?.journey_id || bus?.id || "").trim();
+    const trip = String(bus?.trip_id || "").trim();
+    const hit = (jny && byJourney.get(jny)) || (trip && byTrip.get(trip)) || null;
+    if (hit) {
+      hit.live = true;
+      hit.trailKey = String(bus.id || hit.trailKey || hit.journey_id || "");
+      hit.datetime = bus.datetime || hit.datetime;
+      hit.destination = bus.destination || hit.destination;
+      const plate =
+        String(bus?.vehicle?.reg || "").trim() || plateFromLiveVehicleName(bus?.vehicle?.name || "");
+      if (plate && !hit.reg) hit.reg = plate;
+      if (bus?.vehicle?.id && !hit.id) hit.id = bus.vehicle.id;
+      hit.label = hit.reg || hit.label || "Live coach";
+      continue;
+    }
+    const entry = liveBusToRouteVehicle(bus, service);
+    out.push(entry);
+    if (entry.journey_id) byJourney.set(String(entry.journey_id), entry);
+    if (entry.trip_id) byTrip.set(String(entry.trip_id), entry);
+  }
+  return out.sort((a, b) => {
+    if (a.live !== b.live) return a.live ? -1 : 1;
+    return String(a.datetime || "").localeCompare(String(b.datetime || ""));
+  });
 }
 
 async function fetchLineJourneyVehicles(services, date, { maxServices = 12 } = {}) {
@@ -1059,17 +1980,18 @@ async function fetchLineJourneyVehicles(services, date, { maxServices = 12 } = {
       fetchServiceJourneyVehicles(service.id, date).catch(() => []),
     ),
   );
-  const byId = new Map();
+  const trips = [];
+  const seen = new Set();
   for (const batch of batches) {
     for (const entry of batch) {
       if (!isStaffsLocalDestination(entry.destination)) continue;
-      const prev = byId.get(entry.id);
-      if (!prev || String(entry.datetime || "") > String(prev.datetime || "")) {
-        byId.set(entry.id, entry);
-      }
+      const key = `${entry.id}|${entry.journey_id || entry.trip_id || entry.datetime}|${entry.destination || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      trips.push(entry);
     }
   }
-  return [...byId.values()].sort((a, b) => String(b.datetime || "").localeCompare(String(a.datetime || "")));
+  return trips.sort((a, b) => String(a.datetime || "").localeCompare(String(b.datetime || "")));
 }
 
 async function fetchLiveServiceVehicles(serviceId) {
@@ -1143,6 +2065,7 @@ export function createFleetBrowser({
   root,
   onTrackVehicle,
   onPlayJourney,
+  onShowRouteTails,
   onUploadBusPhoto,
 } = {}) {
   if (!root) throw new Error("Fleet root missing");
@@ -1165,6 +2088,7 @@ export function createFleetBrowser({
     error: "",
     atLine: "",
     atVehicles: [],
+    atDayVehicles: [],
     atMeta: null,
     schoolLine: "",
     schoolVehicles: [],
@@ -1177,6 +2101,11 @@ export function createFleetBrowser({
     routeService: null,
     routeVehicles: [],
     routeLiveCount: 0,
+    routeTimetable: [],
+    routeTimetableLoading: false,
+    routeTimetableError: "",
+    operatorRoutes: [],
+    operatorRoutesLoading: false,
     photo: null,
     photoPending: false,
     photoStatus: "",
@@ -1192,6 +2121,7 @@ export function createFleetBrowser({
   function filterJourneysByLine(rows, line) {
     const list = Array.isArray(rows) ? rows : [];
     if (!line) return list;
+    // Exact route only (AT1 ≠ AT2 ≠ AT3), same as school / matchday / service lines.
     return list.filter(
       (row) =>
         sameServiceLine(row.route_name, line) ||
@@ -1220,7 +2150,11 @@ export function createFleetBrowser({
     const note = state.photoLoading
       ? `<p class="fleet-photo-note">Loading photo…</p>`
       : state.photoPending
-        ? `<p class="fleet-photo-note">Photo submitted — waiting for owner approval. You can upload more anytime.</p>`
+        ? `<p class="fleet-photo-note">${
+            state.photoPendingName
+              ? `Photo by ${esc(state.photoPendingName)} submitted — waiting for owner approval. You can upload more anytime.`
+              : "Photo submitted — waiting for owner approval. You can upload more anytime."
+          }</p>`
         : state.photoStatus
           ? `<p class="fleet-photo-note">${esc(state.photoStatus)}</p>`
           : `<p class="fleet-photo-note">Upload a photo for this bus even when it is not running on the map (Plus · needs owner approval).</p>`;
@@ -1247,9 +2181,14 @@ export function createFleetBrowser({
 
   async function loadVehiclePhoto(vehicle) {
     const reg = compactRegKey(vehicle?.reg);
+    const keepPending = Boolean(state.photoPending);
+    const keepPendingName = state.photoPendingName || "";
     state.photo = null;
-    state.photoPending = false;
-    state.photoStatus = "";
+    if (!keepPending) {
+      state.photoPending = false;
+      state.photoPendingName = "";
+      state.photoStatus = "";
+    }
     if (!reg) {
       state.photoLoading = false;
       return;
@@ -1260,6 +2199,10 @@ export function createFleetBrowser({
       const data = res.ok ? await res.json() : null;
       if (compactRegKey(state.vehicle?.reg) !== reg) return;
       state.photo = data?.photo || null;
+      if (keepPending) {
+        state.photoPending = true;
+        state.photoPendingName = keepPendingName;
+      }
     } catch {
       if (compactRegKey(state.vehicle?.reg) === reg) state.photo = null;
     } finally {
@@ -1307,11 +2250,13 @@ export function createFleetBrowser({
         });
         if (compactRegKey(state.vehicle?.reg) !== reg) return;
         state.photoPending = true;
+        state.photoPendingName = uploaderName;
         state.photoStatus = "";
         render();
       } catch (error) {
         if (compactRegKey(state.vehicle?.reg) !== reg) return;
         state.photoPending = false;
+        state.photoPendingName = "";
         state.photoStatus = error?.message || "Could not upload photo";
         render();
       }
@@ -1525,6 +2470,36 @@ export function createFleetBrowser({
     `;
   }
 
+  function renderRouteNumberChips(routes, { loading = false, emptyLabel = "No routes yet" } = {}) {
+    if (loading) return `<div class="fleet-route-chips is-loading"><span class="fleet-muted">Loading routes…</span></div>`;
+    const list = Array.isArray(routes) ? routes : [];
+    if (!list.length) return `<div class="fleet-route-chips"><span class="fleet-muted">${esc(emptyLabel)}</span></div>`;
+    return `<div class="fleet-route-chips" role="list">${list
+      .map((row) => {
+        const at = Boolean(row._at);
+        const line = row.line_name || "?";
+        const title = row.description ? `${line} · ${row.description}` : line;
+        return `<button type="button" class="fleet-route-chip${at ? " is-at" : ""}" role="listitem" title="${esc(title)}" data-action="${at ? "open-at-route" : "open-route-service"}" data-arg="${esc(row.id)}" data-line="${esc(line)}">${esc(line)}</button>`;
+      })
+      .join("")}</div>`;
+  }
+
+  function renderOperatorRouteColumn(op) {
+    if (!isRouteCatalogueOperator(op?.noc)) return "";
+    if (state.operatorRoutesLoading && !state.operatorRoutes.length) {
+      return `<section class="fleet-section fleet-op-routes">
+        <h2 class="fleet-section-title">Routes</h2>
+        ${renderRouteNumberChips([], { loading: true })}
+      </section>`;
+    }
+    const routes = state.operatorRoutes || [];
+    return `<section class="fleet-section fleet-op-routes">
+      <h2 class="fleet-section-title">Routes · ${routes.length || "…"}</h2>
+      <p class="fleet-muted fleet-section-note">Route numbers for ${esc(decodeHtml(op.name))} · open one for timetable and buses</p>
+      ${renderRouteNumberChips(routes, { emptyLabel: "No public routes listed yet." })}
+    </section>`;
+  }
+
   function renderHome(vehicleHits = []) {
     if (state.tab === "private-hire") return renderPrivateHireHome(vehicleHits);
     const ops = fleetCompanies(operatorsMatching(state.query));
@@ -1598,7 +2573,7 @@ export function createFleetBrowser({
       </section>
       <section class="fleet-section">
         <h2 class="fleet-section-title">School &amp; college buses · ${schoolRoutes.length}</h2>
-        <p class="fleet-muted fleet-section-note">Registered Staffordshire school services. Live on the map at school run times when operators publish AVL. Closed-door council contracts without a public feed are not trackable.</p>
+        <p class="fleet-muted fleet-section-note">Staffordshire school &amp; college services only (registered local routes). Other UK school buses are not listed here. Live on the map at run times when operators publish AVL.</p>
         <ul class="fleet-list">
           ${schoolRoutes
             .map((row) => {
@@ -1664,6 +2639,9 @@ export function createFleetBrowser({
       ])}
       <h1 class="fleet-title"><span class="fleet-route fleet-route-school">${esc(line)}</span> ${esc(meta.name || line)}</h1>
       <p class="fleet-lead">${esc(meta.operator || "School service")}${meta.noc ? ` · NOC ${esc(meta.noc)}` : ""}</p>
+      <p class="fleet-actions">
+        <button type="button" class="fleet-link-btn" data-action="show-route-tails" data-line="${esc(line)}" data-operator="${esc(meta.noc || "")}">Map · tails</button>
+      </p>
       ${state.error ? `<p class="fleet-error">${esc(state.error)}</p>` : ""}
       ${
         state.loading
@@ -1674,10 +2652,18 @@ export function createFleetBrowser({
                   const id = entry.btId || "";
                   return `<li class="fleet-list-row">
                     <button type="button" class="fleet-list-btn" data-action="${id ? "open-vehicle" : "track-at"}" data-id="${esc(id)}" data-reg="${esc(entry.regLabel)}" data-fleet="${esc(entry.fleet)}" data-line="${esc(entry.line || line)}">
-                      <span class="fleet-list-main">${esc(entry.fleet || "—")} ${plateHtml(entry.regLabel)}${lastTrackedHtml({ trackedAt: entry.recordedAtTime })}<span class="fleet-last-route fleet-last-route-school">${esc(entry.line)} · ${esc(entry.dest)}</span></span>
+                      <span class="fleet-list-main">${esc(entry.fleet || "—")} ${plateHtml(entry.regLabel)}<span class="fleet-last-route fleet-last-route-school">${esc(entry.line)} · ${esc(entry.dest)}</span>${lastTrackedHtml({ trackedAt: entry.recordedAtTime })}</span>
                       <span class="fleet-list-sub">School / college service${entry.operator ? ` · ${esc(entry.operator)}` : ""}</span>
                     </button>
-                    <button type="button" class="fleet-link-btn fleet-list-map" data-action="play-journey" data-trip-id="" data-journey-id="" data-vehicle-id="${esc(id)}" data-trail-key="${esc(id)}" data-reg="${esc(entry.regLabel)}" data-line="${esc(entry.line)}" data-dest="${esc(entry.dest)}" data-datetime="${esc(entry.recordedAtTime || "")}">Map</button>
+                    <button type="button" class="fleet-link-btn fleet-list-map" data-action="play-journey" ${fleetMapDataAttrs({
+                      vehicleId: id,
+                      trailKey: id,
+                      reg: entry.regLabel,
+                      line: entry.line,
+                      direction: entry.direction,
+                      dest: entry.dest,
+                      datetime: entry.recordedAtTime || "",
+                    })}>Map</button>
                   </li>`;
                 })
                 .join("")}</ul>`
@@ -1700,6 +2686,9 @@ export function createFleetBrowser({
       <h1 class="fleet-title"><span class="fleet-route fleet-route-scfc">${esc(line)}</span> Stoke City FC shuttle</h1>
       <p class="fleet-lead">${esc(meta.name || "")}${meta.note ? ` · ${esc(meta.note)}` : ""}</p>
       <p class="fleet-muted fleet-section-note">${esc(meta.operator || "First Potteries")}${meta.noc ? ` · NOC ${esc(meta.noc)}` : ""} · Glebe Street &amp; Hanley to bet365 Stadium</p>
+      <p class="fleet-actions">
+        <button type="button" class="fleet-link-btn" data-action="show-route-tails" data-line="${esc(line)}" data-operator="FPOT">Map · tails</button>
+      </p>
       ${ttHtml}
       ${state.error ? `<p class="fleet-error">${esc(state.error)}</p>` : ""}
       ${
@@ -1711,10 +2700,18 @@ export function createFleetBrowser({
                   const id = entry.btId || "";
                   return `<li class="fleet-list-row">
                     <button type="button" class="fleet-list-btn" data-action="${id ? "open-vehicle" : "track-at"}" data-id="${esc(id)}" data-reg="${esc(entry.regLabel)}" data-fleet="${esc(entry.fleet)}" data-line="${esc(entry.line || line)}">
-                      <span class="fleet-list-main">${esc(entry.fleet || "—")} ${plateHtml(entry.regLabel)}${lastTrackedHtml({ trackedAt: entry.recordedAtTime })}<span class="fleet-last-route fleet-last-route-scfc">${esc(entry.line)} · ${esc(entry.dest)}</span></span>
+                      <span class="fleet-list-main">${esc(entry.fleet || "—")} ${plateHtml(entry.regLabel)}<span class="fleet-last-route fleet-last-route-scfc">${esc(entry.line)} · ${esc(entry.dest)}</span>${lastTrackedHtml({ trackedAt: entry.recordedAtTime })}</span>
                       <span class="fleet-list-sub">Stoke City FC shuttle${entry.operator ? ` · ${esc(entry.operator)}` : ""}</span>
                     </button>
-                    <button type="button" class="fleet-link-btn fleet-list-map" data-action="play-journey" data-trip-id="" data-journey-id="" data-vehicle-id="${esc(id)}" data-trail-key="${esc(id)}" data-reg="${esc(entry.regLabel)}" data-line="${esc(entry.line)}" data-dest="${esc(entry.dest)}" data-datetime="${esc(entry.recordedAtTime || "")}">Map</button>
+                    <button type="button" class="fleet-link-btn fleet-list-map" data-action="play-journey" ${fleetMapDataAttrs({
+                      vehicleId: id,
+                      trailKey: id,
+                      reg: entry.regLabel,
+                      line: entry.line,
+                      direction: entry.direction,
+                      dest: entry.dest,
+                      datetime: entry.recordedAtTime || "",
+                    })}>Map</button>
                   </li>`;
                 })
                 .join("")}</ul>`
@@ -1726,6 +2723,114 @@ export function createFleetBrowser({
   function renderAtRoute() {
     const line = state.atLine;
     const meta = state.atMeta || AT_ROUTES.find((row) => row.line === line) || { line };
+    const dates = [];
+    for (let i = 0; i < 7; i += 1) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      dates.push(ukDateKey(d));
+    }
+    const dayList = state.atDayVehicles || [];
+    const liveNow = dayList.filter((v) => v.live);
+
+    // Bustimes Vehicles tab: one row per trip (not one card per bus).
+    const tripRows = [];
+    for (const vehicle of dayList) {
+      const runs = Array.isArray(vehicle.journeys) ? vehicle.journeys : [];
+      const trailKey =
+        vehicle.trailKey || (vehicle.ref ? `staff-${vehicle.ref}` : vehicle.btId || "");
+      if (!runs.length) {
+        if (!vehicle.live) continue;
+        tripRows.push({
+          fleet: vehicle.fleet || "—",
+          reg: vehicle.regLabel || vehicle.reg || "",
+          btId: vehicle.btId || "",
+          ref: vehicle.ref || "",
+          trailKey,
+          datetime: vehicle.lastAt || "",
+          destination: atTripDestination(line, vehicle.direction, vehicle.dest || atDestForLine(line)),
+          direction: vehicle.direction || "",
+          trip_id: "",
+          journey_id: "",
+          live: true,
+        });
+        continue;
+      }
+      for (const row of runs) {
+        tripRows.push({
+          fleet: vehicle.fleet || "—",
+          reg: vehicle.regLabel || vehicle.reg || "",
+          btId: vehicle.btId || "",
+          ref: vehicle.ref || "",
+          trailKey: row.trailKey || trailKey,
+          datetime: row.datetime || "",
+          destination: atTripDestination(
+            line,
+            row.direction || vehicle.direction,
+            row.destination || vehicle.dest || atDestForLine(line),
+          ),
+          direction: row.direction || vehicle.direction || "",
+          trip_id: row.trip_id || "",
+          journey_id: row.journey_id || row.id || "",
+          live: Boolean(row.atLive || vehicle.live),
+        });
+      }
+    }
+    tripRows.sort((a, b) => String(a.datetime || "").localeCompare(String(b.datetime || "")));
+    const uniqueBuses = new Set(
+      tripRows.map((row) => String(row.btId || row.ref || row.reg || "")).filter(Boolean),
+    );
+
+    const timetableHtml = renderAtTimetableHtml(state.routeTimetable, {
+      line,
+      loading: state.routeTimetableLoading,
+      error: state.routeTimetableError,
+    });
+
+    const tripTableHtml = state.loading
+      ? `<p class="fleet-muted">Loading AT buses for ${esc(formatLongDate(state.date))}…</p>`
+      : tripRows.length
+        ? `<table class="fleet-table fleet-route-trips">
+            <thead><tr><th>Vehicle</th><th>Trip</th><th>To</th><th></th></tr></thead>
+            <tbody>
+              ${tripRows
+                .map((entry) => {
+                  const time = formatJourneyTime(entry.datetime);
+                  const openAction = entry.btId ? "open-vehicle" : "track-at";
+                  return `<tr>
+                    <td>
+                      <button type="button" class="fleet-table-vehicle" data-action="${openAction}" data-id="${esc(entry.btId)}" data-reg="${esc(entry.reg)}" data-fleet="${esc(entry.fleet)}" data-ref="${esc(entry.ref)}" data-line="${esc(line)}">
+                        <span class="fleet-table-fleet">${esc(entry.fleet)}</span>
+                        ${plateHtml(entry.reg)}
+                        ${entry.live ? ` <span class="fleet-live-tag">live</span>` : ""}
+                      </button>
+                    </td>
+                    <td class="fleet-trip"><span>${esc(time)}</span><span class="fleet-trip-alt">${esc(time)}</span></td>
+                    <td>${esc(entry.destination || "—")}${
+                      formatAtDirection(entry.direction)
+                        ? ` <span class="fleet-muted">(${esc(formatAtDirection(entry.direction))})</span>`
+                        : ""
+                    }</td>
+                    <td class="fleet-row-actions">
+                      <button type="button" class="fleet-link-btn" data-action="play-journey" ${fleetMapDataAttrs({
+                        tripId: entry.trip_id || "",
+                        journeyId: entry.journey_id || "",
+                        vehicleId: entry.btId || "",
+                        trailKey: entry.trailKey || "",
+                        reg: entry.reg || "",
+                        line,
+                        operator: "DAGC",
+                        direction: entry.direction || "",
+                        dest: entry.destination || "",
+                        datetime: entry.datetime || "",
+                      })}>Map</button>
+                    </td>
+                  </tr>`;
+                })
+                .join("")}
+            </tbody>
+          </table>`
+        : `<p class="fleet-muted">No vehicles recorded on ${esc(line)} for ${esc(formatLongDate(state.date))} yet. Trails appear once buses have been tracked on the map.</p>`;
+
     return `
       ${fleetNav([
         { label: "Staffordshire", action: "home" },
@@ -1735,26 +2840,30 @@ export function createFleetBrowser({
       ])}
       <h1 class="fleet-title"><span class="fleet-route">${esc(line)}</span> ${esc(meta.name || line)}</h1>
       <p class="fleet-lead">${esc(meta.origin || "")} → ${esc(meta.destination || "Alton Towers")}${meta.via?.length ? ` · via ${esc(meta.via.join(", "))}` : ""}</p>
-      ${state.error ? `<p class="fleet-error">${esc(state.error)}</p>` : ""}
+      <p class="fleet-muted fleet-section-note">Full D&amp;G Bus app timetable below · tracked trips listed separately — press <strong>Map</strong> on a row to replay that run only.</p>
+      <label class="fleet-date-label">
+        <span class="sr-only">Date</span>
+        <select id="fleet-at-date" class="fleet-date">
+          ${dates
+            .map((key) => `<option value="${esc(key)}" ${key === state.date ? "selected" : ""}>${esc(formatLongDate(key))}</option>`)
+            .join("")}
+        </select>
+      </label>
       ${
-        state.loading
-          ? `<p class="fleet-muted">Loading live AT buses…</p>`
-          : state.atVehicles.length
-            ? `<ul class="fleet-list">${state.atVehicles
-                .map((entry) => {
-                  const id = entry.btId || "";
-                  const trailKey = entry.ref ? `staff-${entry.ref}` : "";
-                  return `<li class="fleet-list-row">
-                    <button type="button" class="fleet-list-btn" data-action="${id ? "open-vehicle" : "track-at"}" data-id="${esc(id)}" data-reg="${esc(entry.regLabel)}" data-fleet="${esc(entry.fleet)}" data-ref="${esc(entry.ref)}" data-line="${esc(entry.line || line)}">
-                      <span class="fleet-list-main">${esc(entry.fleet || "—")} ${plateHtml(entry.regLabel)}${lastTrackedHtml({ trackedAt: entry.recordedAtTime })}<span class="fleet-last-route fleet-last-route-at">${esc(entry.line)} · ${esc(entry.dest)}</span></span>
-                      <span class="fleet-list-sub">${entry.direction ? esc(entry.direction) + " · " : ""}D&G Bus employee-only</span>
-                    </button>
-                    <button type="button" class="fleet-link-btn fleet-list-map" data-action="play-journey" data-trip-id="" data-journey-id="" data-vehicle-id="${esc(id)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(entry.regLabel)}" data-line="${esc(entry.line)}" data-dest="${esc(entry.dest)}" data-datetime="${esc(entry.recordedAtTime || "")}">Map</button>
-                  </li>`;
-                })
-                .join("")}</ul>`
-            : `<p class="fleet-muted">No buses currently tracked on ${esc(line)}.</p>`
+        liveNow.length
+          ? `<p class="fleet-muted">${liveNow.length} live on ${esc(line)} right now</p>`
+          : ""
       }
+      ${state.error ? `<p class="fleet-error">${esc(state.error)}</p>` : ""}
+      ${timetableHtml}
+      <section class="fleet-section">
+        <h2 class="fleet-section-title">Vehicles · ${state.loading ? "…" : tripRows.length}${
+          !state.loading && uniqueBuses.size
+            ? ` <span class="fleet-muted">(${uniqueBuses.size} buses)</span>`
+            : ""
+        }</h2>
+        ${tripTableHtml}
+      </section>
     `;
   }
 
@@ -1768,26 +2877,68 @@ export function createFleetBrowser({
       dates.push(ukDateKey(d));
     }
 
+    const uniqueBuses = new Set(
+      (state.routeVehicles || [])
+        .map((row) => String(row.id || row.trailKey || row.journey_id || ""))
+        .filter(Boolean),
+    );
     const busListHtml = state.loading
       ? `<p class="fleet-muted">Loading buses…</p>`
       : state.routeVehicles.length
-        ? `<ul class="fleet-list">${state.routeVehicles
-            .map((entry) => {
-              const trailKey = entry.id || "";
-              const lineCode = entry.route_name || service?.line_name || line;
-              return `<li class="fleet-list-row">
-                <button type="button" class="fleet-list-btn" data-action="open-vehicle" data-id="${esc(entry.id)}" data-line="${esc(lineCode)}">
-                  <span class="fleet-list-main">${esc(entry.fleet_code || "—")} ${plateHtml(entry.reg)}${lastTrackedHtml({ trackedAt: entry.datetime })}${lastRouteHtml({ route: lineCode, dest: entry.destination, noLink: true })}</span>
-                  <span class="fleet-list-sub">${esc(entry.destination || "No destination")} · ${esc(formatShortTime(entry.datetime) || "")}</span>
-                </button>
-                ${
-                  entry.trip_id || entry.journey_id
-                    ? `<button type="button" class="fleet-link-btn fleet-list-map" data-action="play-journey" data-trip-id="${esc(entry.trip_id || "")}" data-journey-id="${esc(entry.journey_id || "")}" data-vehicle-id="${esc(entry.id)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(entry.reg)}" data-line="${esc(lineCode)}" data-dest="${esc(entry.destination || "")}" data-datetime="${esc(entry.datetime || "")}">Map</button>`
-                    : ""
-                }
-              </li>`;
-            })
-            .join("")}</ul>`
+        ? `<table class="fleet-table fleet-route-trips">
+            <thead><tr><th>Vehicle</th><th>Trip</th><th>To</th><th></th></tr></thead>
+            <tbody>
+              ${state.routeVehicles
+                .map((entry) => {
+                  const trailKey = entry.trailKey || entry.id || entry.journey_id || "";
+                  const lineCode = entry.route_name || service?.line_name || line;
+                  const time = formatJourneyTime(entry.datetime);
+                  const fleet =
+                    entry.fleet_code ||
+                    (entry.live ? "Live" : entry.anonymous ? "—" : "—");
+                  const vehicleCell = entry.id
+                    ? `<button type="button" class="fleet-table-vehicle" data-action="open-vehicle" data-id="${esc(entry.id)}" data-line="${esc(lineCode)}">
+                        <span class="fleet-table-fleet">${esc(fleet)}</span>
+                        ${plateHtml(entry.reg)}
+                        ${entry.live ? `<span class="fleet-live-tag">live</span>` : ""}
+                      </button>`
+                    : `<div class="fleet-table-vehicle is-static">
+                        <span class="fleet-table-fleet">${esc(entry.label || fleet)}</span>
+                        ${entry.reg ? plateHtml(entry.reg) : entry.live ? `<span class="fleet-muted">on map</span>` : ""}
+                        ${entry.live ? `<span class="fleet-live-tag">live</span>` : ""}
+                      </div>`;
+                  return `<tr class="${entry.live ? "is-live" : ""}">
+                    <td>${vehicleCell}</td>
+                    <td class="fleet-trip"><span>${esc(time)}</span><span class="fleet-trip-alt">${esc(time)}</span></td>
+                    <td>${esc(entry.destination || "—")}</td>
+                    <td class="fleet-row-actions">
+                      ${
+                        entry.id || entry.trip_id || entry.journey_id || trailKey
+                          ? `<button type="button" class="fleet-link-btn" data-action="play-journey" ${fleetMapDataAttrs({
+                              tripId: entry.trip_id || "",
+                              journeyId: entry.journey_id || "",
+                              vehicleId: entry.id,
+                              trailKey,
+                              reg: entry.reg,
+                              line: lineCode,
+                              operator:
+                                entry.operator?.id ||
+                                entry.operator?.noc ||
+                                (Array.isArray(service?.operator) && service.operator[0]) ||
+                                state._routePreferNoc ||
+                                "",
+                              direction: entry.direction || "",
+                              dest: entry.destination || "",
+                              datetime: entry.datetime || "",
+                            })}>Map</button>`
+                          : ""
+                      }
+                    </td>
+                  </tr>`;
+                })
+                .join("")}
+            </tbody>
+          </table>`
         : `<p class="fleet-muted">No buses recorded on route ${esc(line)} for ${esc(formatLongDate(state.date))}.</p>`;
 
     if (!service) {
@@ -1798,7 +2949,10 @@ export function createFleetBrowser({
           { label: `Route ${line}` },
         ])}
         <h1 class="fleet-title">Route ${routeNumberBtn(line)}</h1>
-        <p class="fleet-lead">Staffordshire buses that have run route <strong>${esc(line)}</strong></p>
+        <p class="fleet-lead">Staffordshire buses that have run route <strong>${esc(line)}</strong> — each trip listed separately</p>
+        <p class="fleet-actions">
+          <button type="button" class="fleet-link-btn" data-action="show-route-tails" data-line="${esc(line)}" data-operator="FPOT">Map · tails</button>
+        </p>
         <label class="fleet-date-label">
           <span class="sr-only">Date</span>
           <select id="fleet-route-date" class="fleet-date">
@@ -1814,7 +2968,11 @@ export function createFleetBrowser({
         }
         ${state.error ? `<p class="fleet-error">${esc(state.error)}</p>` : ""}
         <section class="fleet-section">
-          <h2 class="fleet-section-title">Buses · ${state.loading ? "…" : state.routeVehicles.length}</h2>
+          <h2 class="fleet-section-title">Vehicles · ${state.loading ? "…" : state.routeVehicles.length}${
+            !state.loading && uniqueBuses.size
+              ? ` <span class="fleet-muted">(${uniqueBuses.size} buses)</span>`
+              : ""
+          }</h2>
           ${busListHtml}
         </section>
         ${
@@ -1840,15 +2998,35 @@ export function createFleetBrowser({
     }
 
     const ops = serviceOperatorLabel(service);
+    const timetableHtml = renderServiceTimetableHtml(state.routeTimetable, {
+      date: state.date,
+      line: service.line_name || line,
+      loading: state.routeTimetableLoading,
+      error: state.routeTimetableError,
+    });
+    const opCrumb =
+      state.operator?.slug && isRouteCatalogueOperator(state.operator.noc)
+        ? [
+            { label: decodeHtml(state.operator.name), action: "open-operator", arg: state.operator.slug },
+          ]
+        : [];
     return `
       ${fleetNav([
         { label: "Staffordshire", action: "home" },
         { label: homeCrumbLabel(), action: "home" },
+        ...opCrumb,
         { label: `Route ${line}`, action: "open-route-line", line },
         { label: service.description || service.line_name || line },
       ])}
       <h1 class="fleet-title">${routeNumberBtn(service.line_name || line)} ${esc(service.description || "")}</h1>
-      <p class="fleet-lead">${esc(ops || "Service")} · buses that ran this route</p>
+      <p class="fleet-lead">${esc(ops || "Service")} · ${
+        ["FLIX", "NATX"].includes(String((Array.isArray(service?.operator) && service.operator[0]) || state._routePreferNoc || "").toUpperCase())
+          ? "live coaches on this route, plus today’s trips"
+          : "each trip listed separately (Vehicle · Trip · To · Map)"
+      }</p>
+      <p class="fleet-actions">
+        <button type="button" class="fleet-link-btn" data-action="show-route-tails" data-line="${esc(service.line_name || line)}" data-operator="${esc((Array.isArray(service?.operator) && service.operator[0]) || state._routePreferNoc || "")}">Map · tails</button>
+      </p>
       <label class="fleet-date-label">
         <span class="sr-only">Date</span>
         <select id="fleet-route-date" class="fleet-date">
@@ -1863,28 +3041,101 @@ export function createFleetBrowser({
           : ""
       }
       ${state.error ? `<p class="fleet-error">${esc(state.error)}</p>` : ""}
-      ${busListHtml}
+      ${timetableHtml}
+      <section class="fleet-section">
+        <h2 class="fleet-section-title">Vehicles · ${state.loading ? "…" : state.routeVehicles.length}${
+          !state.loading && uniqueBuses.size
+            ? ` <span class="fleet-muted">(${uniqueBuses.size} buses)</span>`
+            : ""
+        }</h2>
+        ${busListHtml}
+      </section>
     `;
   }
 
   function renderOperator() {
     const op = state.operator;
     if (!op) return renderHome();
+    const showRoutes = isRouteCatalogueOperator(op.noc);
+    const vehiclesHtml = !op.noc
+      ? `<div class="fleet-private-note">
+          <p class="fleet-muted">${
+            isPrivateHire(op)
+              ? "This operator does not publish a public live vehicle feed, so coaches will not appear on the map unless that changes."
+              : "Try searching the registration or fleet number above."
+          }</p>
+          ${
+            op.website
+              ? `<p><a class="fleet-ext-link" href="${esc(op.website)}" target="_blank" rel="noopener noreferrer">Visit ${esc(decodeHtml(op.name))} website</a></p>`
+              : ""
+          }
+        </div>`
+      : `<section class="fleet-section fleet-op-vehicles">
+          <h2 class="fleet-section-title">Vehicles · ${state.loading && !state.vehicles.length ? "…" : state.vehicles.length || state.vehicleCount || 0}</h2>
+          ${
+            state.loading && !state.vehicles.length
+              ? `<p class="fleet-muted">Loading fleet…</p>`
+              : state.vehicles.length
+                ? `<ul class="fleet-list">${state.vehicles
+                    .map((v) => {
+                      const route = v.lastRoute?.route || "";
+                      const dest = v.lastRoute?.dest || "";
+                      const when = v.lastRoute?.trackedAt || "";
+                      const mapBtn = isSingleVehicleRouteOperator(op.noc)
+                        ? `<button type="button" class="fleet-link-btn fleet-list-map" data-action="play-journey" ${fleetMapDataAttrs({
+                            vehicleId: v.id,
+                            trailKey: v.id,
+                            reg: v.reg || "",
+                            line: route,
+                            operator: op.noc || "",
+                            direction: v.lastRoute?.direction || "",
+                            dest,
+                            datetime: when,
+                          })}>Map</button>`
+                        : "";
+                      return `<li class="fleet-list-row">
+                        <button type="button" class="fleet-list-btn" data-action="open-vehicle" data-id="${esc(v.id)}" data-line="${esc(route)}">
+                          ${vehicleMainHtml(v)}
+                          <span class="fleet-list-sub">${esc(v.vehicle_type?.name || "Unknown type")}${v.livery?.name ? ` · ${esc(v.livery.name)}` : ""}</span>
+                        </button>
+                        ${mapBtn}
+                      </li>`;
+                    })
+                    .join("")}</ul>`
+                : `<p class="fleet-muted">No active vehicles found for this operator.</p>`
+          }
+        </section>`;
     return `
       ${fleetNav([
         { label: "Staffordshire", action: "home" },
         { label: homeCrumbLabel(), action: "home" },
         { label: decodeHtml(op.name) },
-        { label: "Vehicles" },
+        { label: showRoutes ? "Routes & vehicles" : "Vehicles" },
       ])}
       <h1 class="fleet-title">${esc(decodeHtml(op.name))}</h1>
       <p class="fleet-lead">${
         isPrivateHire(op)
           ? esc(op.note || "Private hire / coach travel")
           : op.noc
-            ? `Operator code ${esc(op.noc)} · ${state.vehicleCount} vehicles`
+            ? `Operator code ${esc(op.noc)} · ${state.vehicleCount} vehicles${
+                showRoutes && state.operatorRoutes.length
+                  ? ` · ${state.operatorRoutes.length} routes`
+                  : ""
+              }`
             : "No vehicle list available for this operator yet."
       }</p>
+      ${
+        isSingleVehicleRouteOperator(op.noc)
+          ? `<p class="fleet-muted fleet-section-note">Open a route for a Vehicle · Trip · To · Map list (each trip separate). Press <strong>Map</strong> on a bus for that vehicle only.</p>`
+          : ""
+      }
+      ${
+        String(op.noc || "").toUpperCase() === "DAGC"
+          ? `<p class="fleet-muted fleet-section-note">Public routes and AT1–AT3 employee services list every trip separately, same layout as bustimes.</p>`
+          : ["FLIX", "NATX", "FPOT"].includes(String(op.noc || "").toUpperCase())
+            ? `<p class="fleet-muted fleet-section-note">Routes and timetables list every trip separately (Vehicle · Trip · To · Map), same layout as bustimes.</p>`
+            : ""
+      }
       ${
         isPrivateHire(op) && op.noc
           ? `<p class="fleet-muted fleet-section-note">Live coaches and buses appear on the map when this operator’s public feed is tracking them.</p>`
@@ -1892,40 +3143,14 @@ export function createFleetBrowser({
       }
       ${state.error ? `<p class="fleet-error">${esc(state.error)}</p>` : ""}
       ${
-        !op.noc
-          ? `<div class="fleet-private-note">
-              <p class="fleet-muted">${
-                isPrivateHire(op)
-                  ? "This operator does not publish a public live vehicle feed, so coaches will not appear on the map unless that changes."
-                  : "Try searching the registration or fleet number above."
-              }</p>
-              ${
-                op.website
-                  ? `<p><a class="fleet-ext-link" href="${esc(op.website)}" target="_blank" rel="noopener noreferrer">Visit ${esc(decodeHtml(op.name))} website</a></p>`
-                  : ""
-              }
-            </div>`
-          : `${
-              op.website
-                ? `<p><a class="fleet-ext-link" href="${esc(op.website)}" target="_blank" rel="noopener noreferrer">Visit ${esc(decodeHtml(op.name))} website</a></p>`
-                : ""
-            }
-            ${
-              state.loading && !state.vehicles.length
-                ? `<p class="fleet-muted">Loading fleet…</p>`
-                : state.vehicles.length
-                  ? `<ul class="fleet-list">${state.vehicles
-                      .map(
-                        (v) => `<li>
-                          <button type="button" class="fleet-list-btn" data-action="open-vehicle" data-id="${esc(v.id)}">
-                            ${vehicleMainHtml(v)}
-                            <span class="fleet-list-sub">${esc(v.vehicle_type?.name || "Unknown type")}${v.livery?.name ? ` · ${esc(v.livery.name)}` : ""}</span>
-                          </button>
-                        </li>`,
-                      )
-                      .join("")}</ul>`
-                  : `<p class="fleet-muted">No active vehicles found for this operator.</p>`
-            }`
+        op.website && op.noc
+          ? `<p><a class="fleet-ext-link" href="${esc(op.website)}" target="_blank" rel="noopener noreferrer">Visit ${esc(decodeHtml(op.name))} website</a></p>`
+          : ""
+      }
+      ${
+        showRoutes
+          ? `<div class="fleet-op-split">${vehiclesHtml}${renderOperatorRouteColumn(op)}</div>`
+          : vehiclesHtml
       }
     `;
   }
@@ -1990,16 +3215,16 @@ export function createFleetBrowser({
       <h1 class="fleet-title fleet-vehicle-title">
         <span>${esc(v.fleet_code || v.fleet_number || "")}</span>
         ${plateHtml(v.reg)}
-        ${lastTrackedHtml(
-          v.lastRoute ||
-            (state.journeys?.[0]
-              ? { trackedAt: state.journeys[0].datetime, date: state.journeys[0].date }
-              : null),
-        )}
         ${lastRouteHtml(
           v.lastRoute ||
             (state.journeys?.[0]
               ? { route: state.journeys[0].route_name, dest: state.journeys[0].destination }
+              : null),
+        )}
+        ${lastTrackedHtml(
+          v.lastRoute ||
+            (state.journeys?.[0]
+              ? { trackedAt: state.journeys[0].datetime, date: state.journeys[0].date }
               : null),
         )}
       </h1>
@@ -2011,6 +3236,25 @@ export function createFleetBrowser({
       </div>
       <div class="fleet-actions">
         <button type="button" class="fleet-track-btn" data-action="track-vehicle" data-id="${esc(v.id)}" data-reg="${esc(v.reg || "")}" data-fleet="${esc(v.fleet_code || "")}">Track this bus</button>
+        ${
+          isSingleVehicleRouteOperator(v.operator?.id || v.operator?.noc || state.operator?.noc)
+            ? (() => {
+                const route =
+                  state.lineFilter ||
+                  v.lastRoute?.route ||
+                  state.journeys?.[0]?.route_name ||
+                  "";
+                const dest = v.lastRoute?.dest || state.journeys?.[0]?.destination || "";
+                const when =
+                  v.lastRoute?.trackedAt || state.journeys?.[0]?.datetime || "";
+                const tripId = state.journeys?.[0]?.trip_id || "";
+                const journeyId = state.journeys?.[0]?.id || "";
+                const direction =
+                  state.journeys?.[0]?.direction || v.lastRoute?.direction || "";
+                return `<button type="button" class="fleet-link-btn" data-action="show-route-tails" data-line="${esc(route)}" data-operator="${esc(v.operator?.id || v.operator?.noc || state.operator?.noc || "")}" data-vehicle-id="${esc(v.id)}" data-trail-key="${esc(v.id)}" data-reg="${esc(v.reg || "")}" data-dest="${esc(dest)}" data-datetime="${esc(when)}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(journeyId)}" data-direction="${esc(normalizeFleetDirection(direction))}">Map · this bus</button>`;
+              })()
+            : ""
+        }
       </div>
       ${renderVehiclePhoto(v)}
       <label class="fleet-date">
@@ -2027,6 +3271,41 @@ export function createFleetBrowser({
           ? `<p class="fleet-lead">Showing route <span class="fleet-route">${esc(state.lineFilter)}</span> only</p>`
           : ""
       }
+      ${(() => {
+        const lines = [];
+        const seen = new Set();
+        for (const row of state.allJourneys || state.journeys || []) {
+          const code =
+            (row.route_name && !/^div/i.test(String(row.route_name))
+              ? row.route_name
+              : "") ||
+            row.extracted_route ||
+            row.route_name ||
+            "";
+          const upper = String(code || "").trim().toUpperCase();
+          if (!upper || seen.has(upper)) continue;
+          seen.add(upper);
+          lines.push({
+            code: String(code).trim(),
+            at: AT_LINE_SET.has(upper) || row.atLive || row.atTrail,
+          });
+        }
+        lines.sort((a, b) => compareLineNames(a.code, b.code));
+        if (lines.length < 2 && !lines.some((row) => row.at)) return "";
+        return `<div class="fleet-route-chips fleet-vehicle-route-chips" role="list" aria-label="Routes this bus has run">
+          ${
+            state.lineFilter
+              ? `<button type="button" class="fleet-route-chip" role="listitem" data-action="clear-vehicle-line">All</button>`
+              : ""
+          }
+          ${lines
+            .map((row) => {
+              const on = sameLineCode(state.lineFilter, row.code);
+              return `<button type="button" class="fleet-route-chip${row.at ? " is-at" : ""}${on ? " is-on" : ""}" role="listitem" data-action="filter-vehicle-line" data-line="${esc(row.code)}" title="${row.at ? "Alton Towers employee route" : `Filter to route ${row.code}`}">${esc(row.code)}</button>`;
+            })
+            .join("")}
+        </div>`;
+      })()}
       ${state.error ? `<p class="fleet-error">${esc(state.error)}</p>` : ""}
       ${
         state.loading
@@ -2046,7 +3325,7 @@ export function createFleetBrowser({
                         row.route_name ||
                         "";
                       return `<tr>
-                        <td>${routeNumberBtn(line, { className: row.atLive ? "fleet-route-at" : "" })}${row.atLive || row.live ? ` <span class="fleet-live-tag">live</span>` : ""}${row.diverted ? ` <span class="fleet-divert-tag">div</span>` : ""}</td>
+                        <td>${routeNumberBtn(line, { className: row.atLive || row.atTrail ? "fleet-route-at" : "" })}${row.atLive || row.live ? ` <span class="fleet-live-tag">live</span>` : ""}${row.diverted ? ` <span class="fleet-divert-tag">div</span>` : ""}</td>
                         <td class="fleet-trip"><span>${esc(time)}</span><span class="fleet-trip-alt">${esc(time)}</span></td>
                         <td>${esc(row.destination || "—")}${row.diverted ? ` <span class="fleet-muted">(diverted)</span>` : ""}</td>
                         <td class="fleet-row-actions">
@@ -2054,7 +3333,23 @@ export function createFleetBrowser({
                             (() => {
                               const trailKey = row.trailKey || String(v.id || "");
                               if (!row.trip_id && !trailKey) return "";
-                              return `<button type="button" class="fleet-link-btn" data-action="play-journey" data-trip-id="${esc(row.trip_id || "")}" data-journey-id="${esc(row.id || "")}" data-vehicle-id="${esc(v.id)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(v.reg || "")}" data-line="${esc(line)}" data-dest="${esc(row.destination || "")}" data-datetime="${esc(row.datetime || "")}">Map</button>`;
+                              return `<button type="button" class="fleet-link-btn" data-action="play-journey" ${fleetMapDataAttrs({
+                                tripId: row.trip_id || "",
+                                journeyId:
+                                  row.journey_id ||
+                                  (String(row.id || "").startsWith("at-") || String(row.id || "").startsWith("live-")
+                                    ? ""
+                                    : row.id) ||
+                                  "",
+                                vehicleId: v.id,
+                                trailKey,
+                                reg: v.reg || "",
+                                line,
+                                operator: v.operator?.id || v.operator?.noc || "",
+                                direction: row.direction || "",
+                                dest: row.destination || "",
+                                datetime: row.datetime || "",
+                              })}>Map</button>`;
                             })()
                           }
                         </td>
@@ -2104,6 +3399,7 @@ export function createFleetBrowser({
     state.lineFilter = "";
     state.atLine = "";
     state.atVehicles = [];
+    state.atDayVehicles = [];
     state.atMeta = null;
     state.schoolLine = "";
     state.schoolVehicles = [];
@@ -2158,6 +3454,9 @@ export function createFleetBrowser({
     state.routeVehicles = [];
     state.routeLiveCount = 0;
     state.routeServices = [];
+    state.routeTimetable = [];
+    state.routeTimetableLoading = false;
+    state.routeTimetableError = "";
     state.date = date || ukDateKey();
     const preferOperatorNoc =
       state._routePreferNoc ||
@@ -2209,6 +3508,9 @@ export function createFleetBrowser({
     state.view = "route";
     state.date = date || ukDateKey();
     state.vehicle = null;
+    state.routeTimetable = [];
+    state.routeTimetableError = "";
+    state.routeTimetableLoading = true;
     setLoading(true);
     try {
       let service = state.routeServices.find((row) => String(row.id) === id) || state.routeService;
@@ -2221,25 +3523,62 @@ export function createFleetBrowser({
       state.routeService = service;
       state.routeLine = service.line_name || state.routeLine;
       state.lineFilter = state.routeLine;
-      const [vehicles, live] = await Promise.all([
-        fetchServiceJourneyVehicles(id, state.date),
+      // Prefer this operator when opening related line pages / crumbs (FlixBus, NATX, …).
+      const noc = serviceOperatorNoc(service);
+      if (noc) {
+        state._routePreferNoc = noc;
+        const op =
+          STAFFS_OPERATORS.find((row) => String(row.noc || "").toUpperCase() === noc) || null;
+        if (op) state.operator = op;
+      }
+      const coach = ["FLIX", "NATX"].includes(noc);
+      const [vehicles, live, trips] = await Promise.all([
+        fetchServiceJourneyVehicles(id, state.date, { includeAnonymous: coach }),
         fetchLiveServiceVehicles(id),
+        fetchServiceTimetableTrips(id, state.date).catch((error) => {
+          state.routeTimetableError = error.message || "Could not load timetable";
+          return [];
+        }),
       ]);
-      state.routeVehicles = vehicles;
+      // FlixBus hides plates on journeys — Vehicles tab must still list coaches running now.
+      state.routeVehicles = coach ? mergeRouteVehiclesWithLive(vehicles, live, service) : vehicles;
       state.routeLiveCount = live.length;
+      state.routeTimetable = trips;
+      state.routeTimetableLoading = Boolean(trips.length);
       setLoading(false);
+      if (trips.length) {
+        enrichTripsWithStopTimes(trips)
+          .then((enriched) => {
+            if (String(state.routeService?.id) !== id) return;
+            state.routeTimetable = enriched;
+            state.routeTimetableLoading = false;
+            if (state.view === "route") render();
+          })
+          .catch((error) => {
+            if (String(state.routeService?.id) !== id) return;
+            state.routeTimetableLoading = false;
+            state.routeTimetableError = error.message || "Could not load stop times";
+            if (state.view === "route") render();
+          });
+      } else {
+        state.routeTimetableLoading = false;
+      }
     } catch (error) {
       state.routeVehicles = [];
       state.routeLiveCount = 0;
+      state.routeTimetable = [];
+      state.routeTimetableLoading = false;
+      state.routeTimetableError = error.message || "Could not load route";
       setLoading(false, error.message || "Could not load route buses");
     }
   }
 
-  async function showAtRoute(line) {
+  async function showAtRoute(line, date = state.date) {
     const code = String(line || "").toUpperCase();
     if (!AT_LINE_SET.has(code)) return showHome();
     state.view = "at-route";
     state.atLine = code;
+    state.date = date || ukDateKey();
     state.lineFilter = "";
     state.vehicle = null;
     state.operator = null;
@@ -2249,15 +3588,32 @@ export function createFleetBrowser({
     state.matchdayVehicles = [];
     state.journeys = [];
     state.allJourneys = [];
+    state.atDayVehicles = [];
+    state.routeTimetable = [];
+    state.routeTimetableError = "";
+    state.routeTimetableLoading = true;
     setLoading(true);
     try {
       const cache = await ensureAtLive(0);
       state.atMeta = cache.meta.get(code) || AT_ROUTES.find((row) => row.line === code) || { line: code };
-      const entries = [...(cache.byLine.get(code) || [])];
-      await Promise.all(entries.map((entry) => resolveAtVehicleId(entry)));
-      state.atVehicles = entries;
+      const liveEntries = [...(cache.byLine.get(code) || [])];
+      const [, dayVehicles, trips] = await Promise.all([
+        Promise.all(liveEntries.map((entry) => resolveAtVehicleId(entry))),
+        fetchAtVehiclesForDay(code, state.date),
+        fetchAtTimetableTrips(code, state.date).catch((error) => {
+          state.routeTimetableError = error.message || "Could not load timetable";
+          return [];
+        }),
+      ]);
+      state.atVehicles = liveEntries;
+      state.atDayVehicles = dayVehicles;
+      state.routeTimetable = trips;
+      state.routeTimetableLoading = false;
       setLoading(false);
     } catch (error) {
+      state.routeTimetable = [];
+      state.routeTimetableLoading = false;
+      state.routeTimetableError = error.message || "Could not load timetable";
       setLoading(false, error.message || "Could not load AT route");
     }
   }
@@ -2333,23 +3689,55 @@ export function createFleetBrowser({
       state.vehicles = [];
       state.vehicleOffset = 0;
       state.vehicleCount = 0;
+      state.operatorRoutes = [];
     }
+    state.operatorRoutesLoading = false;
     if (!op.noc) {
       render();
       return;
     }
     setLoading(true);
+    const wantRoutes = isRouteCatalogueOperator(op.noc);
+    if (wantRoutes) state.operatorRoutesLoading = true;
     try {
-      const data = await fetchAllOperatorVehicles(op.noc, { search: state.query });
+      const vehiclePromise = fetchAllOperatorVehicles(op.noc, { search: state.query });
+      const routesPromise = wantRoutes
+        ? fetchAllOperatorServices(op.noc).catch(() => [])
+        : Promise.resolve([]);
+      const [data, routes] = await Promise.all([vehiclePromise, routesPromise]);
       const batch = data.results || [];
       state.vehicles = batch;
       state.vehicleCount = data.count || batch.length;
       state.vehicleOffset = batch.length;
+      if (wantRoutes) {
+        const list = [...routes];
+        if (String(op.noc).toUpperCase() === "DAGC") {
+          for (const at of AT_ROUTES) {
+            if (!list.some((row) => sameLineCode(row.line_name, at.line))) {
+              list.unshift({
+                id: `at:${at.line}`,
+                line_name: at.line,
+                description: `${at.name} · ${at.origin || ""} → ${at.destination || "Alton Towers"}`,
+                _at: true,
+              });
+            }
+          }
+          list.sort((a, b) => {
+            const aAt = Boolean(a._at);
+            const bAt = Boolean(b._at);
+            if (aAt !== bAt) return aAt ? -1 : 1;
+            return compareLineNames(a.line_name, b.line_name);
+          });
+        }
+        state.operatorRoutes = list;
+        state.operatorRoutesLoading = false;
+      }
       setLoading(false);
       attachLastRoutes(batch, () => {
         if (state.view === "operator") render();
       });
     } catch (error) {
+      state.operatorRoutesLoading = false;
       setLoading(false, error.message || "Could not load vehicles");
     }
   }
@@ -2408,6 +3796,7 @@ export function createFleetBrowser({
               live: true,
               diverted: liveRow.diverted,
               trackedAt: liveBus.datetime || new Date().toISOString(),
+              direction: liveRow.direction || directionFromJourneyRow(liveBus),
             };
           }
         }
@@ -2427,6 +3816,10 @@ export function createFleetBrowser({
             atLive: true,
             trailKey: trailKey || row.trailKey || "",
             trip_id: row.trip_id || tripMatch?.trip_id || null,
+            direction:
+              row.direction ||
+              normalizeFleetDirection(at.direction || at.directionRef || "") ||
+              "",
           };
         });
         if (!found) {
@@ -2439,6 +3832,7 @@ export function createFleetBrowser({
               trip_id: tripMatch?.trip_id || null,
               trailKey,
               atLive: true,
+              direction: normalizeFleetDirection(at.direction || at.directionRef || ""),
             },
             ...journeys,
           ];
@@ -2449,6 +3843,7 @@ export function createFleetBrowser({
           live: true,
           at: true,
           trackedAt: at.recordedAtTime || new Date().toISOString(),
+          direction: normalizeFleetDirection(at.direction || at.directionRef || ""),
         };
       } else if (!vehicle.lastRoute && journeys[0]) {
         vehicle.lastRoute = {
@@ -2456,14 +3851,41 @@ export function createFleetBrowser({
           dest: journeys[0].destination || "",
           trackedAt: journeys[0].datetime || "",
           date: journeys[0].date || "",
+          direction: journeys[0].direction || "",
         };
       } else if (vehicle.lastRoute && !vehicle.lastRoute.trackedAt && journeys[0]) {
         vehicle.lastRoute = {
           ...vehicle.lastRoute,
           trackedAt: journeys[0].datetime || vehicle.lastRoute.trackedAt || "",
           date: journeys[0].date || vehicle.lastRoute.date || "",
+          direction: vehicle.lastRoute.direction || journeys[0].direction || "",
         };
       }
+
+      // AT1–AT3 history comes from the server trail recorder (not Bustimes).
+      // Always merge for D&G vehicles so AT routes appear alongside public routes (1, 32, …).
+      const atLineFilter = AT_LINE_SET.has(String(state.lineFilter || "").toUpperCase())
+        ? String(state.lineFilter).toUpperCase()
+        : "";
+      const isDg =
+        String(vehicle.operator?.id || vehicle.operator?.noc || "").toUpperCase() === "DAGC" ||
+        /d-g-coach|D\s*&\s*G/i.test(`${vehicle.operator?.slug || ""} ${vehicle.operator?.name || ""}`);
+      if (atLineFilter || at || isDg) {
+        const regKey = compactQuery(vehicle.reg);
+        const trailKeys = [
+          at?.ref ? `staff-${at.ref}` : "",
+          String(vehicle.id || ""),
+          regKey && /^[A-Z0-9]+$/.test(regKey) ? `reg:${regKey}` : "",
+        ].filter(Boolean);
+        const atRows = await fetchAtHistoryFromTrails({
+          trailKeys,
+          line: atLineFilter || "",
+          date,
+          days: 7,
+        });
+        journeys = mergeAtHistoryRows(journeys, atRows);
+      }
+
       // Allow Map on finished journeys via tracked GPS even without a trip shape.
       journeys = journeys.map((row) => ({
         ...row,
@@ -2474,6 +3896,11 @@ export function createFleetBrowser({
       setLoading(false);
       loadVehiclePhoto(vehicle);
     } catch (error) {
+      const msg = String(error?.message || "");
+      if (/Request failed \(404\)/i.test(msg)) {
+        setLoading(false, "Vehicle not found — open FlixBus or National Express from the Fleet list");
+        return;
+      }
       setLoading(false, error.message || "Could not load vehicle");
     }
   }
@@ -2487,7 +3914,54 @@ export function createFleetBrowser({
       event.stopPropagation();
       const noc = state.vehicle?.operator?.noc || state.vehicle?.operator?.id || "";
       if (noc) state._routePreferNoc = noc;
-      showRouteLine(btn.dataset.line || state.routeLine);
+      const line = btn.dataset.line || state.routeLine;
+      showRouteLine(line);
+      return;
+    }
+    if (action === "show-route-tails") {
+      event.preventDefault();
+      event.stopPropagation();
+      const line = btn.dataset.line || state.routeLine || state.atLine || state.schoolLine || state.matchdayLine || "";
+      const operator =
+        btn.dataset.operator || state.vehicle?.operator?.id || state.operator?.noc || "";
+      const oneId = btn.dataset.vehicleId || "";
+      const oneTrail = btn.dataset.trailKey || "";
+      const oneReg = btn.dataset.reg || "";
+      // For Flix / NATX / D&G / First Potteries / Stanton's / AT1–AT3 always focus one bus.
+      const forceSingle =
+        isSingleVehicleRouteOperator(operator) || AT_LINE_SET.has(String(line || "").toUpperCase());
+      const vehicles =
+        oneId || oneTrail || oneReg || forceSingle
+          ? []
+          : state.routeVehicles?.length
+            ? (() => {
+                // routeVehicles is one row per trip — dedupe to one bus for Map · tails.
+                const byBus = new Map();
+                for (const row of state.routeVehicles) {
+                  if (!sameServiceLine(row.route_name || row.line || line, line)) continue;
+                  const id = String(row.id || row.btId || "");
+                  if (!id || byBus.has(id)) continue;
+                  byBus.set(id, row);
+                }
+                return [...byBus.values()];
+              })()
+            : state.atVehicles?.length
+              ? state.atVehicles.filter((v) => sameServiceLine(v.line || line, line))
+              : state.schoolVehicles?.length
+                ? state.schoolVehicles.filter((v) => sameServiceLine(v.line || line, line))
+                : (state.matchdayVehicles || []).filter((v) => sameServiceLine(v.line || line, line));
+      onShowRouteTails?.({
+        line,
+        operator,
+        vehicles,
+        vehicleId: oneId || (forceSingle && state.vehicle?.id ? String(state.vehicle.id) : ""),
+        trailKey: oneTrail || (forceSingle && state.vehicle?.id ? String(state.vehicle.id) : ""),
+        reg: oneReg || (forceSingle ? state.vehicle?.reg || "" : ""),
+        journeyId: btn.dataset.journeyId || "",
+        tripId: btn.dataset.tripId || "",
+        datetime: btn.dataset.datetime || "",
+        direction: btn.dataset.direction || "",
+      });
       return;
     }
     if (action === "upload-photo") {
@@ -2501,10 +3975,32 @@ export function createFleetBrowser({
     if (action === "open-operator") showOperator(btn.dataset.arg || btn.dataset.slug);
     if (action === "open-at-route") showAtRoute(btn.dataset.line);
     if (action === "open-school-route") showSchoolRoute(btn.dataset.line);
+    if (action === "filter-vehicle-line") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!state.vehicle?.id) return;
+      showVehicle(state.vehicle.id, state.date, { line: btn.dataset.line || "" });
+      return;
+    }
+    if (action === "clear-vehicle-line") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!state.vehicle?.id) return;
+      showVehicle(state.vehicle.id, state.date, { line: "" });
+      return;
+    }
     if (action === "open-matchday-route") showMatchdayRoute(btn.dataset.line);
     if (action === "open-route-service") showRouteService(btn.dataset.arg);
     if (action === "open-vehicle") {
-      showVehicle(btn.dataset.id, state.date, { line: btn.dataset.line || state.routeLine || "" });
+      showVehicle(btn.dataset.id, state.date, {
+        line:
+          btn.dataset.line ||
+          state.routeLine ||
+          state.atLine ||
+          state.schoolLine ||
+          state.matchdayLine ||
+          "",
+      });
     }
     if (action === "more-vehicles" && state.operator) showOperator(state.operator.slug, { reset: false });
     if (action === "track-vehicle" || action === "track-at") {
@@ -2530,6 +4026,8 @@ export function createFleetBrowser({
         trailKey: btn.dataset.trailKey,
         reg: btn.dataset.reg,
         line: btn.dataset.line,
+        operator: btn.dataset.operator,
+        direction: btn.dataset.direction,
         dest: btn.dataset.dest,
         datetime: btn.dataset.datetime,
       });
@@ -2552,6 +4050,10 @@ export function createFleetBrowser({
     if (event.target.id === "fleet-route-date") {
       if (state.routeService) showRouteService(state.routeService.id, event.target.value);
       else if (state.routeLine) showRouteLine(state.routeLine, event.target.value);
+      return;
+    }
+    if (event.target.id === "fleet-at-date" && state.atLine) {
+      showAtRoute(state.atLine, event.target.value);
     }
   });
 

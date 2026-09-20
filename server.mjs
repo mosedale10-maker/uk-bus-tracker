@@ -4,11 +4,14 @@ import { createProxyMiddleware } from "http-proxy-middleware";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleBodsOccupancy, handleBodsVehicles } from "./bods-occupancy.js";
+import { handleFirstStopTimes, handleFirstVehicles } from "./first-occupancy.js";
+import { handleDgAtTimetable } from "./dg-at-timetable.js";
 import {
   initAuthStore,
   hasDatabase,
   createUser,
   authenticateUser,
+  changePassword,
   userFromRequest,
   publicUser,
   signSession,
@@ -17,8 +20,12 @@ import {
   grantPlusByEmail,
   cancelUserPlus,
   userHasPlus,
+  recordPlusPurchase,
+  markPlusPurchaseEmailed,
+  listPlusUsers,
 } from "./auth-store.mjs";
 import { paypalConfigured, createPlusOrder, capturePlusOrder, plusAmount, plusCurrency } from "./paypal-plus.mjs";
+import { sendPlusThankYouEmail } from "./mail.mjs";
 import {
   initPhotoStore,
   photosEnabled,
@@ -33,11 +40,73 @@ import {
   requireAdminSecret,
   compactRegKey,
 } from "./photo-store.mjs";
+import {
+  initNoticeStore,
+  noticesEnabled,
+  listActiveNotices,
+  listAllNotices,
+  createControlRoomNotice,
+  setNoticeActive,
+  deleteNotice,
+} from "./notice-store.mjs";
+import { syncOperatorAlerts, startOperatorAlertPoller } from "./operator-alerts.mjs";
+import {
+  initTrailStore,
+  trailsEnabled,
+  appendTrailPoints,
+  backfillTrailDirections,
+  getTrailPoints,
+  getTrailsForKeys,
+  listTrailKeysForLines,
+  listTrailKeysForOperators,
+  startTrailPrunePoller,
+  pruneOldTrailPoints,
+  reclaimTrailDisk,
+  TRAIL_KEEP_DAYS,
+} from "./trail-store.mjs";
+import { startTrailRecorder } from "./trail-recorder.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, "dist");
 const port = Number(process.env.PORT) || 4173;
 const bodsKey = process.env.BODS_API_KEY || "";
+const trailRemoteUrl = String(process.env.TRAIL_REMOTE_URL || "")
+  .trim()
+  .replace(/\/+$/, "");
+const trailsOnPc = Boolean(trailRemoteUrl);
+
+async function notifyPlusPurchase({
+  user,
+  amount,
+  currency,
+  orderId,
+  provider = "paypal",
+} = {}) {
+  if (!user?.email || !orderId) return;
+  try {
+    const recorded = await recordPlusPurchase({
+      userId: user.id,
+      email: user.email,
+      provider,
+      externalId: orderId,
+      amount: amount || plusAmount(),
+      currency: currency || plusCurrency(),
+      plusUntil: user.plus_until || user.plusUntil || null,
+    });
+    if (!recorded.shouldEmail) return;
+    await sendPlusThankYouEmail({
+      email: user.email,
+      amount: amount || plusAmount(),
+      currency: currency || plusCurrency(),
+      orderId,
+      provider,
+      plusUntil: user.plus_until || user.plusUntil || null,
+    });
+    await markPlusPurchaseEmailed(provider, orderId);
+  } catch (error) {
+    console.error("[mail] Plus thank-you failed:", error?.message || error);
+  }
+}
 
 const UA = "uk-bus-tracker/1.0 (hosted map app)";
 
@@ -85,7 +154,59 @@ app.disable("x-powered-by");
 app.use(compression({ threshold: 1024 }));
 
 app.get("/api/bods-occupancy", (req, res) => handleBodsOccupancy(req, res, bodsKey));
+app.get("/api/first-stop-times", (req, res) => handleFirstStopTimes(req, res));
+app.get("/api/first-vehicles", (req, res) => handleFirstVehicles(req, res));
+app.get("/api/dg-at-timetable", (req, res) => handleDgAtTimetable(req, res));
 app.get("/api/bods-vehicles", (req, res) => handleBodsVehicles(req, res, bodsKey));
+
+/** Whole-UK live vehicle count (bustimes map feed), refreshed about every 30s. */
+const UK_LIVE_BBOX = { xmin: -8.2, ymin: 49.8, xmax: 1.85, ymax: 60.9 };
+let ukLiveCountCache = { at: 0, count: null };
+
+async function fetchUkLiveVehicleCount() {
+  const now = Date.now();
+  if (ukLiveCountCache.count != null && now - ukLiveCountCache.at < 30_000) {
+    return ukLiveCountCache;
+  }
+  const url = new URL("https://bustimes.org/vehicles.json");
+  url.searchParams.set("xmin", String(UK_LIVE_BBOX.xmin));
+  url.searchParams.set("ymin", String(UK_LIVE_BBOX.ymin));
+  url.searchParams.set("xmax", String(UK_LIVE_BBOX.xmax));
+  url.searchParams.set("ymax", String(UK_LIVE_BBOX.ymax));
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "uk-bus-tracker/1.0 (live count)",
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`bustimes_${response.status}`);
+  }
+  const data = await response.json();
+  const count = Array.isArray(data) ? data.length : 0;
+  ukLiveCountCache = { at: now, count };
+  return ukLiveCountCache;
+}
+
+app.get("/api/live-count", async (_req, res) => {
+  try {
+    const row = await fetchUkLiveVehicleCount();
+    res.setHeader("Cache-Control", "public, max-age=15");
+    res.json({ count: row.count, at: row.at, scope: "uk" });
+  } catch (error) {
+    if (ukLiveCountCache.count != null) {
+      res.setHeader("Cache-Control", "public, max-age=15");
+      res.json({
+        count: ukLiveCountCache.count,
+        at: ukLiveCountCache.at,
+        scope: "uk",
+        stale: true,
+      });
+      return;
+    }
+    res.status(502).json({ count: null, error: error.message || "live_count_failed", scope: "uk" });
+  }
+});
 
 app.use(
   "/api/vehicles",
@@ -193,6 +314,22 @@ app.use(
   proxy({
     target: "https://tiles.openfreemap.org",
     pathRewrite: rewriteMount(""),
+    headers: { "User-Agent": UA },
+  }),
+);
+app.use(
+  "/api/osrm-match",
+  proxy({
+    target: "https://router.project-osrm.org",
+    pathRewrite: (path) => path.replace(/^\/api\/osrm-match/, "/match/v1/driving"),
+    headers: { "User-Agent": UA },
+  }),
+);
+app.use(
+  "/api/osrm-route",
+  proxy({
+    target: "https://router.project-osrm.org",
+    pathRewrite: (path) => path.replace(/^\/api\/osrm-route/, "/route/v1/driving"),
     headers: { "User-Agent": UA },
   }),
 );
@@ -418,6 +555,254 @@ app.delete("/api/bus-photos/admin/:id", async (req, res) => {
   }
 });
 
+app.get("/api/notices", async (req, res) => {
+  try {
+    await initNoticeStore();
+    // Refresh operator pages in the background (rate-limited inside).
+    syncOperatorAlerts().catch(() => {});
+    const notices = await listActiveNotices({
+      kind: req.query?.kind,
+      limit: req.query?.limit,
+    });
+    res.json({ notices, enabled: noticesEnabled() });
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+app.get("/api/notices/admin/list", async (req, res) => {
+  if (!adminOk(req, res)) return;
+  try {
+    await initNoticeStore();
+    const notices = await listAllNotices({
+      kind: req.query?.kind,
+      limit: req.query?.limit,
+    });
+    res.json({ notices, enabled: noticesEnabled() });
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+app.post("/api/notices/admin", async (req, res) => {
+  if (!adminOk(req, res)) return;
+  try {
+    await initNoticeStore();
+    if (!noticesEnabled()) {
+      res.status(503).json({ error: "Notices are not available yet" });
+      return;
+    }
+    const notice = await createControlRoomNotice({
+      title: req.body?.title,
+      body: req.body?.body,
+      operator: req.body?.operator,
+      routes: req.body?.routes,
+      area: req.body?.area,
+      speak: req.body?.speak !== false,
+      priority: req.body?.priority,
+      startsAt: req.body?.startsAt || null,
+      endsAt: req.body?.endsAt || null,
+    });
+    res.status(201).json({ ok: true, notice });
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+app.post("/api/notices/admin/:id/activate", async (req, res) => {
+  if (!adminOk(req, res)) return;
+  try {
+    const notice = await setNoticeActive(req.params.id, true);
+    res.json({ ok: true, notice });
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+app.post("/api/notices/admin/:id/deactivate", async (req, res) => {
+  if (!adminOk(req, res)) return;
+  try {
+    const notice = await setNoticeActive(req.params.id, false);
+    res.json({ ok: true, notice });
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+app.delete("/api/notices/admin/:id", async (req, res) => {
+  if (!adminOk(req, res)) return;
+  try {
+    const result = await deleteNotice(req.params.id);
+    res.json(result);
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+app.post("/api/notices/admin/sync-operators", async (req, res) => {
+  if (!adminOk(req, res)) return;
+  try {
+    const result = await syncOperatorAlerts({ force: true });
+    res.json(result);
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+app.get("/api/trails", async (req, res) => {
+  if (trailsOnPc) {
+    try {
+      const url = new URL("/api/trails", `${trailRemoteUrl}/`);
+      for (const [k, v] of Object.entries(req.query || {})) {
+        if (v == null) continue;
+        url.searchParams.set(k, String(v));
+      }
+      const upstream = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      const body = await upstream.text();
+      res.status(upstream.status).type("json").send(body);
+    } catch (error) {
+      res.status(502).json({
+        ok: false,
+        days: TRAIL_KEEP_DAYS,
+        trails: {},
+        error: error?.message || "pc_trails_unreachable",
+      });
+    }
+    return;
+  }
+  try {
+    await initTrailStore();
+    if (!trailsEnabled()) {
+      res.json({ ok: false, days: TRAIL_KEEP_DAYS, trails: {}, error: "no-store" });
+      return;
+    }
+    const keys = String(req.query.keys || "")
+      .split(",")
+      .map((k) => k.trim())
+      .filter(Boolean);
+    const days = Math.min(TRAIL_KEEP_DAYS, Math.max(1, Number(req.query.days) || TRAIL_KEEP_DAYS));
+    const fromMs = Number(req.query.from) || 0;
+    const toMs = Number(req.query.to) || 0;
+    if (!keys.length) {
+      const key = String(req.query.key || "").trim();
+      if (!key) {
+        res.status(400).json({ ok: false, error: "missing_keys" });
+        return;
+      }
+      const points = await getTrailPoints(key, { fromMs, toMs, days });
+      res.json({ ok: true, days: TRAIL_KEEP_DAYS, trails: { [key]: points } });
+      return;
+    }
+    const trails = await getTrailsForKeys(keys, { fromMs, toMs, days });
+    res.json({ ok: true, days: TRAIL_KEEP_DAYS, trails });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message || "trails_failed" });
+  }
+});
+
+app.get("/api/trails/keys", async (req, res) => {
+  if (trailsOnPc) {
+    try {
+      const url = new URL("/api/trails/keys", `${trailRemoteUrl}/`);
+      for (const [k, v] of Object.entries(req.query || {})) {
+        if (v == null) continue;
+        url.searchParams.set(k, String(v));
+      }
+      const upstream = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      const body = await upstream.text();
+      res.status(upstream.status).type("json").send(body);
+    } catch (error) {
+      res.status(502).json({
+        ok: false,
+        days: TRAIL_KEEP_DAYS,
+        keys: [],
+        error: error?.message || "pc_trails_unreachable",
+      });
+    }
+    return;
+  }
+  try {
+    await initTrailStore();
+    if (!trailsEnabled()) {
+      res.json({ ok: false, days: TRAIL_KEEP_DAYS, keys: [], error: "no-store" });
+      return;
+    }
+    const lines = String(req.query.lines || "")
+      .split(",")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const operators = String(req.query.operators || "")
+      .split(",")
+      .map((o) => o.trim())
+      .filter(Boolean);
+    if (!lines.length && !operators.length) {
+      res.status(400).json({ ok: false, error: "missing_lines_or_operators" });
+      return;
+    }
+    const days = Math.min(TRAIL_KEEP_DAYS, Math.max(1, Number(req.query.days) || TRAIL_KEEP_DAYS));
+    const limit = Number(req.query.limit) || 40;
+    const byLine = lines.length ? await listTrailKeysForLines(lines, { days, limit }) : [];
+    const byOp = operators.length
+      ? await listTrailKeysForOperators(operators, { days, limit })
+      : [];
+    const seen = new Set();
+    const keys = [];
+    for (const row of [...byOp, ...byLine]) {
+      const key = String(row?.key || "").trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      keys.push(row);
+      if (keys.length >= Math.min(80, Math.max(4, limit))) break;
+    }
+    res.json({ ok: true, days: TRAIL_KEEP_DAYS, keys });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message || "trail_keys_failed" });
+  }
+});
+
+app.post("/api/trails/points", async (req, res) => {
+  if (trailsOnPc) {
+    try {
+      const upstream = await fetch(new URL("/api/trails/points", `${trailRemoteUrl}/`), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(req.body || {}),
+        signal: AbortSignal.timeout(20_000),
+      });
+      const body = await upstream.text();
+      res.status(upstream.status).type("json").send(body);
+    } catch (error) {
+      res.status(502).json({ ok: false, error: error?.message || "pc_trails_unreachable" });
+    }
+    return;
+  }
+  try {
+    await initTrailStore();
+    if (!trailsEnabled()) {
+      res.json({ ok: false, error: "no-store" });
+      return;
+    }
+    const body = req.body || {};
+    const batches = Array.isArray(body.batches)
+      ? body.batches
+      : body.key
+        ? [{ key: body.key, points: body.points }]
+        : [];
+    if (!batches.length) {
+      res.status(400).json({ ok: false, error: "missing_points" });
+      return;
+    }
+    let inserted = 0;
+    for (const batch of batches.slice(0, 8)) {
+      const result = await appendTrailPoints(batch.key, batch.points);
+      if (result.ok) inserted += result.inserted || 0;
+    }
+    res.json({ ok: true, inserted, days: TRAIL_KEEP_DAYS });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message || "trail_write_failed" });
+  }
+});
+
 app.get("/api/auth/config", (_req, res) => {
   res.json({ accounts: hasDatabase() });
 });
@@ -459,6 +844,21 @@ app.post("/api/auth/logout", (_req, res) => {
   res.json({ ok: true });
 });
 
+app.post("/api/auth/change-password", async (req, res) => {
+  try {
+    await initAuthStore();
+    const user = await userFromRequest(req);
+    if (!user?.id) {
+      res.status(401).json({ error: "Log in to change your password" });
+      return;
+    }
+    await changePassword(user.id, req.body?.currentPassword, req.body?.newPassword);
+    res.json({ ok: true });
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
 app.post("/api/auth/admin/grant-plus", async (req, res) => {
   try {
     const secret = String(process.env.AUTH_SECRET || "").trim();
@@ -476,6 +876,88 @@ app.post("/api/auth/admin/grant-plus", async (req, res) => {
     }
     const user = await grantPlusByEmail(email, { months });
     res.json({ ok: true, user: publicUser(user) });
+  } catch (error) {
+    sendAuthError(res, error);
+  }
+});
+
+/** Emergency: free Postgres disk so Plus login / accounts can init again. */
+app.post("/api/trails/admin/reclaim", async (req, res) => {
+  try {
+    const secret = String(process.env.AUTH_SECRET || "").trim();
+    const auth = String(req.headers.authorization || "");
+    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+    if (!secret || !token || token !== secret) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    const truncate = req.body?.truncate !== false;
+    const result = await reclaimTrailDisk({ truncate });
+    // Re-init auth after space is freed.
+    try {
+      await initAuthStore();
+      result.authOk = true;
+    } catch (error) {
+      result.authInit = error?.message || String(error);
+      result.authOk = false;
+    }
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error?.message || String(error) });
+  }
+});
+
+/** Send thank-you / proof-of-purchase emails to current Plus members (owner only). */
+app.post("/api/plus/admin/send-receipts", async (req, res) => {
+  try {
+    const secret = String(process.env.AUTH_SECRET || "").trim();
+    const auth = String(req.headers.authorization || "");
+    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+    if (!secret || !token || token !== secret) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    await initAuthStore();
+    const onlyEmail = String(req.body?.email || "").trim().toLowerCase();
+    const users = await listPlusUsers();
+    const targets = onlyEmail ? users.filter((u) => String(u.email || "").toLowerCase() === onlyEmail) : users;
+    const results = [];
+    for (const user of targets) {
+      const orderId = `backfill-${user.id}-${Date.now()}`;
+      try {
+        const recorded = await recordPlusPurchase({
+          userId: user.id,
+          email: user.email,
+          provider: "admin",
+          externalId: orderId,
+          amount: plusAmount(),
+          currency: plusCurrency(),
+          plusUntil: user.plus_until || null,
+        });
+        if (!recorded.shouldEmail) {
+          results.push({ email: user.email, status: "skipped" });
+          continue;
+        }
+        const sent = await sendPlusThankYouEmail({
+          email: user.email,
+          amount: plusAmount(),
+          currency: plusCurrency(),
+          orderId,
+          provider: "admin",
+          plusUntil: user.plus_until || null,
+        });
+        await markPlusPurchaseEmailed("admin", orderId);
+        results.push({ email: user.email, status: sent?.skipped ? "skipped" : "sent", receipt: sent?.receipt || null });
+      } catch (error) {
+        results.push({ email: user.email, status: "error", error: error?.message || "send failed" });
+      }
+    }
+    res.json({
+      ok: true,
+      count: targets.length,
+      sent: results.filter((r) => r.status === "sent").length,
+      results,
+    });
   } catch (error) {
     sendAuthError(res, error);
   }
@@ -606,6 +1088,14 @@ app.get("/api/plus/paypal/return", async (req, res) => {
     if (sessionUser && Number(sessionUser.id) === Number(updated.id)) {
       res.setHeader("Set-Cookie", sessionCookie(signSession(updated)));
     }
+    // Fire-and-forget so the buyer still lands on success if email is slow.
+    void notifyPlusPurchase({
+      user: updated,
+      amount: paid.amount,
+      currency: paid.currency,
+      orderId: paid.orderId,
+      provider: "paypal",
+    });
     res.redirect(302, `${origin}/?plus=success`);
   } catch (error) {
     const reason = encodeURIComponent(error?.message || "payment_failed");
@@ -659,17 +1149,93 @@ app.get("/api/plus/verify", async (req, res) => {
       return;
     }
     res.setHeader("Set-Cookie", sessionCookie(signSession(user)));
+    void notifyPlusPurchase({
+      user,
+      amount: data.amount_total != null ? (Number(data.amount_total) / 100).toFixed(2) : plusAmount(),
+      currency: String(data.currency || plusCurrency()).toUpperCase(),
+      orderId: sessionId,
+      provider: "stripe",
+    });
     res.json({ ok: true, user: publicUser(user) });
   } catch (error) {
     res.status(502).json({ ok: false, error: error.message || "Verify failed" });
   }
 });
 
-initAuthStore().catch((error) => {
-  console.error("[auth] init failed", error?.message || error);
-});
 initPhotoStore().catch((error) => {
   console.error("[photos] init failed", error?.message || error);
+});
+initNoticeStore()
+  .then((ok) => {
+    if (ok) startOperatorAlertPoller();
+  })
+  .catch((error) => {
+    console.error("[notices] init failed", error?.message || error);
+  });
+
+async function bootTrailStack() {
+  // Keep Postgres free for Plus/auth only.
+  try {
+    const reclaim = await reclaimTrailDisk({ truncate: true });
+    if (reclaim?.ok && reclaim?.droppedPostgresTrails) {
+      console.log(
+        `[trails] dropped Postgres trail tables (auth-only DB) size=${reclaim.after?.db_size || "?"}`,
+      );
+    } else if (reclaim && !reclaim.ok) {
+      console.warn("[trails] Postgres trail drop failed", reclaim.error || reclaim);
+    }
+  } catch (error) {
+    console.warn("[trails] Postgres trail drop failed", error?.message || error);
+  }
+
+  let authOk = false;
+  try {
+    authOk = await initAuthStore();
+    if (authOk) console.log("[auth] users table ready");
+  } catch (error) {
+    console.error("[auth] init failed", error?.message || error);
+  }
+
+  if (trailsOnPc) {
+    console.log(`[trails] using PC store via TRAIL_REMOTE_URL=${trailRemoteUrl}`);
+    try {
+      const health = await fetch(new URL("/health", `${trailRemoteUrl}/`), {
+        signal: AbortSignal.timeout(8_000),
+      });
+      const body = await health.json().catch(() => ({}));
+      console.log(`[trails] PC host health=${health.status}`, body);
+    } catch (error) {
+      console.warn(
+        "[trails] PC host unreachable — tails/replay offline until scripts/trail-pc-host.mjs (+ tunnel) is running:",
+        error?.message || error,
+      );
+    }
+  } else {
+    try {
+      const ok = await initTrailStore();
+      if (!ok) {
+        console.warn("[trails] local store unavailable");
+      } else {
+        startTrailPrunePoller();
+        try {
+          await pruneOldTrailPoints({ force: true });
+        } catch (error) {
+          console.warn("[trails] startup prune failed", error?.message || error);
+        }
+        startTrailRecorder({ bodsKey });
+      }
+    } catch (error) {
+      console.error("[trails] init failed", error?.message || error);
+    }
+  }
+
+  if (!authOk) {
+    console.error("[auth] Plus login still unavailable");
+  }
+}
+
+bootTrailStack().catch((error) => {
+  console.error("[boot] trail stack failed", error?.message || error);
 });
 
 app.use(

@@ -118,6 +118,7 @@ export function siriItemToBus(item) {
     delay: item.delaySec,
     journey_id: item.journeyRef || "",
     trip_id: "",
+    speedMph: Number.isFinite(item.velocityMph) ? item.velocityMph : undefined,
     service: {
       line_name: line || "?",
       operator: op ? { noc: op, name: op, id: op } : undefined,

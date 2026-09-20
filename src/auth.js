@@ -107,6 +107,11 @@ function syncAccountUi() {
     cancelBtn.disabled = Boolean(currentUser?.plusCancelled);
     cancelBtn.textContent = currentUser?.plusCancelled ? "Plus cancelled" : "Cancel Plus";
   }
+  const reset = modalEl?.querySelector("[data-auth-reset]");
+  if (reset && !currentUser) reset.open = false;
+  showChangePasswordError("");
+  const ok = modalEl?.querySelector("[data-auth-change-ok]");
+  if (ok) ok.hidden = true;
 }
 
 async function submitAuth(event) {
@@ -145,6 +150,47 @@ async function logout() {
   closeAuthModal();
 }
 
+function showChangePasswordError(message) {
+  const err = modalEl?.querySelector("[data-auth-change-error]");
+  const ok = modalEl?.querySelector("[data-auth-change-ok]");
+  if (ok) ok.hidden = true;
+  if (!err) return;
+  err.hidden = !message;
+  err.textContent = message || "";
+}
+
+async function submitChangePassword(event) {
+  event?.preventDefault?.();
+  showChangePasswordError("");
+  const form = modalEl?.querySelector("[data-auth-change-password]");
+  const currentPassword = String(form?.querySelector("#auth-current-password")?.value || "");
+  const newPassword = String(form?.querySelector("#auth-new-password")?.value || "");
+  const confirmPassword = String(form?.querySelector("#auth-confirm-password")?.value || "");
+  if (newPassword.length < 8) {
+    showChangePasswordError("New password must be at least 8 characters");
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    showChangePasswordError("New passwords do not match");
+    return;
+  }
+  const btn = modalEl?.querySelector("[data-auth-change-submit]");
+  if (btn) btn.disabled = true;
+  try {
+    await api("/api/auth/change-password", {
+      method: "POST",
+      body: { currentPassword, newPassword },
+    });
+    form?.reset?.();
+    const ok = modalEl?.querySelector("[data-auth-change-ok]");
+    if (ok) ok.hidden = false;
+  } catch (error) {
+    showChangePasswordError(error.message || "Could not update password");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function ensureAuthModal() {
   if (modalEl) return;
   modalEl = document.getElementById("auth-modal");
@@ -160,6 +206,7 @@ function ensureAuthModal() {
     if (event.key === "Escape" && modalEl && !modalEl.hidden) closeAuthModal();
   });
   modalEl.querySelector("[data-auth-form]")?.addEventListener("submit", submitAuth);
+  modalEl.querySelector("[data-auth-change-password]")?.addEventListener("submit", submitChangePassword);
   modalEl.querySelector("[data-auth-switch]")?.addEventListener("click", () => {
     setAuthMode(modalEl.dataset.mode === "signup" ? "login" : "signup");
   });

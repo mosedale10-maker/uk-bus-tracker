@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>Control room notices · UK Bus Tracker</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #0f172a;
+        --muted: #64748b;
+        --line: #e2e8f0;
+        --ok: #15803d;
+        --bad: #b91c1c;
+        --bg: #f8fafc;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+      }
+      header {
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+        background: #fff;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: end;
+      }
+      h1 { margin: 0; font-size: 1.15rem; flex: 1 1 auto; }
+      label {
+        display: grid;
+        gap: 4px;
+        font-size: 0.78rem;
+        color: var(--muted);
+        font-weight: 650;
+      }
+      input, textarea, select {
+        min-width: min(280px, 70vw);
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        font: inherit;
+      }
+      textarea { min-height: 72px; width: min(520px, 92vw); }
+      button {
+        font: inherit;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: #fff;
+        padding: 8px 12px;
+        cursor: pointer;
+        font-weight: 650;
+      }
+      button.primary { background: #0f172a; color: #fff; border-color: #0f172a; }
+      button.ok { background: #dcfce7; color: var(--ok); border-color: #86efac; }
+      button.bad { background: #fee2e2; color: var(--bad); border-color: #fca5a5; }
+      main { padding: 16px 20px 40px; max-width: 960px; margin: 0 auto; }
+      .msg { color: var(--muted); margin: 0 0 14px; }
+      .err { color: var(--bad); }
+      .compose, .card {
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 14px;
+        margin-bottom: 12px;
+      }
+      .compose { display: grid; gap: 10px; }
+      .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+      .meta { font-size: 0.9rem; line-height: 1.4; }
+      .tag {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: #e2e8f0;
+        font-size: 0.7rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+      .tag.is-off { background: #fee2e2; color: var(--bad); }
+      .tag.is-op { background: #dbeafe; color: #1d4ed8; }
+      .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+      .check { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--ink); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Stoke-on-Trent control room</h1>
+      <label>
+        AUTH_SECRET
+        <input id="secret" type="password" autocomplete="off" placeholder="Paste AUTH_SECRET" />
+      </label>
+      <button type="button" class="primary" id="load">Load notices</button>
+      <button type="button" id="sync">Sync operators</button>
+    </header>
+    <main>
+      <p class="msg" id="status">Publish spoken/text control-room messages, or sync First Potteries + D&amp;G public updates.</p>
+      <form class="compose" id="compose">
+        <strong>New control-room message</strong>
+        <label>Title<input id="title" required maxlength="160" placeholder="e.g. Diversion · Longton Market Street" /></label>
+        <label>Message<textarea id="body" maxlength="1200" placeholder="Short details for the map toast / spoken alert"></textarea></label>
+        <div class="row">
+          <label>Operator<input id="operator" maxlength="80" placeholder="Optional" /></label>
+          <label>Routes<input id="routes" maxlength="120" placeholder="e.g. 6, 11, AT3" /></label>
+          <label class="check"><input id="speak" type="checkbox" checked /> Speak when Announcements is on</label>
+        </div>
+        <button type="submit" class="primary">Publish</button>
+      </form>
+      <div id="list"></div>
+    </main>
+    <script>
+      const secretEl = document.getElementById("secret");
+      const statusEl = document.getElementById("status");
+      const listEl = document.getElementById("list");
+      const KEY = "uk-bus-notice-admin-secret";
+      secretEl.value = localStorage.getItem(KEY) || "";
+
+      function secret() {
+        const value = secretEl.value.trim();
+        if (value) localStorage.setItem(KEY, value);
+        return value;
+      }
+
+      function authHeaders() {
+        const s = secret();
+        if (!s) throw new Error("Paste AUTH_SECRET first");
+        return { Authorization: `Bearer ${s}`, "Content-Type": "application/json" };
+      }
+
+      function setStatus(text, isErr = false) {
+        statusEl.textContent = text;
+        statusEl.className = isErr ? "msg err" : "msg";
+      }
+
+      function esc(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;");
+      }
+
+      async function load() {
+        try {
+          const res = await fetch("/api/notices/admin/list?limit=80", { headers: authHeaders() });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || `Load failed (${res.status})`);
+          const notices = data.notices || [];
+          setStatus(`${notices.length} notices · DB ${data.enabled ? "on" : "off"}`);
+          listEl.innerHTML = notices
+            .map((n) => {
+              const kind =
+                n.kind === "operator"
+                  ? `<span class="tag is-op">operator</span>`
+                  : `<span class="tag">control room</span>`;
+              const active = n.active
+                ? `<span class="tag">active</span>`
+                : `<span class="tag is-off">off</span>`;
+              return `<article class="card" data-id="${n.id}">
+                <div class="meta">
+                  ${kind} ${active}
+                  <strong>${esc(n.title)}</strong>
+                  <div>${esc(n.body)}</div>
+                  <div style="color:#64748b;margin-top:6px">${esc([n.operator, n.routes, n.area].filter(Boolean).join(" · "))}</div>
+                  ${n.sourceUrl ? `<div><a href="${esc(n.sourceUrl)}" target="_blank" rel="noopener">Source</a></div>` : ""}
+                  <div class="actions">
+                    ${
+                      n.active
+                        ? `<button type="button" data-off>Deactivate</button>`
+                        : `<button type="button" class="ok" data-on>Activate</button>`
+                    }
+                    <button type="button" class="bad" data-del>Delete</button>
+                  </div>
+                </div>
+              </article>`;
+            })
+            .join("") || `<p class="msg">No notices yet.</p>`;
+        } catch (error) {
+          setStatus(error.message || "Could not load", true);
+        }
+      }
+
+      document.getElementById("load").addEventListener("click", load);
+      document.getElementById("sync").addEventListener("click", async () => {
+        try {
+          const res = await fetch("/api/notices/admin/sync-operators", {
+            method: "POST",
+            headers: authHeaders(),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || `Sync failed (${res.status})`);
+          setStatus(
+            `Synced · D&G ${data.dg || 0} · First ${data.first || 0}` +
+              (data.errors?.length ? ` · ${data.errors.join("; ")}` : ""),
+          );
+          await load();
+        } catch (error) {
+          setStatus(error.message || "Sync failed", true);
+        }
+      });
+
+      document.getElementById("compose").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        try {
+          const res = await fetch("/api/notices/admin", {
+            method: "POST",
+            headers: authHeaders(),
+            body: JSON.stringify({
+              title: document.getElementById("title").value,
+              body: document.getElementById("body").value,
+              operator: document.getElementById("operator").value,
+              routes: document.getElementById("routes").value,
+              speak: document.getElementById("speak").checked,
+            }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || `Publish failed (${res.status})`);
+          document.getElementById("compose").reset();
+          document.getElementById("speak").checked = true;
+          setStatus("Published control-room message");
+          await load();
+        } catch (error) {
+          setStatus(error.message || "Publish failed", true);
+        }
+      });
+
+      listEl.addEventListener("click", async (event) => {
+        const btn = event.target.closest("button");
+        const card = event.target.closest("[data-id]");
+        if (!btn || !card) return;
+        const id = card.dataset.id;
+        try {
+          if (btn.hasAttribute("data-on") || btn.hasAttribute("data-off")) {
+            const path = btn.hasAttribute("data-on") ? "activate" : "deactivate";
+            const res = await fetch(`/api/notices/admin/${id}/${path}`, {
+              method: "POST",
+              headers: authHeaders(),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || "Update failed");
+          } else if (btn.hasAttribute("data-del")) {
+            if (!confirm("Delete this notice?")) return;
+            const res = await fetch(`/api/notices/admin/${id}`, {
+              method: "DELETE",
+              headers: authHeaders(),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || "Delete failed");
+          }
+          await load();
+        } catch (error) {
+          setStatus(error.message || "Action failed", true);
+        }
+      });
+
+      if (secretEl.value) load();
+    </script>
+  </body>
+</html>

@@ -8,7 +8,7 @@ export const PLUS_PRICE_LABEL = String(import.meta.env.VITE_PLUS_PRICE || "£4.9
 const FEATURES = {
   announcements: {
     title: "Live announcements",
-    blurb: "Spoken next-stop style updates while you follow a bus.",
+    blurb: "Spoken next-stop updates while you follow a bus, plus control-room alerts when enabled.",
   },
   "stop-board": {
     title: "Virtual stop board",

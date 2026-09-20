@@ -1,10 +1,8 @@
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import "leaflet.markercluster/dist/MarkerCluster.css";
-import "leaflet.markercluster/dist/MarkerCluster.Default.css";
 import { VectorTile } from "@mapbox/vector-tile";
 import { PbfReader } from "pbf";
-import { createFleetBrowser, isSchoolBusLive, isStokeFcShuttleLive, isStokeFcLine, sameServiceLine, normalizeStokeFcLine, extractRouteFromVehicle, enrichJourneyRow, liveVehicleAsHistoryRow, mergeLiveHistoryRow, isDivertedText, STAFFS_SCHOOL_ROUTES, STOKE_FC_SHUTTLE_ROUTES } from "./fleet.js";
+import { createFleetBrowser, isSchoolBusLive, isStokeFcShuttleLive, isStokeFcLine, sameServiceLine, normalizeStokeFcLine, extractRouteFromVehicle, enrichJourneyRow, liveVehicleAsHistoryRow, mergeLiveHistoryRow, fetchAtHistoryFromTrails, mergeAtHistoryRows, isDivertedText, STAFFS_SCHOOL_ROUTES, STOKE_FC_SHUTTLE_ROUTES } from "./fleet.js";
 import { setupPlus, isPlus, requirePlus, syncPlusFromAccount } from "./plus.js";
 import { getUser } from "./auth.js";
 import {
@@ -24,7 +22,6 @@ import { setupAuth } from "./auth.js";
 import "./style.css";
 
 window.L = L;
-await import("leaflet.markercluster");
 
 const MIN_ZOOM = 10;
 const FLIX_MIN_ZOOM = 6;
@@ -63,33 +60,57 @@ L.control
   )
   .addTo(map);
 
-const cluster = L.markerClusterGroup({
-  showCoverageOnHover: false,
-  spiderfyOnMaxZoom: true,
-  // Wider clusters when zoomed out so the map stays readable.
-  maxClusterRadius(zoom) {
-    if (zoom <= 11) return 90;
-    if (zoom <= 13) return 70;
-    if (zoom <= 14) return 52;
-    return 36;
-  },
-  disableClusteringAtZoom: 15,
-  iconCreateFunction(clusterGroup) {
-    const count = clusterGroup.getChildCount();
-    const size = count < 12 ? "small" : count < 40 ? "medium" : "large";
-    return L.divIcon({
-      html: `<div><span>${count}</span></div>`,
-      className: `marker-cluster marker-cluster-${size}`,
-      iconSize: L.point(size === "large" ? 48 : size === "medium" ? 42 : 36, size === "large" ? 48 : size === "medium" ? 42 : 36),
-    });
-  },
-});
-map.addLayer(cluster);
+// Always show every bus — no numbered cluster bubbles when zoomed out.
+const cluster = L.layerGroup().addTo(map);
 const staffLayer = L.layerGroup().addTo(map);
 const stopsLayer = L.layerGroup();
 const noticesLayer = L.layerGroup().addTo(map);
+const depotsLayer = L.layerGroup().addTo(map);
 
-/** Temporary map notices (road closures / diversions). Hidden after `until`. */
+/** Stoke-on-Trent bus depots — small pins when zoomed into the area. */
+const BUS_DEPOTS = [
+  {
+    id: "first-potteries-adderley-green",
+    lat: 53.00185,
+    lng: -2.12082,
+    name: "First Potteries",
+    place: "Adderley Green depot",
+    address: "Dividy Road, ST3 5YY",
+    color: "#c8102e",
+  },
+  {
+    id: "dg-mossfield",
+    // OSM industrial yard “D & G Bus” on Mossfield Road (not ST3 5BW centroid)
+    lat: 53.00377,
+    lng: -2.13389,
+    name: "D&G Bus",
+    place: "Mossfield Road depot",
+    address: "Mossfield Road, ST3 5BW",
+    color: "#e85d04",
+  },
+  {
+    id: "stantons-endon",
+    // Park Farm yard (OSM barn/farmyard cluster off Park Lane, ST9 9JB)
+    lat: 53.07459,
+    lng: -2.08982,
+    name: "Stanton's of Stoke",
+    place: "Park Farm depot",
+    address: "Park Lane, Endon, ST9 9JB",
+    color: "#b91c1c",
+  },
+  {
+    id: "scraggs-parkhall",
+    // New Parkhall Industrial Estate / Coach Depot, Parkhall Road
+    lat: 52.99937,
+    lng: -2.11857,
+    name: "Scraggs Coaches",
+    place: "Parkhall Road depot",
+    address: "Parkhall Road, Adderley Green, ST3 5AT",
+    color: "#1d4ed8",
+  },
+];
+
+/** Temporary map notices (road closures / diversions). Active only between `from` and `until`. */
 const ROAD_NOTICES = [
   {
     id: "longton-market-st-sep-2026",
@@ -105,9 +126,23 @@ const ROAD_NOTICES = [
       [52.98865, -2.1337],
       [52.98845, -2.1332],
     ],
+    from: "2026-09-24T19:00:00+01:00",
     until: "2026-09-27T15:00:00+01:00",
   },
 ];
+
+function roadNoticeIsActive(notice, now = Date.now()) {
+  if (!notice) return false;
+  if (notice.from) {
+    const start = new Date(notice.from).getTime();
+    if (Number.isFinite(start) && now < start) return false;
+  }
+  if (notice.until) {
+    const end = new Date(notice.until).getTime();
+    if (Number.isFinite(end) && now > end) return false;
+  }
+  return true;
+}
 
 function roadNoticeIcon(notice, { compact = false } = {}) {
   return L.divIcon({
@@ -136,7 +171,7 @@ function installRoadNotices() {
   if (zoom < 11) return;
   const compact = zoom < 14;
   for (const notice of ROAD_NOTICES) {
-    if (notice.until && new Date(notice.until).getTime() < now) continue;
+    if (!roadNoticeIsActive(notice, now)) continue;
     if (Array.isArray(notice.path) && notice.path.length >= 2) {
       L.polyline(notice.path, {
         color: "#c2410c",
@@ -168,12 +203,50 @@ function installRoadNotices() {
   }
 }
 
-function refreshRoadNoticeIcons() {
-  // Rebuild so show/hide by zoom stays correct.
-  installRoadNotices();
+function depotIcon(depot) {
+  const color = depot.color || "#334155";
+  return L.divIcon({
+    className: "depot-marker leaflet-div-icon",
+    html: `<div class="depot-pin" style="--depot-color:${esc(color)}" role="img" aria-label="${esc(depot.name)} depot">
+      <span class="depot-pin-dot" aria-hidden="true"></span>
+      <span class="depot-pin-point" aria-hidden="true"></span>
+    </div>`,
+    iconSize: [18, 24],
+    iconAnchor: [9, 24],
+    popupAnchor: [0, -22],
+  });
 }
 
-map.on("zoomend", refreshRoadNoticeIcons);
+function installBusDepots() {
+  depotsLayer.clearLayers();
+  const zoom = map.getZoom();
+  if (zoom < 13) return;
+  const bounds = map.getBounds();
+  for (const depot of BUS_DEPOTS) {
+    if (!bounds.contains([depot.lat, depot.lng])) continue;
+    const marker = L.marker([depot.lat, depot.lng], {
+      icon: depotIcon(depot),
+      interactive: true,
+      keyboard: true,
+      zIndexOffset: 400,
+      riseOnHover: true,
+      title: `${depot.name} · ${depot.place}`,
+    });
+    marker.bindPopup(
+      `<div class="depot-popup"><strong>${esc(depot.name)}</strong><p>${esc(depot.place)}</p><p class="depot-popup-addr">${esc(depot.address)}</p></div>`,
+      { maxWidth: 220, className: "depot-popup-wrap" },
+    );
+    marker.addTo(depotsLayer);
+  }
+}
+
+function refreshRoadNoticeIcons() {
+  // Rebuild so show/hide by zoom and map position stays correct.
+  installRoadNotices();
+  installBusDepots();
+}
+
+map.on("zoomend moveend", refreshRoadNoticeIcons);
 const STOPS_KEY = "uk-bus-stops-on";
 const STOP_BOARD_KEY = "uk-bus-stop-board-on";
 const STOPS_MIN_ZOOM = 14;
@@ -190,6 +263,11 @@ let stopBoardClockTimer = null;
 const markers = new Map();
 const staffMarkers = new Map();
 const ALTON_LINES = new Set(["AT1", "AT2", "AT3"]);
+/** Operators where Map always means one vehicle + one route (never the whole fleet). */
+const SINGLE_VEHICLE_ROUTE_NOCS = new Set(["FLIX", "NATX", "DAGC", "FPOT", "SOST"]);
+let multiTailActiveGroup = null;
+/** Optional journey/line filter applied when drawing a pinned trail key. */
+const pinnedTrailFilters = new Map();
 const tripCache = new Map();
 const tripCacheAt = new Map();
 const vehicleCache = new Map();
@@ -204,6 +282,7 @@ let liveIndexAt = 0;
 
 const messageEl = document.getElementById("message");
 const clockEl = document.getElementById("uk-clock");
+const liveBusCountEl = document.getElementById("live-bus-count");
 const mapWrapEl = document.querySelector(".map-wrap");
 const hint = document.createElement("div");
 hint.className = "zoom-hint";
@@ -220,6 +299,7 @@ function dismissWelcome() {
     /* ignore */
   }
   if (welcomeEl) welcomeEl.hidden = true;
+  maybeShowControlRoomAlert();
 }
 
 function setupWelcome() {
@@ -255,6 +335,10 @@ function syncMapZoomClass() {
   mapWrapEl.classList.toggle("is-zoom-wide", z < MIN_ZOOM);
   mapWrapEl.classList.toggle("is-zoom-mid", z >= MIN_ZOOM && z < 15);
   mapWrapEl.classList.toggle("is-zoom-close", z >= 15);
+  // Trail direction arrows: much smaller when zoomed out.
+  mapWrapEl.classList.toggle("trail-arrows-sm", z < 13);
+  mapWrapEl.classList.toggle("trail-arrows-md", z >= 13 && z < 15);
+  mapWrapEl.classList.toggle("trail-arrows-lg", z >= 15);
 }
 
 function refreshMarkerIconsForZoom() {
@@ -280,6 +364,158 @@ function refreshMarkerIconsForZoom() {
 }
 
 setupWelcome();
+
+/** Staffordshire control-room + operator alerts */
+const CONTROL_ALERT_KEY = "uk-bus-control-alert";
+const controlRoomAlertEl = document.getElementById("control-room-alert");
+const roadNoticeAlertEl = document.getElementById("road-notice-alert");
+const alertsPanelEl = document.getElementById("alerts-panel");
+const alertsBtnEl = document.getElementById("alerts-btn");
+const alertsBadgeEl = document.getElementById("alerts-badge");
+const alertsListEl = document.getElementById("alerts-panel-list");
+let liveNotices = [];
+let controlAlertTimer = null;
+const CONTROL_ALERT_MS = 75_000;
+
+function controlAlertDismissed(id) {
+  try {
+    return localStorage.getItem(`${CONTROL_ALERT_KEY}:${id}`) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function rememberControlAlertDismissed(id) {
+  try {
+    localStorage.setItem(`${CONTROL_ALERT_KEY}:${String(id || "")}`, "1");
+  } catch {
+    /* ignore */
+  }
+}
+
+function clearControlAlertTimer() {
+  if (controlAlertTimer) {
+    clearTimeout(controlAlertTimer);
+    controlAlertTimer = null;
+  }
+}
+
+function dismissControlRoomAlert() {
+  clearControlAlertTimer();
+  const notice = controlRoomAlertEl?._notice;
+  if (notice?.id) rememberControlAlertDismissed(notice.id);
+  if (controlRoomAlertEl) controlRoomAlertEl.hidden = true;
+}
+
+function setAlertsPanelOpen(open) {
+  if (!alertsPanelEl || !alertsBtnEl) return;
+  alertsPanelEl.hidden = !open;
+  alertsBtnEl.setAttribute("aria-pressed", open ? "true" : "false");
+}
+
+function renderAlertsPanel() {
+  if (!alertsListEl) return;
+  if (!liveNotices.length) {
+    alertsListEl.innerHTML = `<p class="alerts-empty">No active Stoke-on-Trent alerts</p>`;
+    return;
+  }
+  alertsListEl.innerHTML = liveNotices
+    .map((n) => {
+      const kind =
+        n.kind === "control_room"
+          ? `<span class="alerts-item-kind is-control">Control room</span>`
+          : `<span class="alerts-item-kind">Operator</span>`;
+      const meta = [n.operator, n.routes, n.area].filter(Boolean).join(" · ");
+      const link = n.sourceUrl
+        ? `<div class="alerts-item-meta"><a href="${esc(n.sourceUrl)}" target="_blank" rel="noopener noreferrer">Source</a></div>`
+        : "";
+      return `<article class="alerts-item">
+        ${kind}
+        <p class="alerts-item-title">${esc(n.title)}</p>
+        <p class="alerts-item-body">${esc(n.body || "")}</p>
+        ${meta ? `<p class="alerts-item-meta">${esc(meta)}</p>` : ""}
+        ${link}
+      </article>`;
+    })
+    .join("");
+}
+
+function updateAlertsBadge() {
+  if (!alertsBadgeEl) return;
+  const n = liveNotices.length;
+  if (!n) {
+    alertsBadgeEl.hidden = true;
+    alertsBadgeEl.textContent = "0";
+    return;
+  }
+  alertsBadgeEl.hidden = false;
+  alertsBadgeEl.textContent = String(n > 99 ? "99+" : n);
+}
+
+function maybeShowControlRoomAlert() {
+  if (!controlRoomAlertEl) return;
+  if (welcomeEl && !welcomeEl.hidden) return;
+  if (roadNoticeAlertEl && !roadNoticeAlertEl.hidden) return;
+  const notice = liveNotices.find(
+    (n) => n.kind === "control_room" && n.id != null && !controlAlertDismissed(n.id),
+  );
+  if (!notice) {
+    clearControlAlertTimer();
+    controlRoomAlertEl.hidden = true;
+    return;
+  }
+  const titleEl = document.getElementById("control-room-alert-title");
+  const bodyEl = controlRoomAlertEl.querySelector("[data-control-alert-body]");
+  if (titleEl) titleEl.textContent = notice.title || "Control room";
+  if (bodyEl) bodyEl.textContent = notice.body || "";
+  controlRoomAlertEl._notice = notice;
+  controlRoomAlertEl.hidden = false;
+  if (notice.speak && announceOn) {
+    const line = [notice.title, notice.body].filter(Boolean).join(". ");
+    speak(`Control room. ${line}`, { force: true });
+  }
+  clearControlAlertTimer();
+  controlAlertTimer = setTimeout(() => {
+    dismissControlRoomAlert();
+  }, CONTROL_ALERT_MS);
+}
+
+async function loadServiceNotices() {
+  try {
+    const res = await fetch("/api/notices?limit=40");
+    if (!res.ok) return;
+    const data = await res.json();
+    liveNotices = Array.isArray(data.notices) ? data.notices : [];
+    updateAlertsBadge();
+    renderAlertsPanel();
+    maybeShowControlRoomAlert();
+  } catch {
+    /* keep last good list */
+  }
+}
+
+function setupServiceAlerts() {
+  alertsBtnEl?.addEventListener("click", () => {
+    const open = alertsPanelEl?.hidden !== false;
+    setAlertsPanelOpen(open);
+    if (open) renderAlertsPanel();
+  });
+  document.getElementById("alerts-panel-close")?.addEventListener("click", () => {
+    setAlertsPanelOpen(false);
+  });
+  controlRoomAlertEl?.querySelectorAll("[data-control-alert-close]").forEach((btn) => {
+    btn.addEventListener("click", dismissControlRoomAlert);
+  });
+  controlRoomAlertEl?.querySelector("[data-control-alert-all]")?.addEventListener("click", () => {
+    dismissControlRoomAlert();
+    setAlertsPanelOpen(true);
+    renderAlertsPanel();
+  });
+  loadServiceNotices();
+  setInterval(loadServiceNotices, 5 * 60_000);
+}
+
+setupServiceAlerts();
 syncMapZoomClass();
 map.on("zoomend", () => {
   syncMapZoomClass();
@@ -330,6 +566,50 @@ function pruneStaleMarkers() {
   }
 }
 
+let ukLiveBusCount = null;
+let ukLiveBusCountAt = 0;
+let ukLiveBusCountPromise = null;
+
+async function refreshUkLiveBusCount({ force = false } = {}) {
+  if (!force && ukLiveBusCount != null && Date.now() - ukLiveBusCountAt < 25_000) {
+    return ukLiveBusCount;
+  }
+  if (ukLiveBusCountPromise) return ukLiveBusCountPromise;
+  ukLiveBusCountPromise = (async () => {
+    try {
+      const res = await fetch("/api/live-count");
+      if (!res.ok) throw new Error("live_count_failed");
+      const data = await res.json();
+      const n = Number(data?.count);
+      if (Number.isFinite(n) && n >= 0) {
+        ukLiveBusCount = Math.round(n);
+        ukLiveBusCountAt = Date.now();
+      }
+      return ukLiveBusCount;
+    } catch {
+      return ukLiveBusCount;
+    } finally {
+      ukLiveBusCountPromise = null;
+    }
+  })();
+  return ukLiveBusCountPromise;
+}
+
+function updateLiveBusCount() {
+  if (!liveBusCountEl) return;
+  const n = ukLiveBusCount;
+  if (n == null) {
+    if (!liveBusCountEl.textContent) liveBusCountEl.textContent = "Counting UK buses…";
+    return;
+  }
+  liveBusCountEl.textContent =
+    n === 0
+      ? "No buses tracked across the UK right now"
+      : n === 1
+        ? "1 bus currently tracked across the UK"
+        : `${n.toLocaleString("en-GB")} buses currently tracked across the UK`;
+}
+
 function updateUkClock() {
   const now = new Date();
   clockEl.dateTime = now.toISOString();
@@ -345,6 +625,7 @@ function updateUkClock() {
     hour12: false,
     timeZoneName: "short",
   }).format(now);
+  updateLiveBusCount();
 }
 
 function formatDelay(seconds) {
@@ -633,9 +914,26 @@ function recordStaffTrail(marker, lat, lng, heading, meta = {}) {
     marker?.extra?.vehicle?.reg ||
     parsed?.reg ||
     "";
-  if (key) recordVehicleTrail(key, lat, lng, heading, { ...meta, reg });
+  const line = meta.line || staffLineName(item) || "";
+  const journeyId =
+    meta.journeyId ||
+    item?.currentJourney?.id ||
+    item?.currentJourney?.journeyId ||
+    "";
+  const direction =
+    meta.direction ||
+    normalizeTrailDirection(item?.currentJourney?.directionRef || item?.directionRef || "");
+  const trailMeta = {
+    ...meta,
+    reg,
+    line,
+    journeyId: journeyId ? String(journeyId) : meta.journeyId || "",
+    direction,
+    operator: meta.operator || "DAGC",
+  };
+  if (key) recordVehicleTrail(key, lat, lng, heading, trailMeta);
   const btId = marker?.extra?.btVehicle?.id;
-  if (btId != null) recordVehicleTrail(String(btId), lat, lng, heading, { ...meta, reg });
+  if (btId != null) recordVehicleTrail(String(btId), lat, lng, heading, trailMeta);
 }
 
 async function fetchVehicleHistory(vehicleId, days = historyDays) {
@@ -667,6 +965,29 @@ async function fetchVehicleHistory(vehicleId, days = historyDays) {
   })().catch(() => []);
   historyCache.set(key, promise);
   return promise;
+}
+
+function isAltonLine(line) {
+  return ALTON_LINES.has(String(line || "").trim().toUpperCase());
+}
+
+function isDgBusContext(marker, extra = {}) {
+  if (marker?.staff && isAltonLine(staffLineName(marker.staff))) return true;
+  const hay = [
+    marker?.bus?.operator?.noc,
+    marker?.bus?.operator?.id,
+    marker?.bus?.operator?.name,
+    marker?.bus?.service?.operator?.name,
+    marker?.bus?.service?.url,
+    extra?.operator,
+    extra?.vehicle?.operator?.noc,
+    extra?.vehicle?.operator?.name,
+    extra?.btVehicle?.operator?.noc,
+    extra?.btVehicle?.operator?.name,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return /DAGC|D\s*&\s*G|D and G|d-g-coach|dgbus/i.test(hay);
 }
 
 function historyLineFilterFor(marker) {
@@ -702,9 +1023,11 @@ function isFirstPotteriesContext(marker, extra = {}) {
 
 function filterHistoryByLine(rows, line, { keepStokeFc = false } = {}) {
   const list = Array.isArray(rows) ? rows : [];
-  if (!line && !keepStokeFc) return list;
-  if (!line && keepStokeFc) {
-    return list.filter((row) => isStokeFcLine(row.route_name) || isStokeFcLine(row.extracted_route));
+  if (!line) {
+    if (keepStokeFc) {
+      return list.filter((row) => isStokeFcLine(row.route_name) || isStokeFcLine(row.extracted_route));
+    }
+    return list;
   }
   const matched = list.filter((row) => {
     if (sameServiceLine(row.route_name, line)) return true;
@@ -713,16 +1036,21 @@ function filterHistoryByLine(rows, line, { keepStokeFc = false } = {}) {
     if (row.diverted && sameServiceLine(extractRouteFromVehicle(row), line)) return true;
     return false;
   });
-  if (!keepStokeFc) return matched;
-  // Always keep First Potteries B1–B2 / BS1–BS2 journeys in the history list.
   const seen = new Set(matched.map((row) => String(row.id || `${row.datetime}|${row.route_name}`)));
-  for (const row of list) {
-    if (!isStokeFcLine(row.route_name) && !isStokeFcLine(row.extracted_route)) continue;
+  const pushUnique = (row) => {
     const key = String(row.id || `${row.datetime}|${row.route_name}`);
-    if (seen.has(key)) continue;
+    if (seen.has(key)) return;
     seen.add(key);
     matched.push(row);
+  };
+  if (keepStokeFc) {
+    // Always keep First Potteries B1–B2 / BS1–BS2 journeys in the history list.
+    for (const row of list) {
+      if (!isStokeFcLine(row.route_name) && !isStokeFcLine(row.extracted_route)) continue;
+      pushUnique(row);
+    }
   }
+  if (!keepStokeFc) return matched;
   return matched.sort((a, b) => String(b.datetime || "").localeCompare(String(a.datetime || "")));
 }
 
@@ -808,8 +1136,8 @@ function historyBlock(extra = {}) {
               : "";
             const liveTag = row.live ? ` <span class="history-live-tag">live</span>` : "";
             return `<div class="popup-history-row"><span class="history-time">${esc(formatHistoryTime(row.datetime))}</span><span class="history-line">${esc(line)}${divertTag}${liveTag}</span><span class="history-dest">${esc(dest)}</span>${
-              row.trip_id || row.vehicle?.id || extra.trailKey || row.live
-                ? `<button type="button" class="history-play-btn" data-trip-id="${esc(row.trip_id || "")}" data-journey-id="${esc(row.id || "")}" data-vehicle-id="${esc(row.vehicle?.id || extra.btVehicle?.id || "")}" data-trail-key="${esc(extra.trailKey || "")}" data-reg="${esc(extra.vehicle?.reg || extra.btVehicle?.reg || "")}" data-line="${esc(line)}" data-dest="${esc(dest)}" data-datetime="${esc(row.datetime || "")}" title="Show this route on the map">Map</button>`
+              row.trip_id || row.vehicle?.id || extra.trailKey || row.live || row.atTrail || row.atLive
+                ? `<button type="button" class="history-play-btn" data-trip-id="${esc(row.trip_id || "")}" data-journey-id="${esc(trailFilterJourneyId(row.journey_id || row.id || "", line))}" data-vehicle-id="${esc(row.vehicle?.id || extra.btVehicle?.id || "")}" data-trail-key="${esc(row.trailKey || extra.trailKey || "")}" data-reg="${esc(extra.vehicle?.reg || extra.btVehicle?.reg || "")}" data-line="${esc(line)}" data-direction="${esc(normalizeTrailDirection(row.direction || ""))}" data-dest="${esc(dest)}" data-datetime="${esc(row.datetime || "")}" title="Show this route on the map">Map</button>`
                 : `<span></span>`
             }</div>`;
           })
@@ -1039,18 +1367,69 @@ let playback = null;
 const TRAIL_STORE_KEY = "uk-bus-trails-v1";
 const TRAIL_MAX_POINTS = 8000;
 const TRAIL_MAX_VEHICLES = 60;
+/** Server + local GPS tails are always kept for this many days (independent of Plus history chips). */
+const TRAIL_KEEP_DAYS = 7;
 const trailMem = new Map();
 const trailPersistIds = new Set();
 let trailPersistTimer = null;
 let liveTrailLine = null;
 let liveTrailKey = "";
+let liveTrailAlignGen = 0;
+let liveTrailRefreshTimer = null;
+let liveTrailAlignBusy = false;
+let liveTrailAlignWanted = null;
+const pinnedTrailRefreshTimers = new Map();
 /** Trails kept on the map after a route finishes (keyed by trail id / reg:…). */
 const pinnedTrailKeys = new Set();
 const pinnedTrailLines = new Map();
+const pinnedTrailAlignGen = new Map();
+const pinnedTrailAlignBusy = new Map();
+const pinnedTrailAlignWanted = new Map();
+const trailUploadQueue = new Map(); // key -> points[]
+let trailUploadTimer = null;
+const trailServerFetched = new Map(); // key -> last fetch ms
+
+function scheduleLiveTrailRefresh(key) {
+  if (!key || String(liveTrailKey) !== String(key)) return;
+  if (liveTrailRefreshTimer) return;
+  liveTrailRefreshTimer = setTimeout(() => {
+    liveTrailRefreshTimer = null;
+    if (liveTrailKey) refreshLiveTrailLine(liveTrailKey);
+  }, 750);
+}
+
+function schedulePinnedTrailRefresh(key) {
+  const id = String(key || "");
+  if (!id || !pinnedTrailKeys.has(id)) return;
+  if (pinnedTrailRefreshTimers.has(id)) return;
+  pinnedTrailRefreshTimers.set(
+    id,
+    setTimeout(() => {
+      pinnedTrailRefreshTimers.delete(id);
+      if (pinnedTrailKeys.has(id)) refreshPinnedTrailLine(id);
+    }, 750),
+  );
+}
 
 function regTrailKey(reg) {
   const plate = compactReg(reg);
   return plate ? `reg:${plate}` : "";
+}
+
+/** Bustimes / UI row ids that must not be used to filter GPS trail points. */
+function normalizeTrailJourneyId(raw) {
+  const id = String(raw || "").trim();
+  if (!id) return "";
+  if (/^(at-live-|at-trail-|live-|at-jny-$)/i.test(id)) return "";
+  const atJny = id.match(/^at-jny-(.+)$/i);
+  if (atJny) return String(atJny[1] || "").trim();
+  return id;
+}
+
+function trailFilterJourneyId(raw, line = "") {
+  // AT employee AVL journey ids flap — filter by line + time only.
+  if (isAltonLine(line)) return "";
+  return normalizeTrailJourneyId(raw);
 }
 
 function loadTrailStore() {
@@ -1069,14 +1448,119 @@ function loadTrailStore() {
   }
 }
 
-function pruneTrailPoints(points, days = historyDays) {
+function pruneTrailPoints(points, days = TRAIL_KEEP_DAYS) {
   if (!points?.length) return [];
   const cutoff = Date.now() - Math.max(1, days) * 86400000;
+  const normalized = points
+    .map((p) => {
+      if (!p) return null;
+      const t = Number.isFinite(p.t) ? Number(p.t) : Date.parse(p.t);
+      const lat = Number(p.lat);
+      const lng = Number(p.lng);
+      if (!Number.isFinite(t) || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      return { ...p, t, lat, lng };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.t - b.t);
   let start = 0;
-  while (start < points.length && points[start].t < cutoff) start += 1;
-  const kept = start ? points.slice(start) : points;
+  while (start < normalized.length && normalized[start].t < cutoff) start += 1;
+  const kept = start ? normalized.slice(start) : normalized;
   if (kept.length > TRAIL_MAX_POINTS) return kept.slice(kept.length - TRAIL_MAX_POINTS);
   return kept;
+}
+
+function mergeTrailPoints(existing, incoming) {
+  const map = new Map();
+  for (const raw of [...(existing || []), ...(incoming || [])]) {
+    if (!raw) continue;
+    const t = Number.isFinite(raw.t) ? Number(raw.t) : Date.parse(raw.t);
+    const lat = Number(raw.lat);
+    const lng = Number(raw.lng);
+    if (!Number.isFinite(t) || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    const p = { ...raw, t, lat, lng };
+    const k = `${Math.round(p.t / 500)}:${p.lat.toFixed(5)}:${p.lng.toFixed(5)}`;
+    if (!map.has(k)) map.set(k, p);
+  }
+  return pruneTrailPoints([...map.values()].sort((a, b) => a.t - b.t));
+}
+
+function queueTrailUpload(key, point) {
+  if (!key || !point) return;
+  const id = String(key);
+  let list = trailUploadQueue.get(id);
+  if (!list) {
+    list = [];
+    trailUploadQueue.set(id, list);
+  }
+  list.push(point);
+  if (list.length > 400) trailUploadQueue.set(id, list.slice(-400));
+  if (trailUploadTimer) return;
+  trailUploadTimer = setTimeout(() => {
+    trailUploadTimer = null;
+    flushTrailUpload().catch(() => {});
+  }, 5000);
+}
+
+async function flushTrailUpload() {
+  if (!trailUploadQueue.size) return;
+  const batches = [];
+  for (const [key, points] of trailUploadQueue.entries()) {
+    if (!points.length) continue;
+    batches.push({ key, points: points.splice(0, 200) });
+  }
+  for (const [key, points] of [...trailUploadQueue.entries()]) {
+    if (!points.length) trailUploadQueue.delete(key);
+  }
+  if (!batches.length) return;
+  try {
+    await fetch("/api/trails/points", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ batches }),
+    });
+  } catch {
+    // Re-queue on failure.
+    for (const batch of batches) {
+      const cur = trailUploadQueue.get(batch.key) || [];
+      trailUploadQueue.set(batch.key, [...batch.points, ...cur].slice(-400));
+    }
+  }
+}
+
+async function fetchServerTrails(keys, { fromMs = 0, toMs = 0, force = false } = {}) {
+  const list = [...new Set((keys || []).map((k) => String(k || "").trim()).filter(Boolean))].slice(0, 8);
+  if (!list.length) return;
+  const now = Date.now();
+  const need = force
+    ? list
+    : list.filter((key) => {
+        const at = trailServerFetched.get(key) || 0;
+        return now - at > 45_000;
+      });
+  if (!need.length) return;
+  try {
+    const params = new URLSearchParams({
+      keys: need.join(","),
+      days: String(TRAIL_KEEP_DAYS),
+    });
+    if (fromMs) params.set("from", String(fromMs));
+    if (toMs) params.set("to", String(toMs));
+    const res = await fetch(`/api/trails?${params}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const trails = data?.trails && typeof data.trails === "object" ? data.trails : {};
+    for (const key of need) {
+      trailServerFetched.set(key, now);
+      const incoming = Array.isArray(trails[key]) ? trails[key] : [];
+      if (!incoming.length) continue;
+      const merged = mergeTrailPoints(trailMem.get(key) || [], incoming);
+      trailMem.set(key, merged);
+      trailPersistIds.add(key);
+    }
+    scheduleTrailPersist();
+  } catch {
+    /* keep local */
+  }
 }
 
 function flushTrailStore() {
@@ -1120,15 +1604,63 @@ function rememberTrailVehicle(key) {
   scheduleTrailPersist();
 }
 
-function trailKeysForVehicle({ vehicleId = "", trailKey = "", reg = "" } = {}) {
+function normalizeTrailDirection(raw) {
+  const d = String(raw || "")
+    .trim()
+    .toLowerCase();
+  if (!d) return "";
+  if (/^(in|inbound|i|1)$/.test(d)) return "in";
+  if (/^(out|outbound|o|0)$/.test(d)) return "out";
+  return "";
+}
+
+function trailKeysForVehicle({
+  vehicleId = "",
+  trailKey = "",
+  reg = "",
+  journeyId = "",
+  tripId = "",
+  line = "",
+  datetime = "",
+  direction = "",
+} = {}) {
   const keys = [];
   const seen = new Set();
-  for (const key of [trailKey, vehicleId, regTrailKey(reg)]) {
-    if (!key) continue;
+  const push = (key) => {
+    if (!key) return;
     const id = String(key);
-    if (seen.has(id)) continue;
+    if (seen.has(id)) return;
     seen.add(id);
     keys.push(id);
+  };
+  push(trailKey);
+  push(vehicleId);
+  push(regTrailKey(reg));
+  const jid = trailFilterJourneyId(journeyId, line);
+  const tid = String(tripId || "").trim();
+  if (jid) push(`jny:${jid}`);
+  if (tid) push(`trip:${tid}`);
+  const lineCode = String(line || "").trim().toUpperCase();
+  const dir = normalizeTrailDirection(direction);
+  const primary = String(trailKey || vehicleId || regTrailKey(reg) || "").trim();
+  if (lineCode && primary) {
+    const day = datetime ? ukDateKey(datetime) : ukDateKey();
+    if (day && day !== "Invalid Date") {
+      if (dir) {
+        push(`run:${primary}:${lineCode}:${dir}:${day}`);
+        if (ALTON_LINES.has(lineCode)) push(`at:${lineCode}:${dir}:${primary}:${day}`);
+        // Also try UTC day key for older writes.
+        const utcDay = new Date(datetime || Date.now()).toISOString().slice(0, 10);
+        if (utcDay && utcDay !== day) {
+          push(`run:${primary}:${lineCode}:${dir}:${utcDay}`);
+          if (ALTON_LINES.has(lineCode)) push(`at:${lineCode}:${dir}:${primary}:${utcDay}`);
+        }
+      } else {
+        // No direction yet — undirected keys only (direction will be inferred/clipped later).
+        push(`run:${primary}:${lineCode}:${day}`);
+        if (ALTON_LINES.has(lineCode)) push(`at:${lineCode}:${primary}:${day}`);
+      }
+    }
   }
   return keys;
 }
@@ -1150,109 +1682,837 @@ function recordVehicleTrail(key, lat, lng, heading, meta = {}) {
     if (dt < 700 && moved < 2.5 && turn < 8) return;
     if (dt < 2500 && moved < 1.2) return;
   }
+  const journeyId = meta.journeyId != null ? String(meta.journeyId) : "";
+  const tripId = meta.tripId != null ? String(meta.tripId) : "";
+  const line = meta.line != null ? String(meta.line) : "";
+  const direction = normalizeTrailDirection(meta.direction);
+  // Direction flip on the live vehicle key — don't draw a chord across the turnaround.
+  if (
+    last &&
+    direction &&
+    last.direction &&
+    direction !== last.direction &&
+    !meta._segmented
+  ) {
+    // Still record the point; segment keys below isolate in vs out.
+  }
   points.push({
     t: now,
     lat,
     lng,
     heading: Number.isFinite(heading) ? heading : null,
-    journeyId: meta.journeyId != null ? String(meta.journeyId) : "",
-    tripId: meta.tripId != null ? String(meta.tripId) : "",
-    line: meta.line != null ? String(meta.line) : "",
+    journeyId,
+    tripId,
+    line,
+    direction,
+    operator: meta.operator != null ? String(meta.operator).trim().toUpperCase() : "",
   });
+  queueTrailUpload(id, points[points.length - 1]);
   if (points.length > TRAIL_MAX_POINTS + 200) {
     trailMem.set(id, points.slice(points.length - TRAIL_MAX_POINTS));
   }
-  // Persist every live vehicle we have actually seen, so Map/history can use the tail later.
   rememberTrailVehicle(id);
-  if (liveTrailKey === id || pinnedTrailKeys.has(id)) refreshPinnedTrailLine(id);
-  // Also store under registration so the tail survives after the vehicle id drops.
+  if (String(liveTrailKey) === id) scheduleLiveTrailRefresh(id);
+  if (pinnedTrailKeys.has(id)) schedulePinnedTrailRefresh(id);
+
+  if (meta._segmented) return;
+
   const plateKey = regTrailKey(meta.reg);
   if (plateKey && plateKey !== id) {
-    recordVehicleTrail(plateKey, lat, lng, heading, { ...meta, reg: "" });
+    recordVehicleTrail(plateKey, lat, lng, heading, { ...meta, reg: "", _segmented: true });
+  }
+  if (journeyId) {
+    const seg = `jny:${journeyId}`;
+    if (seg !== id) recordVehicleTrail(seg, lat, lng, heading, { ...meta, reg: "", _segmented: true });
+  }
+  if (tripId) {
+    const seg = `trip:${tripId}`;
+    if (seg !== id) recordVehicleTrail(seg, lat, lng, heading, { ...meta, reg: "", _segmented: true });
+  }
+  if (line) {
+    const day = new Date(now).toISOString().slice(0, 10);
+    const lineCode = String(line).trim().toUpperCase();
+    if (direction) {
+      const runSeg = `run:${id}:${lineCode}:${direction}:${day}`;
+      if (runSeg !== id) recordVehicleTrail(runSeg, lat, lng, heading, { ...meta, reg: "", _segmented: true });
+      if (ALTON_LINES.has(lineCode)) {
+        const atSeg = `at:${lineCode}:${direction}:${id}:${day}`;
+        if (atSeg !== id) recordVehicleTrail(atSeg, lat, lng, heading, { ...meta, reg: "", _segmented: true });
+      }
+    } else {
+      const runSeg = `run:${id}:${lineCode}:${day}`;
+      if (runSeg !== id) recordVehicleTrail(runSeg, lat, lng, heading, { ...meta, reg: "", _segmented: true });
+      if (ALTON_LINES.has(lineCode)) {
+        const atSeg = `at:${lineCode}:${id}:${day}`;
+        if (atSeg !== id) recordVehicleTrail(atSeg, lat, lng, heading, { ...meta, reg: "", _segmented: true });
+      }
+    }
   }
 }
 
-function trackedPointsFor(key, { journeyId = "", tripId = "", fromMs = 0, toMs = 0, line = "" } = {}) {
+function trackedPointsFor(key, { journeyId = "", tripId = "", fromMs = 0, toMs = 0, line = "", direction = "" } = {}) {
   const points = trailMem.get(String(key)) || [];
   if (!points.length) return [];
-  const jid = journeyId ? String(journeyId) : "";
+  const jid = trailFilterJourneyId(journeyId, line);
   const tid = tripId ? String(tripId) : "";
   const wantLine = String(line || "").trim();
+  const wantDir = normalizeTrailDirection(direction);
   return points.filter((p) => {
-    if (fromMs && p.t < fromMs) return false;
-    if (toMs && p.t > toMs) return false;
-    if (jid && p.journeyId && p.journeyId !== jid) return false;
-    if (tid && p.tripId && p.tripId !== tid) return false;
-    if (jid && !p.journeyId && tid && p.tripId && p.tripId !== tid) return false;
+    if (fromMs && Number(p.t) < fromMs) return false;
+    if (toMs && Number(p.t) > toMs) return false;
+    if (jid && p.journeyId && String(p.journeyId) !== jid) return false;
+    if (tid && p.tripId && String(p.tripId) !== tid) return false;
     if (wantLine && p.line && !sameServiceLine(p.line, wantLine)) return false;
+    // Strict: when a direction is requested, never include the opposite leg (or undirected mix-ins).
+    if (wantDir) {
+      const pDir = normalizeTrailDirection(p.direction);
+      if (pDir && pDir !== wantDir) return false;
+      if (!pDir) return false;
+    }
     return true;
   });
 }
 
 function trackedPathLatLngs(key, opts = {}) {
-  return trackedPointsFor(key, opts).map((p) => [p.lat, p.lng]);
+  return pathFromGpsPoints(trackedPointsFor(key, opts));
+}
+
+/** Pick inbound or outbound from points near a time — never both. */
+function inferTrailDirection(points, aroundMs = 0) {
+  const list = Array.isArray(points) ? points : [];
+  if (!list.length) return "";
+  if (Number.isFinite(aroundMs) && aroundMs > 0) {
+    let best = null;
+    for (const p of list) {
+      const d = normalizeTrailDirection(p.direction);
+      if (!d) continue;
+      const dt = Math.abs(Number(p.t) - aroundMs);
+      if (!Number.isFinite(dt)) continue;
+      if (!best || dt < best.dt) best = { d, dt };
+    }
+    if (best) return best.d;
+  }
+  let inn = 0;
+  let out = 0;
+  for (const p of list) {
+    const d = normalizeTrailDirection(p.direction);
+    if (d === "in") inn += 1;
+    else if (d === "out") out += 1;
+  }
+  if (!inn && !out) return "";
+  return out >= inn ? "out" : "in";
+}
+
+function trailHeadingDelta(a, b) {
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 0;
+  let d = Math.abs(Number(b) - Number(a)) % 360;
+  if (d > 180) d = 360 - d;
+  return d;
+}
+
+/**
+ * Split GPS into one continuous run per trip.
+ * Hanley→Newcastle and Newcastle→Hanley become separate segments (never one there-and-back line).
+ */
+function segmentTrailIntoTrips(points, { gapMs = 18 * 60_000 } = {}) {
+  const list = (Array.isArray(points) ? points.slice() : [])
+    .filter(
+      (p) =>
+        Number.isFinite(Number(p?.t)) &&
+        Number.isFinite(Number(p?.lat)) &&
+        Number.isFinite(Number(p?.lng)),
+    )
+    .sort((a, b) => Number(a.t) - Number(b.t));
+  if (list.length < 2) return list.length ? [list] : [];
+
+  const runs = [];
+  let cur = [list[0]];
+  for (let i = 1; i < list.length; i += 1) {
+    const prev = cur[cur.length - 1];
+    const next = list[i];
+    const dt = Number(next.t) - Number(prev.t);
+    const prevDir = normalizeTrailDirection(prev.direction);
+    const nextDir = normalizeTrailDirection(next.direction);
+    const prevJ = String(prev.journeyId || "").trim();
+    const nextJ = String(next.journeyId || "").trim();
+    const prevTrip = String(prev.tripId || "").trim();
+    const nextTrip = String(next.tripId || "").trim();
+    const journeyFlip = Boolean(prevJ && nextJ && prevJ !== nextJ);
+    const tripFlip = Boolean(prevTrip && nextTrip && prevTrip !== nextTrip);
+    // Direction flip always starts a new trip — even when the bus turns at the terminus.
+    const dirFlip = Boolean(prevDir && nextDir && prevDir !== nextDir);
+    const gap = Number.isFinite(dt) && dt > gapMs;
+
+    let turnaround = false;
+    if (!dirFlip && !journeyFlip && !tripFlip && !gap && cur.length >= 10) {
+      const start = cur[0];
+      const runDist = haversineMeters(start.lat, start.lng, prev.lat, prev.lng);
+      const step = haversineMeters(prev.lat, prev.lng, next.lat, next.lng);
+      const headFlip = trailHeadingDelta(prev.heading, next.heading) >= 135;
+      // U-turn after a real outbound: reverse heading while barely moving.
+      if (runDist >= 700 && headFlip && step < 140) turnaround = true;
+    }
+
+    if (journeyFlip || tripFlip || dirFlip || gap || turnaround) {
+      if (cur.length >= 2) runs.push(cur);
+      cur = [next];
+    } else {
+      cur.push(next);
+    }
+  }
+  if (cur.length >= 2) runs.push(cur);
+  return runs;
+}
+
+/** Keep one continuous there-OR-back run around a time — drop the return leg. */
+function clipPointsToSingleDirectionRun(points, { direction = "", aroundMs = 0 } = {}) {
+  const runs = segmentTrailIntoTrips(points);
+  if (!runs.length) return [];
+  const wantDir = normalizeTrailDirection(direction);
+  const pool = wantDir
+    ? runs.filter((run) => {
+        const d = inferTrailDirection(run) || normalizeTrailDirection(run.find((p) => p.direction)?.direction);
+        return !d || d === wantDir;
+      })
+    : runs;
+  const list = pool.length ? pool : runs;
+  if (!(Number.isFinite(aroundMs) && aroundMs > 0)) {
+    return list.reduce((best, run) => (run.length > best.length ? run : best), list[0]);
+  }
+  let best = list[0];
+  let bestDt = Infinity;
+  for (const run of list) {
+    const mid = run[Math.floor(run.length / 2)];
+    const start = Number(run[0].t);
+    const end = Number(run[run.length - 1].t);
+    let dt = Infinity;
+    if (aroundMs >= start && aroundMs <= end) dt = 0;
+    else {
+      dt = Math.min(Math.abs(aroundMs - start), Math.abs(aroundMs - end));
+      if (Number.isFinite(mid?.t)) dt = Math.min(dt, Math.abs(aroundMs - Number(mid.t)));
+    }
+    if (dt < bestDt || (dt === bestDt && run.length > best.length)) {
+      best = run;
+      bestDt = dt;
+    }
+  }
+  return best;
+}
+
+/** Merge points from several keys (dedupe by time) for trip segmentation. */
+function collectTrailGpsForKeys(keys, filter = {}) {
+  const byT = new Map();
+  const baseFilter = {
+    fromMs: filter.fromMs || 0,
+    toMs: filter.toMs || 0,
+    line: filter.line || "",
+    // Intentionally no direction / journey / trip — we segment those ourselves.
+  };
+  for (const key of keys || []) {
+    if (!key) continue;
+    for (const p of trackedPointsFor(key, baseFilter)) {
+      const t = Number(p.t);
+      if (!Number.isFinite(t)) continue;
+      const prev = byT.get(t);
+      if (
+        !prev ||
+        (normalizeTrailDirection(p.direction) && !normalizeTrailDirection(prev.direction)) ||
+        (p.journeyId && !prev.journeyId) ||
+        (p.tripId && !prev.tripId)
+      ) {
+        byT.set(t, p);
+      }
+    }
+  }
+  return [...byT.values()].sort((a, b) => Number(a.t) - Number(b.t));
+}
+
+/**
+ * Pin each trip as its own tail polyline (Hanley→Newcastle separate from Newcastle→Hanley).
+ * Returns the synthetic keys that were drawn.
+ */
+function pinSeparateTripTails(segments, { baseKey = "bus", line = "", operator = "" } = {}) {
+  const drawn = [];
+  const base = String(baseKey || "bus")
+    .replace(/[^A-Za-z0-9:_-]+/g, "_")
+    .slice(0, 56);
+  for (const seg of segments || []) {
+    if (!Array.isArray(seg) || seg.length < 2) continue;
+    const startT = Number(seg[0].t) || 0;
+    const endT = Number(seg[seg.length - 1].t) || startT;
+    const dir =
+      inferTrailDirection(seg, startT + Math.max(0, (endT - startT) / 2)) ||
+      normalizeTrailDirection(seg.find((p) => p.direction)?.direction);
+    const key = `tripseg:${base}:${startT}`;
+    trailMem.set(
+      key,
+      seg.map((p) => ({
+        t: Number(p.t),
+        lat: Number(p.lat),
+        lng: Number(p.lng),
+        heading: Number.isFinite(p.heading) ? p.heading : null,
+        journeyId: p.journeyId || "",
+        tripId: p.tripId || "",
+        line: p.line || line || "",
+        direction: normalizeTrailDirection(p.direction) || dir,
+        operator: p.operator || operator || "",
+      })),
+    );
+    pinnedTrailFilters.set(key, {
+      line: String(line || "").trim(),
+      direction: dir,
+      fromMs: startT - 30_000,
+      toMs: endT + 30_000,
+      operator: String(operator || "").trim().toUpperCase(),
+    });
+    pinnedTrailKeys.add(key);
+    refreshPinnedTrailLine(key);
+    drawn.push(key);
+  }
+  return drawn;
 }
 
 const TRAIL_CASING = {
   color: "#ffffff",
-  weight: 10,
-  opacity: 0.95,
+  weight: 5,
+  opacity: 0.55,
   lineJoin: "round",
   lineCap: "round",
   interactive: false,
 };
 const TRAIL_STROKE = {
-  color: "#000000",
-  weight: 5,
+  color: "#0f172a",
+  weight: 2.25,
   opacity: 1,
   lineJoin: "round",
   lineCap: "round",
   interactive: false,
 };
 
-function makeTrailPair(path, layer) {
-  const casing = L.polyline(path, { ...TRAIL_CASING }).addTo(layer);
-  const line = L.polyline(path, { ...TRAIL_STROKE }).addTo(layer);
-  return { casing, line };
+/** Break trails only on real GPS teleports — not normal sparse AVL pings (rural Staffs runs often skip 2–4 km). */
+const TRAIL_BREAK_GAP_M = 4500;
+const TRAIL_BREAK_HARD_M = 12000;
+const TRAIL_BREAK_GAP_MS = 15 * 60_000;
+const TRAIL_BREAK_SPEED_MPH = 100;
+/** FlixBus / National Express motorway runs — sparse AVL; keep A→B continuous. */
+const COACH_TRAIL_NOCS = new Set(["FLIX", "NATX"]);
+const COACH_TRAIL_BREAK_GAP_M = 28000;
+const COACH_TRAIL_BREAK_HARD_M = 95000;
+const COACH_TRAIL_BREAK_GAP_MS = 45 * 60_000;
+const COACH_TRAIL_BREAK_SPEED_MPH = 130;
+const COACH_TRAIL_LIVE_MS = 14 * 60 * 60 * 1000;
+
+function isCoachTrailOperator(operator) {
+  return COACH_TRAIL_NOCS.has(String(operator || "").trim().toUpperCase());
 }
 
-function setTrailPairPath(pair, path) {
+function trailBreakLimits({ coach = false, operator = "" } = {}) {
+  if (coach || isCoachTrailOperator(operator)) {
+    return {
+      gapM: COACH_TRAIL_BREAK_GAP_M,
+      hardM: COACH_TRAIL_BREAK_HARD_M,
+      gapMs: COACH_TRAIL_BREAK_GAP_MS,
+      speedMph: COACH_TRAIL_BREAK_SPEED_MPH,
+    };
+  }
+  return {
+    gapM: TRAIL_BREAK_GAP_M,
+    hardM: TRAIL_BREAK_HARD_M,
+    gapMs: TRAIL_BREAK_GAP_MS,
+    speedMph: TRAIL_BREAK_SPEED_MPH,
+  };
+}
+
+function trailPointLatLng(p) {
+  if (Array.isArray(p)) {
+    return {
+      lat: Number(p[0]),
+      lng: Number(p[1]),
+      t: Number(p[3] ?? p.t),
+    };
+  }
+  return {
+    lat: Number(p?.lat),
+    lng: Number(p?.lng),
+    t: Number(p?.t),
+  };
+}
+
+function isTrailGapJump(a, b, maxGapM = TRAIL_BREAK_GAP_M, breakOpts = {}) {
+  if (!a || !b) return false;
+  const left = trailPointLatLng(a);
+  const right = trailPointLatLng(b);
+  if (![left.lat, left.lng, right.lat, right.lng].every(Number.isFinite)) return false;
+  const leftDir = normalizeTrailDirection(Array.isArray(a) ? a[4] ?? a.direction : a?.direction);
+  const rightDir = normalizeTrailDirection(Array.isArray(b) ? b[4] ?? b.direction : b?.direction);
+  const dist = haversineMeters(left.lat, left.lng, right.lat, right.lng);
+  // Direction flip = new trip (terminus turnaround may barely move).
+  if (leftDir && rightDir && leftDir !== rightDir) return true;
+  const limits = trailBreakLimits(breakOpts);
+  const gapM = Number.isFinite(maxGapM) ? maxGapM : limits.gapM;
+  if (!(dist >= Math.min(gapM, limits.gapM))) return false;
+  if (dist >= limits.hardM) return true;
+  const dt =
+    Number.isFinite(left.t) && Number.isFinite(right.t) ? Math.abs(right.t - left.t) : null;
+  // Missing timestamps: only hard-break on long jumps (sparse AVL often has no usable times).
+  if (dt == null) return dist >= limits.hardM;
+  if (dt >= limits.gapMs && dist >= limits.gapM) return true;
+  const mph = (dist / Math.max(dt / 1000, 0.001)) * 2.23694;
+  return mph > limits.speedMph;
+}
+
+/** Keep timestamps + direction on path points so gap detection still works after mapping. */
+function pathFromGpsPoints(gpsPoints) {
+  if (!Array.isArray(gpsPoints)) return [];
+  return gpsPoints
+    .map((p) => {
+      const lat = Number(p?.lat);
+      const lng = Number(p?.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      const heading = Number.isFinite(p?.heading) ? p.heading : null;
+      const t = Number(p?.t);
+      const direction = normalizeTrailDirection(p?.direction);
+      return [lat, lng, heading, Number.isFinite(t) ? t : null, direction || null];
+    })
+    .filter(Boolean);
+}
+
+/** Split a latlng path into continuous runs (Leaflet MultiPolyline-friendly). */
+function splitLatLngsByGaps(latlngs, maxGapM = TRAIL_BREAK_GAP_M, breakOpts = {}) {
+  if (!Array.isArray(latlngs) || latlngs.length < 2) return [];
+  const segs = [];
+  let cur = [latlngs[0]];
+  for (let i = 1; i < latlngs.length; i += 1) {
+    const prev = cur[cur.length - 1];
+    const next = latlngs[i];
+    if (isTrailGapJump(prev, next, maxGapM, breakOpts)) {
+      if (cur.length >= 2) segs.push(cur);
+      cur = [next];
+    } else {
+      cur.push(next);
+    }
+  }
+  if (cur.length >= 2) segs.push(cur);
+  return segs;
+}
+
+function splitGpsPointsByGaps(gps, maxGapM = TRAIL_BREAK_GAP_M, breakOpts = {}) {
+  const pts = normalizeGpsTrailPoints(gps);
+  if (pts.length < 2) return [];
+  const segs = [];
+  let cur = [pts[0]];
+  for (let i = 1; i < pts.length; i += 1) {
+    const prev = cur[cur.length - 1];
+    const next = pts[i];
+    if (isTrailGapJump(prev, next, maxGapM, breakOpts)) {
+      if (cur.length >= 2) segs.push(cur);
+      cur = [next];
+    } else {
+      cur.push(next);
+    }
+  }
+  if (cur.length >= 2) segs.push(cur);
+  return segs;
+}
+
+function asTrailLatLngs(path, breakOpts = {}) {
+  if (!Array.isArray(path) || path.length < 1) return [];
+  const toLatLng = (p) => {
+    if (Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])) return [p[0], p[1]];
+    const lat = Number(p?.lat);
+    const lng = Number(p?.lng);
+    return Number.isFinite(lat) && Number.isFinite(lng) ? [lat, lng] : null;
+  };
+  const cleanSeg = (seg) => (Array.isArray(seg) ? seg.map(toLatLng).filter(Boolean) : []);
+  // Already a MultiPolyline: [[ [lat,lng], ... ], ...]
+  if (Array.isArray(path[0]) && Array.isArray(path[0][0])) {
+    return path.map(cleanSeg).filter((seg) => seg.length >= 2);
+  }
+  const limits = trailBreakLimits(breakOpts);
+  const segs = splitLatLngsByGaps(path, limits.gapM, breakOpts);
+  const cleaned = (segs.length ? segs : path.length >= 2 ? [path] : []).map(cleanSeg).filter((seg) => seg.length >= 2);
+  return cleaned;
+}
+
+function flattenTrailLatLngs(path) {
+  return asTrailLatLngs(path).flat();
+}
+
+function pathLengthMeters(path, { includeGaps = true } = {}) {
+  if (!Array.isArray(path) || path.length < 2) return 0;
+  // MultiPolyline support
+  if (Array.isArray(path[0]) && Array.isArray(path[0][0])) {
+    return path.reduce((sum, seg) => sum + pathLengthMeters(seg, { includeGaps }), 0);
+  }
+  let n = 0;
+  for (let i = 1; i < path.length; i += 1) {
+    const a = path[i - 1];
+    const b = path[i];
+    const lat1 = Array.isArray(a) ? a[0] : a.lat;
+    const lng1 = Array.isArray(a) ? a[1] : a.lng;
+    const lat2 = Array.isArray(b) ? b[0] : b.lat;
+    const lng2 = Array.isArray(b) ? b[1] : b.lng;
+    if (
+      !includeGaps &&
+      isTrailGapJump(
+        { lat: lat1, lng: lng1 },
+        { lat: lat2, lng: lng2 },
+      )
+    ) {
+      continue;
+    }
+    n += haversineMeters(lat1, lng1, lat2, lng2);
+  }
+  return n;
+}
+
+function normalizeGpsTrailPoints(gps) {
+  if (!Array.isArray(gps) || gps.length < 2) return [];
+  const out = [];
+  for (const p of gps) {
+    if (Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])) {
+      const t = Number(p[3] ?? p.t);
+      out.push({
+        lat: p[0],
+        lng: p[1],
+        heading: Number.isFinite(p[2]) ? p[2] : null,
+        t: Number.isFinite(t) ? t : null,
+        direction: normalizeTrailDirection(p[4] ?? p.direction),
+      });
+      continue;
+    }
+    const lat = Number(p?.lat);
+    const lng = Number(p?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    const heading = Number(p?.heading);
+    const t = Number(p?.t);
+    out.push({
+      lat,
+      lng,
+      heading: Number.isFinite(heading) ? heading : null,
+      t: Number.isFinite(t) ? t : null,
+      direction: normalizeTrailDirection(p?.direction),
+    });
+  }
+  return out;
+}
+
+function formatTrailArrowTime(ms) {
+  if (!Number.isFinite(ms)) return "";
+  const d = new Date(ms);
+  if (!Number.isFinite(d.getTime())) return "";
+  const time = d.toLocaleTimeString("en-GB", {
+    timeZone: UK_TZ,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const day = d.toLocaleDateString("en-GB", {
+    timeZone: UK_TZ,
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+  });
+  return `${day} · ${time}`;
+}
+
+function trailArrowIcon(bearingDeg) {
+  const rot = Number.isFinite(bearingDeg) ? bearingDeg : 0;
+  const z = map.getZoom();
+  const size = z < 13 ? 14 : z < 15 ? 18 : 22;
+  const half = size / 2;
+  return L.divIcon({
+    className: "trail-arrow-icon",
+    html: `<button type="button" class="trail-arrow-hit" aria-label="Show time at this point"><span class="trail-arrow-chevron" style="--trail-rot:${rot}deg" aria-hidden="true"></span></button>`,
+    iconSize: [size, size],
+    iconAnchor: [half, half],
+  });
+}
+
+function clearTrailArrows(pair, layer) {
+  if (!pair?.arrows?.length) {
+    if (pair) pair.arrows = [];
+    return;
+  }
+  const target = layer || pair.layer;
+  for (const marker of pair.arrows) {
+    try {
+      target?.removeLayer(marker);
+    } catch {
+      /* already gone */
+    }
+  }
+  pair.arrows = [];
+}
+
+function interpolateTrailTime(a, b, t) {
+  if (Number.isFinite(a?.t) && Number.isFinite(b?.t)) {
+    return a.t + (b.t - a.t) * Math.max(0, Math.min(1, t));
+  }
+  if (Number.isFinite(a?.t)) return a.t;
+  if (Number.isFinite(b?.t)) return b.t;
+  return null;
+}
+
+function trailBreakOptsFromFilter(filter = {}, key = "") {
+  const op = String(filter?.operator || "").trim().toUpperCase();
+  if (op) return { operator: op, coach: isCoachTrailOperator(op) };
+  if (filter?.coach) return { coach: true, operator: op || "" };
+  const pts = trailMem.get(String(key || "")) || [];
+  for (let i = pts.length - 1; i >= 0; i -= 1) {
+    const pOp = String(pts[i]?.operator || "").trim().toUpperCase();
+    if (pOp) return { operator: pOp, coach: isCoachTrailOperator(pOp) };
+  }
+  // Live Flix / NATX markers: bus.id is the trail key but points may lack operator yet.
+  const id = String(key || "");
+  if (id) {
+    for (const marker of markers.values()) {
+      if (String(marker?.bus?.id) !== id) continue;
+      if (isFlixBus(marker.bus) || isNationalExpress(marker.bus)) {
+        const noc = trailOperatorForBus(marker.bus);
+        return { operator: noc, coach: true };
+      }
+    }
+  }
+  return {};
+}
+
+function gpsTimeAtPathFraction(gpsPts, frac) {
+  const pts = normalizeGpsTrailPoints(gpsPts);
+  if (!pts.length) return null;
+  if (pts.length === 1) return Number.isFinite(pts[0].t) ? pts[0].t : null;
+  let total = 0;
+  const edges = [];
+  for (let i = 1; i < pts.length; i += 1) {
+    const d = haversineMeters(pts[i - 1].lat, pts[i - 1].lng, pts[i].lat, pts[i].lng);
+    total += Math.max(d, 0);
+    edges.push({ d: Math.max(d, 0), a: pts[i - 1], b: pts[i] });
+  }
+  if (!(total > 0)) {
+    return Number.isFinite(pts[pts.length - 1].t) ? pts[pts.length - 1].t : pts[0].t;
+  }
+  let target = Math.max(0, Math.min(1, frac)) * total;
+  for (const edge of edges) {
+    if (target <= edge.d) {
+      const t = edge.d > 0 ? target / edge.d : 0;
+      return interpolateTrailTime(edge.a, edge.b, t);
+    }
+    target -= edge.d;
+  }
+  return Number.isFinite(pts[pts.length - 1].t) ? pts[pts.length - 1].t : null;
+}
+
+/** Direction arrows along the drawn (road-aligned) path — never raw GPS chords across fields. */
+function buildTrailArrowsAlongRoad(path, layer, opts = {}) {
+  const arrows = [];
+  if (!layer) return arrows;
+  const breakOpts = opts.breakOpts || {};
+  const segs = asTrailLatLngs(path, breakOpts);
+  if (!segs.length) return arrows;
+  const gps = opts.gpsPoints || opts.gpsPath || null;
+  const total = segs.reduce((sum, seg) => sum + pathLengthMeters(seg), 0);
+  if (!(total > 1)) return arrows;
+  const maxArrows = 480;
+  const z = map.getZoom();
+  // Fewer, smaller markers when zoomed out so the trail stays readable.
+  const spacingMul = z < 12 ? 2.4 : z < 13 ? 1.85 : z < 14 ? 1.35 : z < 15 ? 1.1 : 1;
+  const spacing =
+    Math.max(
+      28,
+      Math.min(58, total / Math.max(24, Math.min(maxArrows, Math.ceil(total / 32)))),
+    ) * spacingMul;
+  let placed = 0;
+  let covered = 0;
+  const placeArrow = (lat, lng, bear, atMs) => {
+    const when = formatTrailArrowTime(atMs);
+    const marker = L.marker([lat, lng], {
+      icon: trailArrowIcon(bear),
+      interactive: true,
+      keyboard: true,
+      zIndexOffset: 250,
+      title: when ? `Bus here at ${when}` : "Tracked position",
+    });
+    marker.bindPopup(
+      when
+        ? `<div class="trail-arrow-popup"><strong>Bus was here</strong><div class="trail-arrow-popup-time">${esc(when)}</div></div>`
+        : `<div class="trail-arrow-popup"><strong>Tracked position</strong><div class="trail-arrow-popup-time">Time unknown for this point</div></div>`,
+      { className: "trail-arrow-popup-wrap", maxWidth: 220, closeButton: true },
+    );
+    marker.on("click", (event) => {
+      L.DomEvent.stopPropagation(event);
+      marker.openPopup();
+    });
+    marker.addTo(layer);
+    arrows.push(marker);
+    placed += 1;
+  };
+
+  for (const seg of segs) {
+    if (seg.length < 2 || placed >= maxArrows) {
+      covered += pathLengthMeters(seg);
+      continue;
+    }
+    let travelled = 0;
+    let nextAt = Math.min(spacing * 0.4, Math.max(10, pathLengthMeters(seg) * 0.02));
+    for (let i = 1; i < seg.length; i += 1) {
+      const a = seg[i - 1];
+      const b = seg[i];
+      const lat1 = a[0];
+      const lng1 = a[1];
+      const lat2 = b[0];
+      const lng2 = b[1];
+      const edge = haversineMeters(lat1, lng1, lat2, lng2);
+      if (!(edge > 0.5)) continue;
+      const bear = segmentBearing([lat1, lng1], [lat2, lng2]);
+      while (nextAt <= travelled + edge && placed < maxArrows) {
+        const t = edge > 0 ? (nextAt - travelled) / edge : 0;
+        const lat = lat1 + (lat2 - lat1) * t;
+        const lng = lng1 + (lng2 - lng1) * t;
+        const frac = total > 0 ? (covered + nextAt) / total : 0;
+        placeArrow(lat, lng, bear, gpsTimeAtPathFraction(gps, frac));
+        nextAt += spacing;
+      }
+      travelled += edge;
+    }
+    const last = seg[seg.length - 1];
+    const prev = seg[seg.length - 2];
+    const endBear = segmentBearing(prev, last);
+    const tooClose =
+      arrows.length &&
+      haversineMeters(
+        arrows[arrows.length - 1].getLatLng().lat,
+        arrows[arrows.length - 1].getLatLng().lng,
+        last[0],
+        last[1],
+      ) < Math.min(20, spacing * 0.45);
+    if (!tooClose && placed < maxArrows + 1) {
+      placeArrow(last[0], last[1], endBear, gpsTimeAtPathFraction(gps, (covered + travelled) / total));
+    }
+    covered += travelled;
+  }
+  return arrows;
+}
+
+function makeTrailPair(path, layer, opts = {}) {
+  const breakOpts = { operator: opts.operator || "", coach: !!opts.coach };
+  const latlngs = asTrailLatLngs(path, breakOpts);
+  const casing = L.polyline(latlngs, { ...TRAIL_CASING }).addTo(layer);
+  const line = L.polyline(latlngs, { ...TRAIL_STROKE }).addTo(layer);
+  const gps = opts.gpsPoints || opts.gpsPath || null;
+  const arrows = opts.deferArrows
+    ? []
+    : buildTrailArrowsAlongRoad(path, layer, { gpsPoints: gps, breakOpts });
+  return { casing, line, arrows, layer, gpsPoints: gps || null, breakOpts };
+}
+
+function setTrailPairPath(pair, path, opts = {}) {
   if (!pair) return;
-  pair.casing.setLatLngs(path);
-  pair.line.setLatLngs(path);
+  const breakOpts = {
+    ...(pair.breakOpts || {}),
+    ...(opts.operator || opts.coach ? { operator: opts.operator || "", coach: !!opts.coach } : {}),
+  };
+  if (opts.operator || opts.coach) pair.breakOpts = breakOpts;
+  const latlngs = asTrailLatLngs(path, pair.breakOpts || breakOpts);
+  pair.casing.setLatLngs(latlngs);
+  pair.line.setLatLngs(latlngs);
+  if (opts.gpsPoints || opts.gpsPath) {
+    pair.gpsPoints = opts.gpsPoints || opts.gpsPath;
+  }
+  clearTrailArrows(pair, pair.layer);
+  if (opts.deferArrows) {
+    pair.arrows = [];
+    return;
+  }
+  // Rebuild arrows on the path being shown (road-aligned when prepareRoadTrail finishes).
+  pair.arrows = buildTrailArrowsAlongRoad(path, pair.layer, {
+    gpsPoints: pair.gpsPoints,
+    breakOpts: pair.breakOpts || breakOpts,
+  });
 }
 
 function removeTrailPair(pair, layer) {
   if (!pair) return;
-  layer.removeLayer(pair.casing);
-  layer.removeLayer(pair.line);
+  clearTrailArrows(pair, layer || pair.layer);
+  const target = layer || pair.layer;
+  target?.removeLayer(pair.casing);
+  target?.removeLayer(pair.line);
 }
 
 function bestTrackedPath(keys, opts = {}) {
   let best = [];
+  const dir = normalizeTrailDirection(opts.direction || "");
   for (const key of keys) {
     if (!key) continue;
-    let path = trackedPathLatLngs(key, opts);
-    // Journey ids from history often do not match live AVL — fall back by time, then all points.
-    if (path.length < 3 && (opts.journeyId || opts.tripId || opts.line)) {
+    let path = trackedPathLatLngs(key, { ...opts, direction: dir });
+    if (opts.line || opts.fromMs || opts.toMs || dir) {
+      const continuous = trackedPathLatLngs(key, {
+        fromMs: opts.fromMs || 0,
+        toMs: opts.toMs || 0,
+        line: opts.line || "",
+        direction: dir,
+      });
+      if (continuous.length > path.length) path = continuous;
+    }
+    if (path.length < 3 && (opts.journeyId || opts.tripId || opts.line || dir)) {
       path = trackedPathLatLngs(key, {
         fromMs: opts.fromMs || 0,
         toMs: opts.toMs || 0,
         line: opts.line || "",
+        direction: dir,
       });
     }
     if (path.length < 3 && (opts.fromMs || opts.toMs)) {
       const fromMs = opts.fromMs ? opts.fromMs - 45 * 60 * 1000 : 0;
       const toMs = opts.toMs ? opts.toMs + 60 * 60 * 1000 : 0;
-      path = trackedPathLatLngs(key, { fromMs, toMs, line: opts.line || "" });
+      path = trackedPathLatLngs(key, { fromMs, toMs, line: opts.line || "", direction: dir });
     }
-    if (path.length < 2) {
-      path = trackedPathLatLngs(key, opts.line ? { line: opts.line } : {});
-    }
-    if (path.length < 2) {
-      path = trackedPathLatLngs(key, {});
+    // Never fall back to the full undirected day when a direction was requested.
+    if (path.length < 2 && !dir) {
+      path = trackedPathLatLngs(key, {
+        ...(opts.line ? { line: opts.line } : {}),
+      });
     }
     if (path.length > best.length) best = path;
+  }
+  return best;
+}
+
+/** Same selection as bestTrackedPath, but keep GPS timestamps/headings for arrow popups. */
+function bestTrackedGpsPoints(keys, opts = {}) {
+  let best = [];
+  const dir = normalizeTrailDirection(opts.direction || "");
+  for (const key of keys) {
+    if (!key) continue;
+    let pts = trackedPointsFor(key, { ...opts, direction: dir });
+    if (opts.line || opts.fromMs || opts.toMs || dir) {
+      const continuous = trackedPointsFor(key, {
+        fromMs: opts.fromMs || 0,
+        toMs: opts.toMs || 0,
+        line: opts.line || "",
+        direction: dir,
+      });
+      if (continuous.length > pts.length) pts = continuous;
+    }
+    if (pts.length < 3 && (opts.journeyId || opts.tripId || opts.line || dir)) {
+      pts = trackedPointsFor(key, {
+        fromMs: opts.fromMs || 0,
+        toMs: opts.toMs || 0,
+        line: opts.line || "",
+        direction: dir,
+      });
+    }
+    if (pts.length < 3 && (opts.fromMs || opts.toMs)) {
+      const fromMs = opts.fromMs ? opts.fromMs - 45 * 60 * 1000 : 0;
+      const toMs = opts.toMs ? opts.toMs + 60 * 60 * 1000 : 0;
+      pts = trackedPointsFor(key, { fromMs, toMs, line: opts.line || "", direction: dir });
+    }
+    if (pts.length < 2 && !dir) {
+      pts = trackedPointsFor(key, {
+        ...(opts.line ? { line: opts.line } : {}),
+      });
+    }
+    if (pts.length > best.length) best = pts;
   }
   return best;
 }
@@ -1281,35 +2541,111 @@ async function resolveTripIdForPlayback({ tripId = "", journeyId = "", vehicleId
 function refreshPinnedTrailLine(key) {
   const id = String(key || "");
   if (!id) return;
-  const path = trackedPathLatLngs(id);
+  const filter = { ...(pinnedTrailFilters.get(id) || {}) };
+  // Live / following tails must keep growing with the bus (don't freeze at pin time).
+  if (filter.live || filter.follow) {
+    filter.toMs = 0;
+    pinnedTrailFilters.set(id, filter);
+  }
+  const breakOpts = trailBreakOptsFromFilter(filter, id);
+  const gpsPoints = trackedPointsFor(id, filter);
+  const path = pathFromGpsPoints(gpsPoints);
   const existing = pinnedTrailLines.get(id);
   if (path.length < 2) {
     if (existing) {
       removeTrailPair(existing, liveTrailLayer);
       pinnedTrailLines.delete(id);
     }
+    pinnedTrailAlignWanted.delete(id);
     return;
   }
+  // Never paint raw GPS chords — only show the line after road matching.
   if (!existing) {
-    pinnedTrailLines.set(id, makeTrailPair(path, liveTrailLayer));
+    pinnedTrailLines.set(
+      id,
+      makeTrailPair([], liveTrailLayer, { gpsPoints, deferArrows: true, ...breakOpts }),
+    );
   } else {
-    setTrailPairPath(existing, path);
+    existing.gpsPoints = gpsPoints;
+    existing.breakOpts = { ...(existing.breakOpts || {}), ...breakOpts };
+  }
+  pinnedTrailAlignWanted.set(id, { path, gpsPoints, breakOpts });
+  runPinnedTrailAlign(id);
+}
+
+async function runPinnedTrailAlign(id) {
+  const key = String(id || "");
+  if (!key || pinnedTrailAlignBusy.get(key)) return;
+  pinnedTrailAlignBusy.set(key, true);
+  try {
+    while (pinnedTrailKeys.has(key) && pinnedTrailAlignWanted.has(key)) {
+      const job = pinnedTrailAlignWanted.get(key);
+      pinnedTrailAlignWanted.delete(key);
+      const gen = (pinnedTrailAlignGen.set(key, (pinnedTrailAlignGen.get(key) || 0) + 1), pinnedTrailAlignGen.get(key));
+      let aligned = [];
+      try {
+        aligned = await prepareRoadTrail(job.path, undefined, job.breakOpts);
+      } catch {
+        aligned = [];
+      }
+      if (!pinnedTrailKeys.has(key)) return;
+      if (pinnedTrailAlignGen.get(key) !== gen) continue;
+      const pair = pinnedTrailLines.get(key);
+      if (!pair || flattenTrailLatLngs(aligned).length < 2) continue;
+      setTrailPairPath(pair, aligned, { gpsPoints: job.gpsPoints });
+    }
+  } finally {
+    pinnedTrailAlignBusy.set(key, false);
+    if (pinnedTrailKeys.has(key) && pinnedTrailAlignWanted.has(key)) runPinnedTrailAlign(key);
   }
 }
 
 function refreshLiveTrailLine(key) {
-  const path = trackedPathLatLngs(key);
+  const breakOpts = trailBreakOptsFromFilter({}, key);
+  const gpsPoints = trackedPointsFor(key);
+  const path = pathFromGpsPoints(gpsPoints);
   if (path.length < 2) {
     if (liveTrailLine) {
       removeTrailPair(liveTrailLine, liveTrailLayer);
       liveTrailLine = null;
     }
+    liveTrailAlignWanted = null;
     return;
   }
   if (!liveTrailLine) {
-    liveTrailLine = makeTrailPair(path, liveTrailLayer);
+    // Empty until road match finishes — avoids chords through buildings.
+    liveTrailLine = makeTrailPair([], liveTrailLayer, { gpsPoints, deferArrows: true, ...breakOpts });
   } else {
-    setTrailPairPath(liveTrailLine, path);
+    liveTrailLine.gpsPoints = gpsPoints;
+    liveTrailLine.breakOpts = { ...(liveTrailLine.breakOpts || {}), ...breakOpts };
+  }
+  liveTrailAlignWanted = { key: String(key), path, gpsPoints, breakOpts };
+  runLiveTrailAlign();
+}
+
+async function runLiveTrailAlign() {
+  if (liveTrailAlignBusy) return;
+  liveTrailAlignBusy = true;
+  try {
+    while (liveTrailAlignWanted) {
+      const job = liveTrailAlignWanted;
+      liveTrailAlignWanted = null;
+      if (String(liveTrailKey) !== String(job.key)) continue;
+      const gen = ++liveTrailAlignGen;
+      let aligned = [];
+      try {
+        aligned = await prepareRoadTrail(job.path, undefined, job.breakOpts);
+      } catch {
+        aligned = [];
+      }
+      if (liveTrailAlignGen !== gen) continue;
+      if (String(liveTrailKey) !== String(job.key) || !liveTrailLine) continue;
+      if (flattenTrailLatLngs(aligned).length < 2) continue;
+      setTrailPairPath(liveTrailLine, aligned, { gpsPoints: job.gpsPoints });
+    }
+  } finally {
+    liveTrailAlignBusy = false;
+    if (liveTrailAlignWanted) runLiveTrailAlign();
   }
 }
 
@@ -1317,14 +2653,390 @@ function refreshAllPinnedTrails() {
   for (const key of pinnedTrailKeys) refreshPinnedTrailLine(key);
 }
 
-function pinVehicleTrail({ vehicleId = "", trailKey = "", reg = "" } = {}) {
-  const keys = trailKeysForVehicle({ vehicleId, trailKey, reg });
+function isSingleVehicleRouteOperator(operator) {
+  return SINGLE_VEHICLE_ROUTE_NOCS.has(String(operator || "").trim().toUpperCase());
+}
+
+function isSingleVehicleRouteLine(line) {
+  return ALTON_LINES.has(String(line || "").trim().toUpperCase());
+}
+
+function routeTailLinesFor(line) {
+  const code = String(line || "").trim();
+  if (!code) return [];
+  if (isStokeFcLine(code)) return [normalizeStokeFcLine(code) || code.toUpperCase()];
+  return [code];
+}
+
+function trailTimeWindow(datetime) {
+  if (!datetime) return { fromMs: 0, toMs: 0 };
+  const start = new Date(datetime).getTime();
+  if (!Number.isFinite(start)) return { fromMs: 0, toMs: 0 };
+  return {
+    fromMs: start - 30 * 60 * 1000,
+    // One there OR back run — not a full day of both directions.
+    toMs: start + 5 * 60 * 60 * 1000,
+  };
+}
+
+async function showFleetRouteTails({
+  line = "",
+  operator = "",
+  vehicles = [],
+  vehicleId = "",
+  trailKey = "",
+  reg = "",
+  journeyId = "",
+  tripId = "",
+  datetime = "",
+  direction = "",
+} = {}) {
+  const code = String(line || "").trim();
+  const opCode = String(operator || "").trim().toUpperCase();
+  const forceSingle = isSingleVehicleRouteOperator(opCode) || isSingleVehicleRouteLine(code);
+  if (!code && !vehicleId && !trailKey && !reg) {
+    showMessage("No route to show");
+    return;
+  }
+  setAppTab("map");
+  stopRoutePlayback("", { clearTail: true });
+
+  const list = Array.isArray(vehicles) ? vehicles.filter(Boolean) : [];
+  const single =
+    vehicleId || trailKey || reg || journeyId || tripId
+      ? [
+          {
+            id: vehicleId,
+            trailKey,
+            reg,
+            journey_id: journeyId,
+            trip_id: tripId,
+            datetime,
+            line: code,
+            direction,
+          },
+        ]
+      : [];
+
+  // FlixBus / National Express / D&G / First Potteries / Stanton's: one vehicle + one route only.
+  let targets = list.length ? list : single;
+  if (forceSingle) {
+    if (vehicleId || trailKey || reg || journeyId || tripId) {
+      targets = single.length ? single : targets.slice(0, 1);
+    } else if (targets.length !== 1) {
+      showMessage("Open a bus and press Map — only that vehicle’s route is shown on the map");
+      return;
+    }
+  }
+
+  const label = code
+    ? targets.length === 1
+      ? `Route ${code}${compactReg(targets[0].reg || targets[0].regLabel || reg) ? ` · ${compactReg(targets[0].reg || targets[0].regLabel || reg)}` : ""}`
+      : `Route ${code}`
+    : targets.length === 1
+      ? compactReg(targets[0].reg || targets[0].regLabel || reg) || "Tracked bus"
+      : "Tracked route";
+
+  showMessage(`Loading ${label}…`);
+
+  const keys = new Set();
+  const filterByKey = new Map();
+  for (const v of targets) {
+    const vLine = String(v.line || v.route_name || code || "").trim();
+    const vJourney = String(v.journey_id || v.journeyId || journeyId || "").trim();
+    const vTrip = String(v.trip_id || v.tripId || tripId || "").trim();
+    const vWhen = v.datetime || v.recordedAtTime || v.trackedAt || datetime || "";
+    let vDir = normalizeTrailDirection(v.direction || direction || "");
+    const window = trailTimeWindow(vWhen);
+    const filter = {
+      line: vLine,
+      journeyId: vJourney,
+      tripId: vTrip,
+      direction: vDir,
+      fromMs: window.fromMs,
+      toMs: window.toMs,
+    };
+    for (const key of trailKeysForVehicle({
+      vehicleId: v.id || v.btId || v.vehicleId || vehicleId || "",
+      trailKey: v.trailKey || (v.ref ? `staff-${v.ref}` : "") || trailKey || "",
+      reg: v.reg || v.regLabel || reg || "",
+      journeyId: vJourney,
+      tripId: vTrip,
+      line: vLine,
+      datetime: vWhen,
+      direction: vDir,
+    })) {
+      keys.add(key);
+      filterByKey.set(key, { ...filter });
+    }
+  }
+
+  // Line-wide server lookup only when not a single-vehicle operator (those must pick a bus).
+  if (!keys.size && code && !forceSingle) {
+    const serverKeys = await fetchTrailKeysForGroup({
+      id: `line:${code}`,
+      label: `Route ${code}`,
+      lines: routeTailLinesFor(code),
+    });
+    for (const key of serverKeys) {
+      keys.add(key);
+      filterByKey.set(key, { line: code });
+    }
+  }
+
+  if (!keys.size) {
+    showMessage(
+      forceSingle
+        ? `No GPS tail for this bus yet — leave it open on the map or wait for the server recorder`
+        : `No GPS tails for ${label} yet`,
+    );
+    return;
+  }
+
+  await fetchServerTrailsChunked([...keys], { force: true });
+
+  clearPinnedTrails();
+  multiTailActiveGroup = { id: `route:${code || "one"}`, label };
+  const drawn = [];
+  const seenSeg = new Set();
+
+  // One tail polyline per trip — never glue Hanley→Newcastle with Newcastle→Hanley.
+  for (const v of targets) {
+    const vLine = String(v.line || v.route_name || code || "").trim();
+    const vWhen = v.datetime || v.recordedAtTime || v.trackedAt || datetime || "";
+    const window = trailTimeWindow(vWhen);
+    const vKeys = trailKeysForVehicle({
+      vehicleId: v.id || v.btId || v.vehicleId || vehicleId || "",
+      trailKey: v.trailKey || (v.ref ? `staff-${v.ref}` : "") || trailKey || "",
+      reg: v.reg || v.regLabel || reg || "",
+      journeyId: String(v.journey_id || v.journeyId || journeyId || "").trim(),
+      tripId: String(v.trip_id || v.tripId || tripId || "").trim(),
+      line: vLine,
+      datetime: vWhen,
+      direction: "",
+    });
+    const gps = collectTrailGpsForKeys(vKeys.length ? vKeys : [...keys], {
+      line: vLine || code,
+      fromMs: window.fromMs,
+      toMs: window.toMs,
+    });
+    const segments = segmentTrailIntoTrips(gps);
+    const base =
+      v.id ||
+      v.btId ||
+      v.trailKey ||
+      v.reg ||
+      vehicleId ||
+      trailKey ||
+      reg ||
+      code ||
+      "bus";
+    const pinned = pinSeparateTripTails(segments, {
+      baseKey: base,
+      line: vLine || code,
+      operator: opCode,
+    });
+    for (const key of pinned) {
+      if (seenSeg.has(key)) continue;
+      seenSeg.add(key);
+      drawn.push(key);
+    }
+  }
+
+  // Line-wide fallback: segment whatever keys we found for the route.
+  if (!drawn.length && keys.size) {
+    const gps = collectTrailGpsForKeys([...keys], { line: code });
+    const pinned = pinSeparateTripTails(segmentTrailIntoTrips(gps), {
+      baseKey: code || "route",
+      line: code,
+      operator: opCode,
+    });
+    drawn.push(...pinned);
+  }
+
+  updatePlaybackChrome();
+  if (code) applyHistoryLineFilterToMarkers({ line: code, vehicleId, trailKey, reg });
+
+  const boundsPath = [];
+  for (const key of pinnedTrailKeys) {
+    const filter = pinnedTrailFilters.get(String(key)) || {};
+    const pts = trackedPathLatLngs(key, filter);
+    if (pts.length >= 2) boundsPath.push(...pts);
+  }
+  if (boundsPath.length >= 2) {
+    map.fitBounds(L.latLngBounds(boundsPath).pad(0.12), { maxZoom: 15, animate: true });
+  }
+
+  if (!drawn.length) {
+    showMessage(`No GPS tails for ${label} yet — open the live bus or wait for the server recorder`);
+  } else {
+    multiTailActiveGroup = {
+      id: `route:${code || "one"}`,
+      label: `${label}${drawn.length > 1 ? ` · ${drawn.length} trips` : ""}`,
+    };
+    messageEl.hidden = true;
+    updatePlaybackChrome();
+  }
+}
+
+function lineMatchesMultiGroup(line, group) {
+  if (!group?.lines?.length) return false;
+  const code = String(line || "").trim();
+  if (!code) return false;
+  return group.lines.some((l) => sameServiceLine(l, code));
+}
+
+function operatorMatchesMultiGroup(operator, group) {
+  if (!group?.operators?.length) return false;
+  const code = String(operator || "").trim().toUpperCase();
+  if (!code) return false;
+  return group.operators.some((o) => o === code);
+}
+
+function collectLiveTrailKeysForGroup(group) {
+  if (!group) return [];
+  const keys = new Set();
+  for (const marker of [...markers.values(), ...staffMarkers.values()]) {
+    let match = false;
+    if (group.operators?.length) {
+      if (group.id === "flix" && marker.bus && isFlixBus(marker.bus)) match = true;
+      else if (group.id === "natx" && marker.bus && isNationalExpress(marker.bus)) match = true;
+      else {
+        const op = String(
+          marker.extra?.trailOperator ||
+            marker.bus?.operator?.noc ||
+            marker.bus?.operator?.id ||
+            "",
+        )
+          .trim()
+          .toUpperCase();
+        match = operatorMatchesMultiGroup(op, group);
+      }
+    } else {
+      const line = marker.staff
+        ? staffLineName(marker.staff)
+        : String(
+            marker.bus?.service?.line_name ||
+              marker.extra?.line ||
+              marker.extra?.historyLineFilter ||
+              "",
+          ).trim();
+      match = lineMatchesMultiGroup(line, group);
+    }
+    if (!match) continue;
+    const vehicleId =
+      historyVehicleId(marker.bus, marker.extra) ||
+      (marker.bus?.id != null && !String(marker.bus.id).startsWith("dg-")
+        ? String(marker.bus.id)
+        : "");
+    const trailKey =
+      marker.extra?.trailKey || (marker.staff ? staffTrailKey(marker.staff) : "") || "";
+    const reg =
+      marker.extra?.btVehicle?.reg ||
+      marker.bus?.vehicle?.reg ||
+      marker.extra?.vehicle?.reg ||
+      "";
+    for (const key of trailKeysForVehicle({ vehicleId, trailKey, reg })) keys.add(key);
+  }
+  return [...keys];
+}
+
+async function fetchTrailKeysForGroup(group, { days = TRAIL_KEEP_DAYS } = {}) {
+  if (!group) return [];
+  try {
+    const params = new URLSearchParams({
+      days: String(days),
+      limit: "40",
+    });
+    if (group.operators?.length) params.set("operators", group.operators.join(","));
+    if (group.lines?.length) params.set("lines", group.lines.join(","));
+    const res = await fetch(`/api/trails/keys?${params}`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data?.keys)
+      ? data.keys.map((row) => String(row?.key || "").trim()).filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchServerTrailsChunked(keys, opts = {}) {
+  const list = [...new Set((keys || []).map((k) => String(k || "").trim()).filter(Boolean))];
+  for (let i = 0; i < list.length; i += 8) {
+    await fetchServerTrails(list.slice(i, i + 8), opts);
+  }
+}
+
+function pinTrailKey(key) {
+  const id = String(key || "").trim();
+  if (!id) return;
+  pinnedTrailKeys.add(id);
+  rememberTrailVehicle(id);
+  refreshPinnedTrailLine(id);
+}
+
+function pinVehicleTrail({
+  vehicleId = "",
+  trailKey = "",
+  reg = "",
+  journeyId = "",
+  tripId = "",
+  line = "",
+  operator = "",
+  direction = "",
+  datetime = "",
+  live = false,
+} = {}) {
+  const safeDirection = normalizeTrailDirection(direction);
+  const keys = trailKeysForVehicle({
+    vehicleId,
+    trailKey,
+    reg,
+    journeyId,
+    tripId,
+    line,
+    datetime,
+    direction: safeDirection,
+  });
   if (!keys.length) return;
+  const window = trailTimeWindow(datetime);
+  const followLive = live || !datetime;
+  const coachLive = isCoachTrailOperator(operator);
+  const filter = {
+    line: String(line || "").trim(),
+    journeyId: trailFilterJourneyId(journeyId, line),
+    tripId: String(tripId || "").trim(),
+    direction: safeDirection,
+    operator: String(operator || "").trim().toUpperCase(),
+    fromMs: followLive
+      ? Date.now() - (coachLive ? COACH_TRAIL_LIVE_MS : 4 * 60 * 60 * 1000)
+      : window.fromMs,
+    toMs: followLive ? 0 : window.toMs,
+    live: followLive,
+    follow: followLive,
+  };
+  multiTailActiveGroup = null;
   for (const key of keys) {
+    if (
+      filter.line ||
+      filter.journeyId ||
+      filter.tripId ||
+      filter.direction ||
+      filter.operator ||
+      filter.fromMs ||
+      filter.live
+    ) {
+      pinnedTrailFilters.set(String(key), filter);
+    } else {
+      pinnedTrailFilters.delete(String(key));
+    }
     pinnedTrailKeys.add(key);
     rememberTrailVehicle(key);
     refreshPinnedTrailLine(key);
   }
+  const primary = String(trailKey || vehicleId || keys[0] || "").trim();
+  if (followLive && primary) setLiveTrailFocus(primary);
   updatePlaybackChrome();
 }
 
@@ -1332,6 +3044,8 @@ function clearPinnedTrails() {
   for (const pair of pinnedTrailLines.values()) removeTrailPair(pair, liveTrailLayer);
   pinnedTrailLines.clear();
   pinnedTrailKeys.clear();
+  pinnedTrailFilters.clear();
+  multiTailActiveGroup = null;
   updatePlaybackChrome();
 }
 
@@ -1349,6 +3063,16 @@ function setLiveTrailFocus(key) {
 }
 
 loadTrailStore();
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    flushTrailStore();
+    flushTrailUpload().catch(() => {});
+  }
+});
+window.addEventListener("pagehide", () => {
+  flushTrailStore();
+  flushTrailUpload().catch(() => {});
+});
 
 function clearPlaybackLayers() {
   playbackLayer.clearLayers();
@@ -1363,6 +3087,10 @@ function updatePlaybackChrome() {
   }
   if (pinnedTrailKeys.size) {
     playbackBarEl.hidden = false;
+    if (multiTailActiveGroup) {
+      playbackLabelEl.textContent = `Tails · ${multiTailActiveGroup.label}`;
+      return;
+    }
     const regs = [...pinnedTrailKeys]
       .filter((key) => String(key).startsWith("reg:"))
       .map((key) => String(key).slice(4));
@@ -1401,6 +3129,8 @@ async function startRoutePlayback({
   vehicleId = "",
   trailKey = "",
   line = "",
+  operator = "",
+  direction = "",
   dest = "",
   datetime = "",
   reg = "",
@@ -1416,14 +3146,28 @@ async function startRoutePlayback({
     return;
   }
   showMessage("Loading route…");
-  const keys = trailKeysForVehicle({ vehicleId, trailKey, reg });
+  const safeJourneyId = trailFilterJourneyId(journeyId, line);
+  let safeDirection = normalizeTrailDirection(direction);
+  const keys = trailKeysForVehicle({
+    vehicleId,
+    trailKey,
+    reg,
+    journeyId: safeJourneyId,
+    tripId,
+    line,
+    datetime,
+    direction: safeDirection,
+  });
   for (const key of keys) rememberTrailVehicle(key);
 
   let fromMs = 0;
   let toMs = 0;
+  let aroundMs = 0;
   if (datetime) {
     const start = new Date(datetime).getTime();
     if (Number.isFinite(start)) {
+      aroundMs = start;
+      // One outbound or inbound run — not the whole day there-and-back.
       fromMs = start - 30 * 60 * 1000;
       toMs = start + 5 * 60 * 60 * 1000;
     }
@@ -1431,18 +3175,120 @@ async function startRoutePlayback({
 
   const resolvedTripId = await resolveTripIdForPlayback({
     tripId,
-    journeyId,
+    journeyId: safeJourneyId,
     vehicleId,
     line,
     datetime,
   });
-  const trackOpts = { journeyId, tripId: resolvedTripId || tripId, fromMs, toMs, line };
-  const tracked = bestTrackedPath(keys, trackOpts);
+  // Prefer journey/trip segment keys first so Map shows this route only, not the whole day.
+  if (resolvedTripId) {
+    const tripSeg = `trip:${resolvedTripId}`;
+    if (!keys.includes(tripSeg)) keys.unshift(tripSeg);
+  }
+  if (safeJourneyId) {
+    const jnySeg = `jny:${safeJourneyId}`;
+    if (!keys.includes(jnySeg)) keys.unshift(jnySeg);
+  }
+  await fetchServerTrails(keys, {
+    fromMs: fromMs ? fromMs - 30 * 60_000 : 0,
+    toMs: toMs ? toMs + 30 * 60_000 : 0,
+    force: true,
+  });
+
+  // If Map didn't say in/out, infer from GPS near this run — never draw both legs.
+  if (!safeDirection) {
+    const sample = [];
+    for (const key of keys) {
+      for (const p of trailMem.get(String(key)) || []) {
+        if (fromMs && Number(p.t) < fromMs) continue;
+        if (toMs && Number(p.t) > toMs) continue;
+        sample.push(p);
+      }
+    }
+    safeDirection = inferTrailDirection(sample, aroundMs || Date.now());
+    if (safeDirection) {
+      for (const key of trailKeysForVehicle({
+        vehicleId,
+        trailKey,
+        reg,
+        journeyId: safeJourneyId,
+        tripId: resolvedTripId || tripId,
+        line,
+        datetime,
+        direction: safeDirection,
+      })) {
+        if (!keys.includes(key)) keys.push(key);
+      }
+      await fetchServerTrails(keys, {
+        fromMs: fromMs ? fromMs - 30 * 60_000 : 0,
+        toMs: toMs ? toMs + 30 * 60_000 : 0,
+        force: true,
+      });
+    }
+  }
+
+  // Load the full window without forcing one direction — we split trips below.
+  const coachGapMs = isCoachTrailOperator(operator) ? COACH_TRAIL_BREAK_GAP_MS : 18 * 60_000;
+  const trackOpts = {
+    journeyId: "",
+    tripId: "",
+    fromMs,
+    toMs,
+    line,
+    direction: "",
+  };
+  const allGps = collectTrailGpsForKeys(keys, trackOpts);
+  const tripSegments = segmentTrailIntoTrips(allGps, { gapMs: coachGapMs });
+
+  // Playback highlight: the one trip matching journey/trip/direction/time — not the whole there-and-back.
+  let trackedGps = [];
+  if (resolvedTripId || safeJourneyId || safeDirection || aroundMs) {
+    const wantTrip = String(resolvedTripId || tripId || "").trim();
+    const wantJny = String(safeJourneyId || "").trim();
+    const match = tripSegments.find((seg) => {
+      if (wantTrip && seg.some((p) => String(p.tripId || "") === wantTrip)) return true;
+      if (wantJny && seg.some((p) => String(p.journeyId || "") === wantJny)) return true;
+      return false;
+    });
+    if (match) trackedGps = match;
+    else {
+      trackedGps = clipPointsToSingleDirectionRun(allGps, {
+        direction: safeDirection,
+        aroundMs: aroundMs || (allGps[0] ? Number(allGps[0].t) : 0),
+      });
+    }
+  } else if (tripSegments.length) {
+    trackedGps = tripSegments[0];
+  }
+  if (trackedGps.length < 2 && allGps.length >= 2) {
+    trackedGps = clipPointsToSingleDirectionRun(allGps, {
+      direction: safeDirection,
+      aroundMs: aroundMs || Number(allGps[0].t) || 0,
+    });
+  }
+
+  let tracked = pathFromGpsPoints(trackedGps);
   const trip = resolvedTripId ? await tripEnds(resolvedTripId) : tripId ? await tripEnds(tripId) : null;
   const tripPath = Array.isArray(trip?.path) ? trip.path : [];
-  // Prefer a real timetable shape when the GPS tail is still short.
-  const usingTracked = tracked.length >= 3 && (showTail || tripPath.length < 2) && tracked.length >= tripPath.length;
-  const path = usingTracked ? tracked : tripPath.length >= 2 ? tripPath : tracked.length >= 2 ? tracked : [];
+  const coachOp = isCoachTrailOperator(operator);
+  // Always prefer the GPS trail the bus actually drove when we have one —
+  // except coaches: sparse AVL often only covers a stub of a long motorway route.
+  let usingTracked = tracked.length >= 2;
+  if (coachOp && tripPath.length >= 2 && tracked.length >= 2) {
+    const gpsLen = pathLengthMeters(tracked);
+    const tripLen = pathLengthMeters(tripPath);
+    const gpsSegs = splitLatLngsByGaps(tracked, undefined, { operator, coach: true });
+    const fragmented = gpsSegs.length >= 4 && gpsLen < tripLen * 0.55;
+    const stub = tripLen > 25000 && gpsLen < tripLen * 0.4;
+    if (fragmented || stub) usingTracked = false;
+  }
+  let path = usingTracked ? tracked : tripPath.length >= 2 ? tripPath : tracked.length >= 2 ? tracked : [];
+  if (path.length < 2 && tripSegments.some((s) => s.length >= 2)) {
+    trackedGps = tripSegments.reduce((best, run) => (run.length > best.length ? run : best), tripSegments[0]);
+    tracked = pathFromGpsPoints(trackedGps);
+    path = tracked;
+    usingTracked = path.length >= 2;
+  }
   if (path.length < 2) {
     const hasAnyTrail = keys.some((key) => (trailMem.get(String(key)) || []).length > 0);
     showMessage(
@@ -1452,27 +3298,92 @@ async function startRoutePlayback({
     );
     return;
   }
+  showMessage("Matching trail to roads…");
+  const roadPath = usingTracked ? await prepareRoadTrail(path, undefined, { operator }) : path;
+  const hasRoad = flattenTrailLatLngs(roadPath).length >= 2;
   stopRoutePlayback("", { clearTail: true });
-  if (showTail || usingTracked || tracked.length >= 2) {
-    pinVehicleTrail({ vehicleId, trailKey, reg });
+
+  // Pin tails: a specific Map row → that trip only; otherwise every trip separately.
+  const baseKey = trailKey || vehicleId || regTrailKey(reg) || playKey;
+  const wantTrip = String(resolvedTripId || tripId || "").trim();
+  const wantJny = String(safeJourneyId || "").trim();
+  let segmentsToPin = tripSegments;
+  if (wantTrip || wantJny || safeDirection) {
+    if (trackedGps.length >= 2) {
+      segmentsToPin = [trackedGps];
+    } else {
+      const matched = tripSegments.filter((seg) => {
+        if (wantTrip && seg.some((p) => String(p.tripId || "") === wantTrip)) return true;
+        if (wantJny && seg.some((p) => String(p.journeyId || "") === wantJny)) return true;
+        if (safeDirection) {
+          const d = inferTrailDirection(seg) || normalizeTrailDirection(seg.find((p) => p.direction)?.direction);
+          return d === safeDirection;
+        }
+        return false;
+      });
+      if (matched.length) segmentsToPin = matched;
+    }
+  }
+  const pinnedSegs =
+    segmentsToPin.length >= 1
+      ? pinSeparateTripTails(segmentsToPin, { baseKey, line, operator })
+      : [];
+  if (!pinnedSegs.length && (showTail || usingTracked)) {
+    // Fallback: single filtered pin if segmentation found nothing usable.
+    pinVehicleTrail({
+      vehicleId,
+      trailKey,
+      reg,
+      journeyId: safeJourneyId,
+      tripId: resolvedTripId || tripId,
+      line,
+      operator,
+      direction: safeDirection,
+      datetime,
+    });
+  } else if (pinnedSegs.length) {
+    multiTailActiveGroup = {
+      id: `play:${baseKey}`,
+      label:
+        pinnedSegs.length > 1
+          ? `${line || "Bus"}${dest ? ` → ${dest}` : ""} · ${pinnedSegs.length} trips`
+          : `${line || "Bus"}${dest ? ` → ${dest}` : ""}`,
+    };
   } else {
     clearPinnedTrails();
     setLiveTrailFocus("");
+  }
+
+  // Keep a live-growing tail + arrows for this bus (including AT1–AT3 staff keys).
+  const liveKey = String(trailKey || vehicleId || "").trim();
+  if (liveKey && (showTail || usingTracked)) {
+    rememberTrailVehicle(liveKey);
+    const liveFilter = {
+      line: String(line || "").trim(),
+      direction: safeDirection,
+      operator: String(operator || "").trim().toUpperCase(),
+      fromMs: fromMs || Date.now() - (isCoachTrailOperator(operator) ? COACH_TRAIL_LIVE_MS : 4 * 60 * 60 * 1000),
+      toMs: 0,
+      live: true,
+      follow: true,
+    };
+    pinnedTrailFilters.set(liveKey, liveFilter);
+    pinnedTrailKeys.add(liveKey);
+    setLiveTrailFocus(liveKey);
+    refreshPinnedTrailLine(liveKey);
   }
 
   const lineName = line || trip?.line || "Bus";
   const hasTimetable = !usingTracked && tripPath.length >= 2;
   const labelParts = [
     `${lineName}${dest || trip?.headsign ? ` → ${dest || trip.headsign}` : ""}`,
-    showTail && (usingTracked || tracked.length >= 2)
-      ? usingTracked
-        ? "tracked path"
-        : "timetable + tail"
+    usingTracked
+      ? pinnedSegs.length > 1
+        ? `tracked · ${pinnedSegs.length} trips`
+        : "tracked path · roads"
       : hasTimetable
         ? "timetable"
-        : usingTracked
-          ? "tracked path"
-          : "route",
+        : "route",
   ];
   if ((showTail || usingTracked) && compactReg(reg)) labelParts.push(compactReg(reg));
   const label = labelParts.join(" · ");
@@ -1486,21 +3397,32 @@ async function startRoutePlayback({
     }).addTo(playbackLayer);
   }
 
-  const drawPath = path.length >= 2 ? path : tracked;
-  const tailPath = tracked.length >= 2 ? tracked : usingTracked ? drawPath : [];
-  if ((showTail || usingTracked) && tailPath.length >= 2) {
-    makeTrailPair(tailPath, playbackLayer);
-  } else if (drawPath.length >= 2 && !hasTimetable) {
-    L.polyline(drawPath, {
-      color: "#38bdf8",
-      weight: 4,
-      opacity: 0.92,
+  const coachBreak = { operator, coach: isCoachTrailOperator(operator) };
+  const drawPath = hasRoad ? roadPath : path;
+  const drawFlat = flattenTrailLatLngs(drawPath);
+  const tailPath = usingTracked
+    ? drawPath
+    : tracked.length >= 2
+      ? await prepareRoadTrail(tracked, undefined, coachBreak)
+      : [];
+  const tailHasRoad = flattenTrailLatLngs(tailPath).length >= 2;
+  if ((showTail || usingTracked) && flattenTrailLatLngs(tailPath).length >= 2) {
+    makeTrailPair(tailPath, playbackLayer, {
+      gpsPoints: trackedGps.length >= 2 ? trackedGps : path,
+      deferArrows: usingTracked && !hasRoad && !tailHasRoad,
+      ...coachBreak,
+    });
+  } else if (drawFlat.length >= 2 && !hasTimetable) {
+    L.polyline(asTrailLatLngs(drawPath, coachBreak), {
+      color: "#0f172a",
+      weight: 2.25,
+      opacity: 1,
       lineJoin: "round",
     }).addTo(playbackLayer);
   }
 
-  if (drawPath.length >= 2) {
-    L.circleMarker(drawPath[0], {
+  if (drawFlat.length >= 2) {
+    L.circleMarker(drawFlat[0], {
       radius: 6,
       color: "#ffffff",
       weight: 2,
@@ -1509,7 +3431,7 @@ async function startRoutePlayback({
     })
       .addTo(playbackLayer)
       .bindTooltip("Start", { direction: "top", opacity: 0.9 });
-    L.circleMarker(drawPath[drawPath.length - 1], {
+    L.circleMarker(drawFlat[drawFlat.length - 1], {
       radius: 6,
       color: "#ffffff",
       weight: 2,
@@ -1522,8 +3444,8 @@ async function startRoutePlayback({
 
   const boundsPath = [
     ...(hasTimetable ? tripPath : []),
-    ...drawPath,
-    ...tracked,
+    ...drawFlat,
+    ...flattenTrailLatLngs(tracked),
   ];
   if (boundsPath.length >= 2) {
     map.fitBounds(L.latLngBounds(boundsPath).pad(0.12), { maxZoom: 16, animate: true });
@@ -1559,6 +3481,15 @@ function followIdFor(marker) {
   return String(marker?.bus?.id ?? "");
 }
 
+/** Primary trail memory key for a live bus / AT staff marker. */
+function liveTrailKeyForMarker(marker) {
+  if (!marker) return "";
+  if (marker.staff) {
+    return String(marker.extra?.trailKey || staffTrailKey(marker.staff) || "").trim();
+  }
+  return String(marker.extra?.trailKey || marker.bus?.id || "").trim();
+}
+
 function followLabelFor(marker) {
   if (marker?.staff) return staffLineName(marker.staff) || "Staff bus";
   const bus = marker?.bus;
@@ -1577,6 +3508,218 @@ function followButtonHtml(marker) {
   return `<button type="button" class="follow-bus-btn${on ? " is-on" : ""}">${on ? "Following" : "Follow"}</button>`;
 }
 
+/** Clickable reg (or fleet#) that opens the Fleet vehicle page. */
+function fleetRegButtonHtml(
+  reg,
+  { fleet = "", vehicleId = "", operatorSlug = "", serviceId = "", line = "", operatorNoc = "" } = {},
+) {
+  const plate = String(reg || "").replace(/\s+/g, " ").trim();
+  const fleetCode = String(fleet || "").trim();
+  const id = String(vehicleId || "").trim();
+  const slug = String(operatorSlug || "").trim();
+  const svc = String(serviceId || "").trim();
+  const route = String(line || "").trim();
+  const noc = String(operatorNoc || "").trim();
+  if (!plate && !fleetCode && !id && !slug && !svc) return "";
+  const label = plate || (fleetCode ? `#${fleetCode}` : "Fleet");
+  return `<button type="button" class="popup-fleet-reg" data-action="open-fleet-vehicle" data-reg="${esc(plate)}" data-fleet="${esc(fleetCode)}" data-vehicle-id="${esc(id)}" data-operator-slug="${esc(slug)}" data-service-id="${esc(svc)}" data-line="${esc(route)}" data-operator-noc="${esc(noc)}" title="Open in Fleet">${esc(label)}</button>`;
+}
+
+/** True only for real bustimes vehicle ids — not journey/trip ids (Flix AVL uses those as bus.id). */
+function isLikelyBustimesVehicleId(bus = {}, id = "") {
+  const raw = String(id ?? "").trim();
+  if (!raw || /^(dg-|bods-|staff-|at-)/i.test(raw)) return false;
+  if (bus?.vehicle?.id != null && String(bus.vehicle.id) === raw) return true;
+  if (bus?.vehicle?.reg && /^\d+$/.test(raw)) return true;
+  // Anonymised coach AVL: name only, no vehicle id/reg — bus.id is a journey id.
+  if (String(bus?.journey_id) === raw && !bus?.vehicle?.id) return false;
+  if (
+    (isFlixBus(bus) || isNationalExpress(bus)) &&
+    !bus?.vehicle?.id &&
+    !bus?.vehicle?.reg &&
+    !bus?.vehicle?.url
+  ) {
+    return false;
+  }
+  return /^\d+$/.test(raw) || /^[a-z0-9_-]+$/i.test(raw);
+}
+
+function bustimesVehicleIdForFleet(bus = {}, extra = {}) {
+  const candidates = [
+    extra.vehicle?.id,
+    extra.btVehicle?.id,
+    bus.vehicle?.id,
+    bus.btId,
+    bus.id,
+  ];
+  for (const raw of candidates) {
+    const id = String(raw ?? "").trim();
+    if (!id) continue;
+    if (!isLikelyBustimesVehicleId(bus, id)) continue;
+    // Prefer ids we already resolved to a vehicle record.
+    if (extra.vehicle?.id != null && String(extra.vehicle.id) === id) return id;
+    if (extra.btVehicle?.id != null && String(extra.btVehicle.id) === id) return id;
+    if (bus.vehicle?.id != null && String(bus.vehicle.id) === id) return id;
+  }
+  // Only fall back to bus id when it is a real vehicle id.
+  for (const raw of [extra.vehicle?.id, extra.btVehicle?.id, bus.vehicle?.id]) {
+    const id = String(raw ?? "").trim();
+    if (id && isLikelyBustimesVehicleId(bus, id)) return id;
+  }
+  return "";
+}
+
+function fleetOperatorSlugForBus(bus = {}, extra = {}) {
+  if (isFlixBus(bus)) return "flixbus";
+  if (isNationalExpress(bus)) return "national-express";
+  const slug = String(
+    extra.vehicle?.operator?.slug ||
+      extra.btVehicle?.operator?.slug ||
+      bus.operator?.slug ||
+      "",
+  ).trim();
+  return slug;
+}
+
+function extractUkRegCandidate(raw) {
+  const text = String(raw || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, " ")
+    .trim();
+  if (!text) return "";
+  const compact = text.replace(/\s+/g, "");
+  const match =
+    compact.match(/([A-Z]{2}\d{2}[A-Z]{3})/) ||
+    compact.match(/([A-Z]\d{1,3}[A-Z]{3})/) ||
+    text.match(/\b([A-Z]{2}\d{2}\s*[A-Z]{3})\b/) ||
+    text.match(/\b([A-Z]\d{1,3}\s*[A-Z]{3})\b/);
+  return match ? String(match[1]).replace(/\s+/g, "") : "";
+}
+
+/** Flix/NATX AVL hides plates — try BODS VehicleRef near the coach, then bustimes. */
+async function resolveCoachRegFromBods(bus, extra = {}, lat, lng) {
+  if (!(isFlixBus(bus) || isNationalExpress(bus))) return null;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const pad = 0.06;
+  const bbox = `${(lng - pad).toFixed(4)},${(lat - pad).toFixed(4)},${(lng + pad).toFixed(4)},${(lat + pad).toFixed(4)}`;
+  const { vehicles, ok } = await fetchBodsVehicles(`bbox=${encodeURIComponent(bbox)}`);
+  if (!ok || !vehicles.length) return null;
+  const wantLine = compactQuery(bus.service?.line_name || extra.line || "");
+  const wantOp = isFlixBus(bus) ? "FLIX" : "NATX";
+  let best = null;
+  let bestScore = 0;
+  for (const row of vehicles) {
+    const op = String(row._bods?.operator || row.operator?.noc || row.operator || "").toUpperCase();
+    if (op && op !== wantOp && !op.includes(wantOp)) continue;
+    const [rLng, rLat] = row.coordinates || [];
+    if (!Number.isFinite(rLat) || !Number.isFinite(rLng)) continue;
+    const d = haversineMeters(lat, lng, rLat, rLng);
+    if (d > 450) continue;
+    let score = Math.max(0, 40 - d / 12);
+    const line = compactQuery(row.service?.line_name || row._bods?.line || "");
+    if (wantLine && line && (line === wantLine || line.includes(wantLine) || wantLine.includes(line))) {
+      score += 18;
+    }
+    const reg = extractUkRegCandidate(row._bods?.vehicleRef || row.vehicle?.name || "");
+    if (!reg) continue;
+    score += 25;
+    if (score > bestScore) {
+      best = { reg, row };
+      bestScore = score;
+    }
+  }
+  if (!best?.reg || bestScore < 30) return null;
+  const vehicle = await bustimesVehicleByReg(best.reg, { operator: wantOp });
+  return {
+    reg: vehicle?.reg || best.reg,
+    vehicle: vehicle || null,
+    vehicleRef: best.row?._bods?.vehicleRef || "",
+  };
+}
+
+async function openFleetVehiclePage({
+  reg = "",
+  fleet = "",
+  vehicleId = "",
+  operatorSlug = "",
+  serviceId = "",
+  line = "",
+  operatorNoc = "",
+} = {}) {
+  if (!fleetBrowser) {
+    showMessage("Fleet is not available");
+    return;
+  }
+  setAppTab("fleet");
+  let id = String(vehicleId || "").trim();
+  if (id && /^(dg-|bods-|staff-|at-)/i.test(id)) id = "";
+  const slug = String(operatorSlug || "").trim();
+  const noc = String(operatorNoc || "").trim().toUpperCase();
+  const preferOp = noc || (slug === "flixbus" ? "FLIX" : slug === "national-express" ? "NATX" : "");
+
+  if (!id && (reg || fleet)) {
+    showMessage("Opening fleet…");
+    try {
+      const hit =
+        (await bustimesVehicleByReg(reg, { fleet, operator: preferOp })) ||
+        (fleet ? await bustimesVehicleByReg("", { fleet, operator: preferOp }) : null) ||
+        (await bustimesVehicleByReg(reg, { fleet })) ||
+        (fleet ? await bustimesVehicleByReg("", { fleet }) : null);
+      if (hit?.id != null) id = String(hit.id);
+    } catch {
+      /* fall through */
+    }
+  }
+
+  if (id) {
+    try {
+      await fleetBrowser.showVehicle(id);
+      showMessage("");
+      return;
+    } catch {
+      /* fall through to operator / search */
+    }
+  }
+
+  const svc = String(serviceId || "").trim();
+  if (svc && fleetBrowser.showRouteService) {
+    try {
+      await fleetBrowser.showRouteService(svc);
+      showMessage("");
+      return;
+    } catch {
+      /* try operator */
+    }
+  }
+
+  if (slug && fleetBrowser.showOperator) {
+    try {
+      await fleetBrowser.showOperator(slug);
+      showMessage(
+        reg
+          ? ""
+          : preferOp === "FLIX" || preferOp === "NATX"
+            ? "Live map hides this coach’s plate — browse the fleet / routes below"
+            : "",
+      );
+      return;
+    } catch (error) {
+      showMessage(error?.message || "Could not open fleet");
+      return;
+    }
+  }
+
+  const query = String(reg || fleet || line || "").trim();
+  if (query) {
+    fleetBrowser.search(query);
+    const input = document.getElementById("fleet-query");
+    if (input) input.value = query;
+    showMessage("");
+    return;
+  }
+  showMessage("No registration to open in Fleet");
+}
+
 function playRouteButtonHtml(bus, extra = {}) {
   const tripId = bus?.trip_id || extra.tripId || "";
   const vehicleId = historyVehicleId(bus, extra) || (!String(bus?.id || "").startsWith("dg-") ? bus?.id : "") || "";
@@ -1586,7 +3729,14 @@ function playRouteButtonHtml(bus, extra = {}) {
   if (String(bus?.id || "").startsWith("dg-") && !trailKey && !vehicleId && !compactReg(reg)) return "";
   const playKey = tripId || trailKey || vehicleId || regTrailKey(reg);
   const on = routeOverlayActive(playKey, { vehicleId, trailKey });
-  return `<button type="button" class="play-route-btn${on ? " is-on" : ""}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(bus?.journey_id || "")}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(bus?.service?.line_name || extra.line || "")}" data-dest="${esc(extra.to || bus?.destination || "")}" data-datetime="${esc(bus?.datetime || "")}">${on ? "Hide route" : "Show route"}</button>`;
+  const direction = normalizeTrailDirection(
+    extra.direction ||
+      bus?.direction ||
+      bus?.directionRef ||
+      bus?.currentJourney?.directionRef ||
+      "",
+  );
+  return `<button type="button" class="play-route-btn${on ? " is-on" : ""}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(bus?.journey_id || "")}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(bus?.service?.line_name || extra.line || "")}" data-operator="${esc(trailOperatorForBus(bus) || extra.operator || "")}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || bus?.destination || "")}" data-datetime="${esc(bus?.datetime || "")}">${on ? "Hide route" : "Show route"}</button>`;
 }
 
 function playStaffRouteButtonHtml(item, extra = {}) {
@@ -1594,18 +3744,56 @@ function playStaffRouteButtonHtml(item, extra = {}) {
   const vehicleId = historyVehicleId(null, extra);
   const latest = Array.isArray(extra.history) && extra.history.length ? extra.history[0] : null;
   const tripId = latest?.trip_id || extra.tripId || "";
-  const journeyId = latest?.id || "";
+  const line = staffLineName(item) || extra.line || "";
+  const journeyId = trailFilterJourneyId(
+    latest?.journey_id || item?.currentJourney?.id || item?.currentJourney?.journeyId || "",
+    line,
+  );
+  const direction = normalizeTrailDirection(
+    latest?.direction || item?.currentJourney?.directionRef || "",
+  );
   const reg = extra.btVehicle?.reg || extra.vehicle?.reg || parseFleetReg(item?.vehicle?.ref).reg || "";
   if (!trailKey && !vehicleId && !tripId && !compactReg(reg)) return "";
   const playKey = tripId || trailKey || vehicleId || regTrailKey(reg);
   const on = routeOverlayActive(playKey, { vehicleId, trailKey });
-  return `<button type="button" class="play-route-btn${on ? " is-on" : ""}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(journeyId)}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(staffLineName(item) || extra.line || "")}" data-dest="${esc(extra.to || item.currentJourney?.destination?.name || "")}" data-datetime="${esc(latest?.datetime || item.recordedAtTime || "")}">${on ? "Hide route" : "Show route"}</button>`;
+  return `<button type="button" class="play-route-btn${on ? " is-on" : ""}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(journeyId)}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(line)}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || item.currentJourney?.destination?.name || "")}" data-datetime="${esc(latest?.datetime || item.recordedAtTime || "")}">${on ? "Hide route" : "Show route"}</button>`;
 }
 
 function followedMarker() {
   if (!followTarget) return null;
   if (followTarget.kind === "staff") return staffMarkers.get(followTarget.id) || null;
   return markers.get(followTarget.id) || markers.get(Number(followTarget.id)) || null;
+}
+
+/** Same live seat wording as the First Potteries bus card, for the top follow chip. */
+function followSeatsChipText(marker) {
+  if (!marker?.bus && !marker?.extra) return "";
+  const bus = marker.bus || {};
+  const extra = marker.extra || {};
+  if (!(isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))) return "";
+  const info = extra.seatsInfo || occupancyFromSources(bus, extra);
+  if (!info) return "";
+  if (info.remaining != null) {
+    if (info.remaining <= 0) return "full · none left";
+    return `${info.remaining} seats left`;
+  }
+  if (info.band === "standing") return "standing room only";
+  if (info.band === "few") return "few seats left";
+  if (info.band === "seats") return "seats available";
+  return "";
+}
+
+/** Same early / late wording as the bus card delay line. */
+function followDelayChipText(marker) {
+  if (!marker?.bus) return "";
+  const bus = marker.bus;
+  if (isNotInService(bus)) return "";
+  const extra = marker.extra || {};
+  const [lng, lat] = bus.coordinates || [];
+  const delaySec =
+    extra.delaySec ?? bus.delay ?? inferDelaySeconds(extra.stops, lat, lng, bus.datetime);
+  if (delaySec == null || Number.isNaN(Number(delaySec))) return "";
+  return formatDelay(delaySec);
 }
 
 function updateFollowChip() {
@@ -1616,14 +3804,87 @@ function updateFollowChip() {
     return;
   }
   followChipEl.hidden = false;
-  followChipEl.textContent = `Following ${followTarget.label} · Stop`;
+  const started = Number(followTarget.startedAt);
+  const since = Number.isFinite(started)
+    ? new Date(started).toLocaleTimeString("en-GB", {
+        timeZone: UK_TZ,
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      })
+    : "";
+  const marker = followedMarker();
+  const seats = followSeatsChipText(marker);
+  const delay = followDelayChipText(marker);
+  const parts = [`Following ${followTarget.label}`];
+  if (delay) parts.push(delay);
+  if (seats) parts.push(seats);
+  if (since) parts.push(`since ${since}`);
+  parts.push("Stop");
+  followChipEl.textContent = parts.join(" · ");
+}
+
+let followSeatsTimer = null;
+
+function stopFollowSeatsPolling() {
+  if (followSeatsTimer) {
+    clearInterval(followSeatsTimer);
+    followSeatsTimer = null;
+  }
+}
+
+/** Keep First Potteries seat counts fresh on the follow chip (even if the card is closed). */
+function ensureFollowSeatsPolling(marker) {
+  stopFollowSeatsPolling();
+  if (!marker?.bus) return;
+  const bus = marker.bus;
+  const extra = marker.extra || {};
+  if (!(isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))) return;
+
+  const refreshSeats = async ({ force = false } = {}) => {
+    if (!isFollowingMarker(marker)) {
+      stopFollowSeatsPolling();
+      return;
+    }
+    const here = marker.getLatLng?.();
+    if (!here) return;
+    const next = await firstOccupancyFor(marker.bus || bus, marker.extra || extra, here.lat, here.lng, {
+      force,
+    });
+    if (!isFollowingMarker(marker)) return;
+    if (next) {
+      const prev = marker.extra?.firstOccupancy;
+      marker.extra = marker.extra || {};
+      marker.extra.firstOccupancy = next;
+      marker.extra.seatsInfo = occupancyFromSources(marker.bus || bus, marker.extra);
+      if (
+        !prev ||
+        prev.remaining !== next.remaining ||
+        prev.occupied !== next.occupied ||
+        prev.seats !== next.seats
+      ) {
+        refreshPopup(marker, { force: true });
+      }
+    }
+    updateFollowChip();
+  };
+
+  refreshSeats({ force: true });
+  followSeatsTimer = setInterval(() => refreshSeats({ force: true }), 10000);
 }
 
 function stopFollowBus(message = "") {
   const marker = followedMarker();
+  const trailKey = liveTrailKeyForMarker(marker);
+  stopFollowSeatsPolling();
   followTarget = null;
   updateFollowChip();
-  setLiveTrailFocus("");
+  // Keep the tail if Show route / pinned trails are still on the map.
+  if (trailKey && String(liveTrailKey) === String(trailKey) && !pinnedTrailKeys.has(trailKey)) {
+    setLiveTrailFocus("");
+  } else if (!pinnedTrailKeys.size && !playback) {
+    setLiveTrailFocus("");
+  }
   refreshPopup(marker, { force: true });
   if (message) showMessage(message);
 }
@@ -1658,15 +3919,19 @@ function startFollowBus(marker) {
     kind: followKindFor(marker),
     id: followIdFor(marker),
     label: followLabelFor(marker),
+    startedAt: Date.now(),
   };
   showMessage("");
-  // Tails are Fleet-only — keep recording GPS, but don't draw on the map here.
-  const trailKey = marker.bus?.id || (marker.staff ? `staff-${followIdFor(marker)}` : "");
-  if (trailKey) rememberTrailVehicle(trailKey);
-  setLiveTrailFocus("");
+  // Keep a live tail + arrows growing with the bus (including AT1–AT3).
+  const trailKey = liveTrailKeyForMarker(marker);
+  if (trailKey) {
+    rememberTrailVehicle(trailKey);
+    setLiveTrailFocus(trailKey);
+  }
   keepFollowedInView(marker, { force: true });
   if (announceOn) followJourney(marker, true);
   updateFollowChip();
+  ensureFollowSeatsPolling(marker);
 }
 
 function toggleFollowBus(marker) {
@@ -1714,9 +3979,26 @@ document.addEventListener(
         trailKey: playBtn.dataset.trailKey || "",
         reg: playBtn.dataset.reg || "",
         line: playBtn.dataset.line || "",
+        operator: playBtn.dataset.operator || "",
+        direction: playBtn.dataset.direction || "",
         dest: playBtn.dataset.dest || "",
         datetime: playBtn.dataset.datetime || "",
         showTail: true,
+      });
+      return;
+    }
+    const fleetRegBtn = event.target.closest(".popup-fleet-reg, [data-action='open-fleet-vehicle']");
+    if (fleetRegBtn) {
+      event.preventDefault();
+      event.stopPropagation();
+      openFleetVehiclePage({
+        reg: fleetRegBtn.dataset.reg || "",
+        fleet: fleetRegBtn.dataset.fleet || "",
+        vehicleId: fleetRegBtn.dataset.vehicleId || "",
+        operatorSlug: fleetRegBtn.dataset.operatorSlug || "",
+        serviceId: fleetRegBtn.dataset.serviceId || "",
+        line: fleetRegBtn.dataset.line || "",
+        operatorNoc: fleetRegBtn.dataset.operatorNoc || "",
       });
       return;
     }
@@ -1830,13 +4112,122 @@ const FLIX_LIVERY = {
 function isNisDestination(dest) {
   const t = String(dest || "").trim();
   if (!t) return false;
-  return /^(not in service|nis|n\/?s|out of service|positioning|dead running|empty to)$/i.test(t)
+  return /^(not in service|nis|n\/?s|out of service|oos|positioning|dead running|empty to)$/i.test(t)
     || /\b(not in service|out of service|dead running)\b/i.test(t);
+}
+
+/** Garage / depot destination text (First Potteries & D&G often keep a line number). */
+function isDepotRunDestination(dest) {
+  const t = String(dest || "").trim();
+  if (!t) return false;
+  if (isNisDestination(t)) return true;
+  return /^(garage|depot|to\s+(?:the\s+)?(?:garage|depot)|out\s*of\s*service|oos)$/i.test(t)
+    || /\b(?:to\s+)?(?:the\s+)?(?:garage|depot)\b|\bout\s*of\s*service\b|\boos\b/i.test(t);
+}
+
+function operatorHaystack(bus, extra = {}) {
+  return [
+    bus?.operator?.noc,
+    bus?.operator?.id,
+    bus?.operator?.name,
+    bus?.operator?.slug,
+    bus?.service?.operator?.name,
+    bus?.service?.operator?.noc,
+    bus?.service?.url,
+    bus?.vehicle?.operator?.name,
+    bus?.vehicle?.operator?.noc,
+    bus?.nisSource,
+    extra?.operator,
+    extra?.vehicle?.operator?.noc,
+    extra?.vehicle?.operator?.name,
+    extra?.btVehicle?.operator?.noc,
+    extra?.btVehicle?.operator?.name,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function isFirstPotteriesBus(bus, extra = {}) {
+  return /FPOT|First Potteries|first-potteries/i.test(operatorHaystack(bus, extra));
+}
+
+function isDgBus(bus, extra = {}) {
+  if (bus?.nisSource === "dg") return true;
+  return /DAGC|D\s*&\s*G|D and G|d-g-coach|dgbus/i.test(operatorHaystack(bus, extra));
+}
+
+function isStantonsBus(bus, extra = {}) {
+  return /SOST|Stanton'?s?\s+of\s+Stoke|stantons-of-stoke/i.test(
+    operatorHaystack(bus, extra),
+  );
+}
+
+function isScraggsBus(bus, extra = {}) {
+  return /SCRT|Scragg'?s?|scraggs-taxis/i.test(operatorHaystack(bus, extra));
+}
+
+/** Matching Stoke-area depot for First / D&G / Stanton's / Scraggs (null for other operators). */
+function ownStokeDepot(bus, extra = {}) {
+  if (isFirstPotteriesBus(bus, extra)) {
+    return BUS_DEPOTS.find((d) => d.id === "first-potteries-adderley-green") || null;
+  }
+  if (isDgBus(bus, extra)) {
+    return BUS_DEPOTS.find((d) => d.id === "dg-mossfield") || null;
+  }
+  if (isStantonsBus(bus, extra)) {
+    return BUS_DEPOTS.find((d) => d.id === "stantons-endon") || null;
+  }
+  if (isScraggsBus(bus, extra)) {
+    return BUS_DEPOTS.find((d) => d.id === "scraggs-parkhall") || null;
+  }
+  return null;
+}
+
+/** True when the bus is near its depot and the AVL heading points toward it. */
+function isHeadingToOwnDepot(bus, extra = {}) {
+  const depot = ownStokeDepot(bus, extra);
+  if (!depot) return false;
+  const [lng, lat] = bus?.coordinates || [];
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  const dist = haversineMeters(lat, lng, depot.lat, depot.lng);
+  if (dist <= 100) return true;
+  if (dist > 4500) return false;
+  const heading = Number(bus?.heading);
+  if (!Number.isFinite(heading)) return dist < 350;
+  const bearing = segmentBearing([lat, lng], [depot.lat, depot.lng]);
+  if (angleDiff(heading, bearing) > 55) return false;
+  const speed = Number(bus?.speedMph);
+  if (dist > 280 && Number.isFinite(speed) && speed < 2.5) return false;
+  return true;
+}
+
+/**
+ * First / D&G / Stanton's / Scraggs deadhead to their yard:
+ * destination says garage/depot/NIS, or no line while heading into the yard,
+ * or pulling into the yard off a passenger destination.
+ */
+function isStokeDepotBound(bus, extra = {}) {
+  if (!bus || !ownStokeDepot(bus, extra)) return false;
+  if (isDepotRunDestination(bus.destination)) return true;
+  const line = String(bus.service?.line_name || "").trim();
+  if (!line && isHeadingToOwnDepot(bus, extra)) return true;
+  if (!isHeadingToOwnDepot(bus, extra)) return false;
+  const depot = ownStokeDepot(bus, extra);
+  const [lng, lat] = bus.coordinates || [];
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  const dist = haversineMeters(lat, lng, depot.lat, depot.lng);
+  if (dist <= 750) return true;
+  const dest = String(bus.destination || "").trim();
+  if (!bus.trip_id && dist <= 2500) return true;
+  if (!dest && dist <= 2500) return true;
+  if (/adderley|mossfield|park\s*farm|endon|parkhall|scragg/i.test(dest) && dist <= 2500) return true;
+  return false;
 }
 
 function isNotInService(bus) {
   if (!bus) return false;
-  if (bus.nis) return true;
+  if (bus.nis || bus.depotOos) return true;
+  if (isStokeDepotBound(bus)) return true;
   const line = String(bus.service?.line_name || "").trim();
   if (!line) return true;
   return isNisDestination(bus.destination);
@@ -1851,14 +4242,15 @@ function dgIsNotInService(item) {
     item.currentJourney.destination?.name ||
     item.currentJourney.destinationRef ||
     "";
-  return isNisDestination(dest);
+  return isNisDestination(dest) || isDepotRunDestination(dest);
 }
 
 function nisStatus(bus) {
   const dest = String(bus.destination || "").trim();
   const moving = Number.isFinite(bus.speedMph) && bus.speedMph >= 3;
-  if (/garage|depot/i.test(dest) && isNisDestination(dest)) {
-    return moving ? "Finished — heading to garage" : "Finished at garage";
+  const depotBound = bus.depotOos || isStokeDepotBound(bus);
+  if (depotBound || (/garage|depot/i.test(dest) && (isNisDestination(dest) || isDepotRunDestination(dest)))) {
+    return moving ? "Out of service — heading to depot" : "Out of service at depot";
   }
   if (/position|dead|empty to|to start/i.test(dest)) {
     return "Heading to start the next trip";
@@ -1881,6 +4273,25 @@ function isFlixBus(bus) {
     /flixbus/i.test(url) ||
     /^flix$/i.test(op)
   );
+}
+
+function isNationalExpress(bus) {
+  if (!bus) return false;
+  const op = String(bus?.operator?.id || bus?.operator?.noc || "").toUpperCase();
+  if (op === "NATX") return true;
+  const name = String(bus?.operator?.name || bus?.vehicle?.name || "");
+  const url = String(bus?.service?.url || bus?.vehicle?.url || "");
+  return /national\s*express/i.test(name) || /national-express/i.test(url);
+}
+
+function trailOperatorForBus(bus) {
+  if (!bus) return "";
+  if (isFlixBus(bus)) return "FLIX";
+  if (isNationalExpress(bus)) return "NATX";
+  return String(bus?.operator?.noc || bus?.operator?.id || "")
+    .trim()
+    .toUpperCase()
+    .slice(0, 16);
 }
 
 /** Cities from Flix service slug, e.g. 700-paris-london → Paris → London */
@@ -1913,6 +4324,18 @@ async function fetchFlixBuses(signal) {
     if (!res.ok) return [];
     const data = await res.json();
     return Array.isArray(data) ? data.filter(isFlixBus) : [];
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    return [];
+  }
+}
+
+async function fetchNatxBuses(signal) {
+  try {
+    const res = await fetch("/api/vehicles?operator=NATX", { signal });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data.filter(isNationalExpress) : [];
   } catch (error) {
     if (error?.name === "AbortError") throw error;
     return [];
@@ -1960,13 +4383,29 @@ function typicalSeatCount(bus = {}, extra = {}) {
 }
 
 function occupancyFromSources(bus = {}, extra = {}) {
+  // D&G / AT employee buses do not publish live seat counts — hide guessed capacity.
+  if (isDgBus(bus, extra)) return null;
+  if (
+    isAltonLine(
+      extra.line || bus?.service?.line_name || bus?.line || bus?.currentJourney?.publishedLineName,
+    )
+  ) {
+    return null;
+  }
+
   const first = extra.firstOccupancy;
-  if (first?.seats || first?.remaining != null) {
+  if (first && (first.remaining != null || first.occupied != null)) {
     const seats = first.seats ?? typicalSeatCount(bus, extra);
-    if (seats == null) return null;
+    if (seats == null && first.remaining == null) return null;
     return {
       seats,
-      remaining: first.remaining,
+      remaining:
+        first.remaining != null
+          ? first.remaining
+          : seats != null && first.occupied != null
+            ? Math.max(0, seats - first.occupied)
+            : null,
+      occupied: first.occupied,
       typical: first.seats == null,
       wheelchair: first.wheelchair,
       wheelchairLeft: first.wheelchairLeft,
@@ -2004,6 +4443,9 @@ function occupancyFromSources(bus = {}, extra = {}) {
   );
   if (remaining == null && (band === "full" || band === "standing")) remaining = 0;
 
+  // First Potteries without a live reading — don't show a stuck typical "41 seats".
+  if (isFirstBus(bus, extra) && remaining == null && !band) return null;
+
   const wheelchair =
     asCount(occ.wheelchairCapacity ?? dg?.accessibility?.wheelchairCapacity ?? cap.wheelchairCapacity, 0, 6) ??
     (type.name || bus.vehicle?.features || dg?.size ? 1 : null);
@@ -2024,8 +4466,35 @@ function occupancyFromSources(bus = {}, extra = {}) {
 
 function seatsBlock(bus, extra = {}) {
   const info = extra.seatsInfo || occupancyFromSources(bus, extra);
-  if (!info?.seats) return "";
-  const seatLabel = info.typical ? `About ${info.seats} seats` : `${info.seats} seats`;
+  if (!info) return "";
+  if (!info?.seats && info?.remaining == null && !info?.band) return "";
+  // Lead with seats left when we have a live First / counted reading.
+  if (info.remaining != null && info.seats) {
+    let cls = "is-ok";
+    let leftLabel = `${info.remaining} left`;
+    if (info.remaining <= 0) {
+      leftLabel = "full · none left";
+      cls = "is-full";
+    } else if (info.remaining <= 8) {
+      cls = "is-low";
+    }
+    const extras = [];
+    if (info.wheelchairLeft != null) {
+      extras.push(info.wheelchairLeft > 0 ? "wheelchair space free" : "wheelchair space taken");
+    }
+    if (info.source === "First Bus") extras.push("First Bus live");
+    return `
+      <div class="popup-seats ${cls}">
+        <div class="popup-seats-main">${esc(`${info.remaining} seats left`)}</div>
+        ${extras.length ? `<div class="popup-seats-extra">${esc(extras.join(" · "))}</div>` : ""}
+      </div>
+    `;
+  }
+  const seatLabel = info.seats
+    ? info.typical
+      ? `About ${info.seats} seats`
+      : `${info.seats} seats`
+    : "Seats";
   let leftLabel = "occupancy unknown";
   let cls = "is-unknown";
   if (info.band === "standing") {
@@ -2039,15 +4508,29 @@ function seatsBlock(bus, extra = {}) {
     cls = "is-ok";
   } else if (info.remaining != null) {
     if (info.remaining <= 0) {
-      leftLabel = "none left";
+      leftLabel = "full · none left";
       cls = "is-full";
     } else {
       leftLabel = `${info.remaining} left`;
       cls = info.remaining <= 8 ? "is-low" : "is-ok";
     }
   }
+  const extras = [];
+  if (info.wheelchairLeft != null) {
+    extras.push(
+      info.wheelchairLeft > 0
+        ? `wheelchair space free`
+        : `wheelchair space taken`,
+    );
+  } else if (info.wheelchair != null && info.wheelchair > 0) {
+    extras.push(`${info.wheelchair} wheelchair`);
+  }
+  if (info.source === "First Bus") extras.push("First Bus live");
   return `
-    <div class="popup-seats ${cls}">${esc(`${seatLabel} · ${leftLabel}`)}</div>
+    <div class="popup-seats ${cls}">
+      <div class="popup-seats-main">${esc(`${seatLabel} · ${leftLabel}`)}</div>
+      ${extras.length ? `<div class="popup-seats-extra">${esc(extras.join(" · "))}</div>` : ""}
+    </div>
   `;
 }
 
@@ -2059,28 +4542,140 @@ function isFirstBus(bus, extra = {}) {
 
 function parseFirstOccupancy(row) {
   if (!row || typeof row !== "object") return null;
-  const types = row.occupancy?.types || row.Occupancy?.types || [];
+  const types =
+    row.occupancy?.types ||
+    row.Occupancy?.types ||
+    row.status?.occupancy?.types ||
+    [];
   const list = Array.isArray(types) ? types : [];
+  if (!list.length) return null;
   const seated = list.find((item) => /seat/i.test(item?.name || "")) || {};
   const wheel = list.find((item) => /wheel/i.test(item?.name || "")) || {};
   const seats =
     asCount(seated.capacity, 8, 120) ||
     asCount(row.SeatsCapacity ?? row.seatCapacity ?? row.capacity, 8, 120);
-  const occupied = asCount(seated.occupied ?? row.OccupiedSeats ?? row.occupied, 0, 120);
+  // occupied can be 0 — treat as a real reading.
+  const occupiedRaw = seated.occupied ?? row.OccupiedSeats ?? row.occupied;
+  const occupied =
+    occupiedRaw === 0 || occupiedRaw === "0"
+      ? 0
+      : asCount(occupiedRaw, 0, 120);
   const seatsLeft = asCount(
     row.SeatsAvailable ?? row.availableSeats ?? row.EmptySeats ?? row.seatsAvailable,
     0,
     120,
   );
   const remaining =
-    seatsLeft != null ? seatsLeft : seats != null && occupied != null ? Math.max(0, seats - occupied) : null;
+    seatsLeft != null
+      ? seatsLeft
+      : seats != null && occupied != null
+        ? Math.max(0, seats - occupied)
+        : null;
+  // Need a live remaining/occupied reading — capacity alone is not enough.
+  if (remaining == null && occupied == null) return null;
   if (seats == null && remaining == null) return null;
   const wheelchair = asCount(wheel.capacity ?? row.WheelchairCapacity ?? row.wheelchairCapacity, 0, 6);
-  const wheelOcc = asCount(wheel.occupied, 0, 6);
+  const wheelOccRaw = wheel.occupied;
+  const wheelOcc =
+    wheelOccRaw === 0 || wheelOccRaw === "0" ? 0 : asCount(wheelOccRaw, 0, 6);
   const wheelchairLeft =
     asCount(row.WheelchairSpaces ?? row.availableWheelchairs ?? row.wheelchairSpaces, 0, 6) ??
     (wheelchair != null && wheelOcc != null ? Math.max(0, wheelchair - wheelOcc) : null);
-  return { seats, remaining, wheelchair, wheelchairLeft };
+  return {
+    seats: seats ?? (remaining != null && occupied != null ? remaining + occupied : null),
+    remaining: remaining ?? (seats != null && occupied != null ? Math.max(0, seats - occupied) : null),
+    occupied,
+    wheelchair,
+    wheelchairLeft,
+  };
+}
+
+const firstVehicleCache = new Map();
+
+async function fetchFirstServiceVehicles(line, operator = "FPOT", { force = false } = {}) {
+  const code = String(line || "").trim().toUpperCase();
+  const noc = String(operator || "FPOT").trim().toUpperCase() || "FPOT";
+  if (!code) return [];
+  const cacheKey = `${noc}:${code}`;
+  const hit = firstVehicleCache.get(cacheKey);
+  if (!force && hit && Date.now() - hit.at < 8000) return hit.vehicles;
+  try {
+    const res = await fetch(
+      `/api/first-vehicles?operator=${encodeURIComponent(noc)}&service=${encodeURIComponent(code)}&_=${Date.now()}`,
+    );
+    const data = res.ok ? await res.json() : null;
+    const vehicles = Array.isArray(data?.vehicles) ? data.vehicles : [];
+    firstVehicleCache.set(cacheKey, { at: Date.now(), vehicles });
+    if (firstVehicleCache.size > 40) firstVehicleCache.delete(firstVehicleCache.keys().next().value);
+    return vehicles;
+  } catch {
+    return hit?.vehicles || [];
+  }
+}
+
+function fleetNumberFromBus(bus = {}, extra = {}) {
+  const raws = [
+    extra.vehicle?.fleet_code,
+    extra.vehicle?.fleet_number,
+    extra.btVehicle?.fleet_code,
+    bus.vehicle?.fleet_code,
+    bus.vehicle?.fleet_number,
+    bus.vehicle?.name,
+    extra.vehicle?.name,
+  ];
+  for (const raw of raws) {
+    const text = String(raw || "").trim();
+    if (!text) continue;
+    // "63362 - SM65 WMF" / "63362"
+    const head = text.match(/^(\d{4,6})\b/);
+    if (head) return head[1];
+    const only = compactQuery(text);
+    if (/^\d{4,6}$/.test(only)) return only;
+  }
+  return "";
+}
+
+function matchFirstLiveVehicle(vehicles, bus, extra, lat, lng) {
+  const list = Array.isArray(vehicles) ? vehicles.filter((row) => parseFirstOccupancy(row)) : [];
+  if (!list.length) return null;
+  const line = String(bus?.service?.line_name || extra?.line || "")
+    .trim()
+    .toUpperCase();
+  const fleet = fleetNumberFromBus(bus, extra);
+
+  // 1) Exact fleet match (same bus as First Bus app) — required for correct seat counts.
+  if (fleet) {
+    const fleetHits = list.filter((row) => String(row.fleet || "") === fleet);
+    if (fleetHits.length === 1) return fleetHits[0];
+    if (fleetHits.length > 1 && Number.isFinite(lat) && Number.isFinite(lng)) {
+      let best = null;
+      for (const row of fleetHits) {
+        if (!Number.isFinite(row.lat) || !Number.isFinite(row.lng)) continue;
+        const d = haversineMeters(lat, lng, row.lat, row.lng);
+        if (!best || d < best.d) best = { row, d };
+      }
+      if (best) return best.row;
+      return fleetHits[0];
+    }
+    if (fleetHits.length) return fleetHits[0];
+    // Fleet known but not in First feed yet — do not invent seats from another bus.
+    return null;
+  }
+
+  // 2) No fleet on the map bus: only accept a uniquely nearest live First vehicle.
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const nearby = [];
+  for (const row of list) {
+    if (line && row.line && String(row.line).toUpperCase() !== line) continue;
+    if (!Number.isFinite(row.lat) || !Number.isFinite(row.lng)) continue;
+    const d = haversineMeters(lat, lng, row.lat, row.lng);
+    if (d <= 120) nearby.push({ row, d });
+  }
+  nearby.sort((a, b) => a.d - b.d);
+  if (!nearby.length) return null;
+  // Ambiguous if a second First bus is also close.
+  if (nearby.length >= 2 && nearby[1].d - nearby[0].d < 60) return null;
+  return nearby[0].row;
 }
 
 async function fetchFirstStopTimes(atco) {
@@ -2088,8 +4683,13 @@ async function fetchFirstStopTimes(atco) {
   const hit = firstStopCache.get(atco);
   if (hit && Date.now() - hit.at < 20000) return hit.data;
   try {
-    const res = await fetch(`/api/first-next-bus?stop=${encodeURIComponent(atco)}`);
-    const data = res.ok ? await res.json() : null;
+    // Prefer TransportAPI-backed endpoint (includes live seat / wheelchair counts).
+    let res = await fetch(`/api/first-stop-times?stop=${encodeURIComponent(atco)}`);
+    let data = res.ok ? await res.json() : null;
+    if (!data?.times?.length) {
+      const fallback = await fetch(`/api/first-next-bus?stop=${encodeURIComponent(atco)}`);
+      if (fallback.ok) data = await fallback.json();
+    }
     firstStopCache.set(atco, { at: Date.now(), data });
     if (firstStopCache.size > 80) firstStopCache.delete(firstStopCache.keys().next().value);
     return data;
@@ -2100,28 +4700,76 @@ async function fetchFirstStopTimes(atco) {
 
 function matchFirstDeparture(data, bus) {
   const times = data?.times || data?.departures || [];
-  const rows = Array.isArray(times) ? times : Object.values(times).flat?.() || [];
+  const rows = Array.isArray(times)
+    ? times
+    : Array.isArray(times?.all)
+      ? times.all
+      : Object.values(times || {}).flat?.() || [];
   const line = String(bus.service?.line_name || "").toUpperCase();
   const dest = compactQuery(bus.destination || "");
-  const matches = rows.filter(
-    (row) => String(row.ServiceNumber || row.line || row.line_name || "").toUpperCase() === line,
-  );
-  const firstOnly = matches.filter((row) => !/^[nN]$/.test(String(row.IsFG ?? row.is_fg ?? "Y")));
+  const matches = rows.filter((row) => {
+    const svc = String(row.ServiceNumber || row.line_name || row.line || "").toUpperCase();
+    return svc && svc === line;
+  });
+  const firstOnly = matches.filter((row) => {
+    const op = String(row.operator || row.operator_name || "");
+    if (/FPOT|First/i.test(op)) return true;
+    return !/^[nN]$/.test(String(row.IsFG ?? row.is_fg ?? "Y"));
+  });
   const pool = firstOnly.length ? firstOnly : matches;
   if (!pool.length) return null;
+  const withOcc = pool.filter((row) => parseFirstOccupancy(row));
   if (dest) {
-    const hit = pool.find((row) => compactQuery(row.Destination || row.direction || "").includes(dest.slice(0, 6)));
-    if (hit) return hit;
+    const destPool = (withOcc.length ? withOcc : pool).filter((row) =>
+      compactQuery(row.Destination || row.direction || "").includes(dest.slice(0, 6)),
+    );
+    if (destPool.length) return destPool.find((row) => parseFirstOccupancy(row)) || destPool[0];
   }
-  return pool.find((row) => parseFirstOccupancy(row)) || pool[0];
+  return withOcc[0] || pool.find((row) => parseFirstOccupancy(row)) || pool[0];
 }
 
-async function firstOccupancyFor(bus, extra, lat, lng) {
+async function firstOccupancyFor(bus, extra, lat, lng, { force = false } = {}) {
   if (!isFirstBus(bus, extra)) return null;
+  const line = String(bus?.service?.line_name || extra?.line || "").trim();
+  const nocRaw = String(
+    bus?.operator?.noc ||
+      bus?.operator?.id ||
+      extra?.vehicle?.operator?.noc ||
+      extra?.operator ||
+      "FPOT",
+  )
+    .trim()
+    .toUpperCase();
+  // Potteries (and other First Bus) live seats use the First Group FPOT/… NOC on TransportAPI.
+  const noc = /FIRST|FPOT|FBRI|FSYO|FSCE|FGHL|FHUD|FWYO|FGLA|FCYM|FESX|FWAR|FMAN/i.test(
+    `${nocRaw} ${operatorName(bus, extra)}`,
+  )
+    ? /FPOT|Potteries/i.test(`${nocRaw} ${operatorName(bus, extra)}`)
+      ? "FPOT"
+      : nocRaw.startsWith("F") && nocRaw.length <= 4
+        ? nocRaw
+        : "FPOT"
+    : "FPOT";
+
+  // Primary: live buses-on-a-map feed (same as First Bus app seat counts).
+  if (line) {
+    const vehicles = await fetchFirstServiceVehicles(line, noc, { force });
+    const hit = matchFirstLiveVehicle(vehicles, bus, extra, lat, lng);
+    const fromLive = parseFirstOccupancy(hit);
+    if (fromLive) {
+      fromLive.fleet = hit?.fleet || fleetNumberFromBus(bus, extra) || "";
+      fromLive.vehicleId = hit?.vehicleId || "";
+      return fromLive;
+    }
+    // Fleet known but First feed has no matching bus — don't steal another bus's seats.
+    if (fleetNumberFromBus(bus, extra)) return null;
+  }
+
+  // Fallback only when we cannot identify the fleet yet (rare).
   const stops = extra.stops || [];
   const upcoming = upcomingStops(stops, lat, lng);
   const atcos = [...upcoming, ...stops].map((stop) => stop.atco).filter(Boolean);
-  for (const atco of atcos.slice(0, 4)) {
+  for (const atco of atcos.slice(0, 8)) {
     const data = await fetchFirstStopTimes(atco);
     const occ = parseFirstOccupancy(matchFirstDeparture(data, bus));
     if (occ) return occ;
@@ -2329,6 +4977,7 @@ function busesAreSameVehicle(a, b) {
  */
 function enrichBodsFromBustimes(bods, bt) {
   if (!bods || !bt) return bods;
+  const feedSpeed = Number(bods.speedMph ?? bods._bods?.velocityMph);
   return {
     ...bt,
     id: bt.id,
@@ -2338,6 +4987,8 @@ function enrichBodsFromBustimes(bods, bt) {
     delay: bods.delay ?? bt.delay,
     destination: bt.destination || bods.destination,
     origin: bt.origin || bods.origin,
+    speedMph: Number.isFinite(feedSpeed) ? feedSpeed : undefined,
+    feedSpeedMph: Number.isFinite(feedSpeed) ? feedSpeed : undefined,
     service: {
       ...(bt.service || {}),
       line_name: bt.service?.line_name || bods.service?.line_name,
@@ -2735,6 +5386,23 @@ function parseFleetReg(ref) {
     fleet: parts[0] || "",
     reg: plate ? plate[0].replace(/\s+/g, " ").toUpperCase() : parts.slice(1).join(" "),
   };
+}
+
+/** NATX/Flix often put the plate in vehicle.name ("BV19 XOH", "441 - BF68 LCK"). */
+function regFromVehicleName(name) {
+  const text = String(name || "").toUpperCase();
+  if (!text) return "";
+  const match =
+    text.match(/\b([A-Z]{2}\d{2}\s*[A-Z]{3})\b/) || text.match(/\b([A-Z]\d{1,3}\s*[A-Z]{3})\b/);
+  return match ? match[1].replace(/\s+/g, " ").trim() : "";
+}
+
+function busRegistration(bus = {}, extra = {}) {
+  return (
+    String(extra.vehicle?.reg || extra.btVehicle?.reg || bus.vehicle?.reg || extra.coachReg || "").trim() ||
+    regFromVehicleName(extra.vehicle?.name || bus.vehicle?.name || "") ||
+    ""
+  );
 }
 
 function compactReg(reg) {
@@ -3298,9 +5966,29 @@ function popupHtml(bus, extra = {}) {
         ? "Double"
         : "";
   const fleet = detail.fleet_code || "";
-  const reg = detail.reg || "";
+  const reg = busRegistration(bus, extra) || detail.reg || bus.vehicle?.reg || extra.coachReg || "";
   const livery = detail.livery?.name || "";
-  const idLine = [fleet && `#${fleet}`, reg].filter(Boolean).join(" · ") || liveName;
+  const fleetVehicleId = bustimesVehicleIdForFleet(bus, extra);
+  const opSlug = fleetOperatorSlugForBus(bus, extra);
+  const opNoc = trailOperatorForBus(bus) || (isFlixBus(bus) ? "FLIX" : isNationalExpress(bus) ? "NATX" : "");
+  const regLink = fleetRegButtonHtml(reg, {
+    fleet,
+    vehicleId: fleetVehicleId,
+    operatorSlug: opSlug,
+    serviceId: bus.service_id || bus.service?.id || "",
+    line: bus.service?.line_name || extra.line || "",
+    operatorNoc: opNoc,
+  });
+  const idLine =
+    [fleet ? esc(`#${fleet}`) : "", regLink || (reg ? esc(reg) : "")].filter(Boolean).join(" · ") ||
+    (opSlug
+      ? fleetRegButtonHtml("", {
+          operatorSlug: opSlug,
+          serviceId: bus.service_id || bus.service?.id || "",
+          line: bus.service?.line_name || extra.line || "",
+          operatorNoc: opNoc,
+        })
+      : esc(liveName));
   const typeLine = [type, deck, fuel].filter(Boolean).join(" · ");
   const operator = operatorName(bus, extra);
   const [lng, lat] = bus.coordinates || [];
@@ -3309,9 +5997,9 @@ function popupHtml(bus, extra = {}) {
     bus.delay ??
     inferDelaySeconds(extra.stops, lat, lng, bus.datetime);
   const delayText = nis ? "" : formatDelay(delaySec);
-  const metaBits = [idLine, operator, typeLine, livery].filter(Boolean);
+  const metaBits = [idLine, esc(operator), esc(typeLine), esc(livery)].filter(Boolean);
   const stickyNext = Number.isInteger(extra._nextStopIdx) ? extra._nextStopIdx : null;
-  const photoReg = reg || bus.vehicle?.reg || "";
+  const photoReg = reg || bus.vehicle?.reg || extra.coachReg || "";
   const historyExtra = {
     ...extra,
     operator: extra.operator || operator,
@@ -3340,7 +6028,17 @@ function popupHtml(bus, extra = {}) {
             }${flixRouteTitle(bus) ? ` · ${esc(flixRouteTitle(bus))}` : ""}</div>`
           : ""
       }
+      ${
+        !nis && !isFlixBus(bus) && isNationalExpress(bus)
+          ? `<div class="popup-title popup-natx">National Express</div>`
+          : ""
+      }
       ${nis ? (to ? `<div class="popup-meta">Shown as ${esc(to)}</div>` : "") : routeBlock(from, to)}
+      ${
+        !nis && (isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))
+          ? seatsBlock(bus, extra)
+          : ""
+      }
       <div class="popup-actions">
         ${followButtonHtml({ bus })}
         ${playRouteButtonHtml(bus, extra)}
@@ -3349,7 +6047,7 @@ function popupHtml(bus, extra = {}) {
       ${nis ? "" : stopsBlock(extra.stops, lat, lng, stickyNext)}
       ${historyBlock(historyExtra)}
       <div class="popup-details">
-        <div>${esc(metaBits.join(" · "))}</div>
+        <div>${metaBits.join(" · ")}</div>
         <div class="popup-details-live ${Number.isFinite(bus.speedMph) && Number.isFinite(extra.limitMph ?? bus.limitMph) && bus.speedMph > (extra.limitMph ?? bus.limitMph) + 2.5 ? "is-over" : ""}">${esc(formatSpeedLine(bus.speedMph, extra.limitMph ?? bus.limitMph))} · ${esc(timeAgo(bus.datetime))}</div>
       </div>
     </div>
@@ -3367,6 +6065,7 @@ function popupStructureKey(html) {
   return String(html || "")
     .replace(/class="popup-delay[^"]*"[^<]*/g, 'class="popup-delay"')
     .replace(/class="popup-details-live[^"]*"[^<]*<\/div>/g, 'class="popup-details-live"></div>')
+    .replace(/class="popup-seats[^"]*"[\s\S]*?<\/div>\s*<\/div>/g, 'class="popup-seats"></div>')
     .replace(/class="follow-bus-btn[^"]*"[^<]*/g, 'class="follow-bus-btn"')
     .replace(/ class="popup-stop[^"]*"/g, ' class="popup-stop"')
     .replace(/<span class="popup-fold-hint">[^<]*<\/span>/g, "")
@@ -3403,6 +6102,28 @@ function patchPopupLive(marker) {
     if (delayEl && !nis) {
       delayEl.textContent = formatDelay(delaySec);
       delayEl.className = `popup-delay ${delayClass(delaySec)}`.trim();
+    }
+    if (isFollowingMarker(marker)) updateFollowChip();
+    // Keep First Bus seat counts in sync without rebuilding the whole card.
+    if (!nis && (isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))) {
+      const seatsHtml = seatsBlock(bus, extra).trim();
+      let seatsEl = root.querySelector(".popup-seats");
+      if (seatsHtml) {
+        const wrap = document.createElement("div");
+        wrap.innerHTML = seatsHtml;
+        const next = wrap.firstElementChild;
+        if (seatsEl && next) {
+          seatsEl.className = next.className;
+          seatsEl.innerHTML = next.innerHTML;
+        } else if (next) {
+          const actions = root.querySelector(".popup-actions");
+          if (actions) actions.insertAdjacentElement("beforebegin", next);
+          else root.insertAdjacentElement("afterbegin", next);
+        }
+      } else if (seatsEl) {
+        seatsEl.remove();
+      }
+      if (isFollowingMarker(marker)) updateFollowChip();
     }
     const liveEl = root.querySelector(".popup-details-live");
     if (liveEl) {
@@ -3502,24 +6223,74 @@ async function loadHistoryIntoMarker(marker, { force = false } = {}) {
   if (lineFilter) marker.extra.historyLineFilter = lineFilter;
   if (marker.staff && !marker.extra.trailKey) marker.extra.trailKey = staffTrailKey(marker.staff);
   const vehicleId = historyVehicleId(marker.bus, marker.extra);
-  if (!vehicleId) {
+  const trailKey =
+    marker.extra.trailKey ||
+    (marker.staff ? staffTrailKey(marker.staff) : "") ||
+    String(marker.bus?.id || "");
+  const staffLine = marker.staff ? staffLineName(marker.staff) : "";
+  const atLine = isAltonLine(lineFilter)
+    ? String(lineFilter).trim().toUpperCase()
+    : isAltonLine(staffLine)
+      ? String(staffLine).trim().toUpperCase()
+      : "";
+  const wantAtTrails = Boolean(
+    atLine ||
+      (marker.staff && isAltonLine(staffLine)) ||
+      isDgBusContext(marker, marker.extra),
+  );
+  if (!vehicleId && !wantAtTrails) {
     marker.extra.history = [];
     marker.extra.historyStatus = "unavailable";
     refreshPopup(marker);
     return;
   }
-  const cacheKey = `${vehicleId}:${days}`;
+  const cacheKey = `${vehicleId || trailKey || "at"}:${atLine || ""}:${days}`;
   if (force) historyCache.delete(cacheKey);
   marker.extra.historyStatus = "loading";
   refreshPopup(marker);
-  const rowsRaw = await fetchVehicleHistory(vehicleId, days);
+  let rowsRaw = vehicleId ? await fetchVehicleHistory(vehicleId, days) : [];
+  if ((Number(marker.extra.historyDays) || historyDays) !== days) return;
+  if (wantAtTrails) {
+    const reg =
+      compactReg(
+        marker.extra.btVehicle?.reg ||
+          marker.extra.vehicle?.reg ||
+          parseFleetReg(marker.staff?.vehicle?.ref).reg ||
+          marker.bus?.vehicle?.reg ||
+          "",
+      ) || "";
+    const atRows = await fetchAtHistoryFromTrails({
+      trailKeys: [trailKey, vehicleId, reg ? `reg:${reg}` : ""].filter(Boolean),
+      line: atLine || "",
+      days,
+    });
+    rowsRaw = mergeAtHistoryRows(rowsRaw, atRows);
+  }
   if ((Number(marker.extra.historyDays) || historyDays) !== days) return;
   const liveBus = marker.bus;
   const liveRow = liveBus
     ? liveVehicleAsHistoryRow(liveBus, {
-        trailKey: marker.extra.trailKey || String(liveBus.id || ""),
+        trailKey: trailKey || String(liveBus.id || ""),
       })
-    : null;
+    : marker.staff && atLine
+      ? enrichJourneyRow(
+          {
+            id: `at-live-${atLine}`,
+            datetime: marker.staff.recordedAtTime || new Date().toISOString(),
+            date: ukDateKey(marker.staff.recordedAtTime || Date.now()),
+            route_name: atLine,
+            destination:
+              marker.extra.to ||
+              marker.staff.currentJourney?.destination?.name ||
+              "Alton Towers",
+            trip_id: null,
+            trailKey,
+            atLive: true,
+            live: true,
+          },
+          null,
+        )
+      : null;
   let enriched = rowsRaw.map((row) => enrichJourneyRow(row, liveBus));
   // Prefer live AVL row when the current journey is diverted / missing from history.
   if (liveRow) {
@@ -3548,9 +6319,9 @@ async function enrichBustimes(event) {
   marker.extra.limitMph = bus.limitMph ?? nearestRoadLimit(ll.lat, ll.lng);
   const [ends, vehicle] = await Promise.all([
     tripEnds(bus.trip_id || bus.journey_id),
-    String(bus.btId || bus.id).startsWith("dg-") || String(bus.btId || bus.id).startsWith("bods-")
-      ? null
-      : vehicleDetails(bus.btId || bus.id),
+    isLikelyBustimesVehicleId(bus, bus.btId || bus.id)
+      ? vehicleDetails(bus.btId || bus.id)
+      : null,
   ]);
   if (gen !== marker._enrichGen) return;
   if (ends) {
@@ -3563,6 +6334,28 @@ async function enrichBustimes(event) {
       ends.delaySec ?? inferDelaySeconds(ends.stops, ll.lat, ll.lng, bus.datetime);
   }
   if (vehicle) marker.extra.vehicle = vehicle;
+  // Prefer plate from NATX-style vehicle.name when AVL omits .reg
+  const plate = busRegistration(bus, marker.extra);
+  if (plate && !marker.extra.vehicle?.reg) {
+    marker.extra.coachReg = plate;
+    if (marker.extra.vehicle && !marker.extra.vehicle.reg) {
+      marker.extra.vehicle = { ...marker.extra.vehicle, reg: plate };
+    }
+  }
+  // Flix / NATX hide plates on the live map — try BODS VehicleRef → bustimes reg.
+  if (!marker.extra.vehicle?.reg && !marker.extra.coachReg && (isFlixBus(bus) || isNationalExpress(bus))) {
+    try {
+      const coach = await resolveCoachRegFromBods(bus, marker.extra, ll.lat, ll.lng);
+      if (gen !== marker._enrichGen) return;
+      if (coach?.reg) marker.extra.coachReg = coach.reg;
+      if (coach?.vehicle) {
+        marker.extra.vehicle = coach.vehicle;
+        marker.extra.btVehicle = coach.vehicle;
+      }
+    } catch {
+      /* optional */
+    }
+  }
   refreshPopup(marker);
   loadHistoryIntoMarker(marker);
   const dgVehicle = String(bus.id).startsWith("dg-")
@@ -3572,18 +6365,58 @@ async function enrichBustimes(event) {
   if (dgVehicle) marker.extra.dgVehicle = dgVehicle;
   marker.extra.seatsInfo = occupancyFromSources(bus, marker.extra);
   if (isFirstBus(bus, marker.extra)) {
-    const first = await firstOccupancyFor(bus, marker.extra, ll.lat, ll.lng);
+    if (!marker._firstSeatsCloseBound) {
+      marker._firstSeatsCloseBound = true;
+      marker.on("popupclose", () => {
+        if (marker._firstSeatsTimer) {
+          clearInterval(marker._firstSeatsTimer);
+          marker._firstSeatsTimer = null;
+        }
+      });
+    }
+    const first = await firstOccupancyFor(bus, marker.extra, ll.lat, ll.lng, { force: true });
     if (gen !== marker._enrichGen) return;
     if (first) {
       marker.extra.firstOccupancy = first;
       marker.extra.seatsInfo = occupancyFromSources(bus, marker.extra);
+      if (isFollowingMarker(marker)) updateFollowChip();
     }
+    // Keep seat counts fresh while the card is open (match First app ~live updates).
+    if (marker._firstSeatsTimer) clearInterval(marker._firstSeatsTimer);
+    marker._firstSeatsTimer = setInterval(async () => {
+      if (!marker.isPopupOpen?.()) {
+        clearInterval(marker._firstSeatsTimer);
+        marker._firstSeatsTimer = null;
+        return;
+      }
+      const here = marker.getLatLng?.() || ll;
+      const next = await firstOccupancyFor(marker.bus || bus, marker.extra, here.lat, here.lng, {
+        force: true,
+      });
+      if (!next) return;
+      const prev = marker.extra.firstOccupancy;
+      if (
+        prev &&
+        prev.remaining === next.remaining &&
+        prev.occupied === next.occupied &&
+        prev.seats === next.seats
+      ) {
+        return;
+      }
+      marker.extra.firstOccupancy = next;
+      marker.extra.seatsInfo = occupancyFromSources(marker.bus || bus, marker.extra);
+      refreshPopup(marker, { force: true });
+      if (isFollowingMarker(marker)) updateFollowChip();
+    }, 10000);
   }
   const bods = await bodsOccupancyFor(bus, marker.extra, ll.lat, ll.lng);
   if (gen !== marker._enrichGen) return;
-  if (bods) {
+  // Never let BODS band data replace a live First seat reading.
+  if (bods && !(marker.extra.firstOccupancy?.remaining != null || marker.extra.firstOccupancy?.occupied != null)) {
     marker.extra.bodsOccupancy = bods;
     marker.extra.seatsInfo = occupancyFromSources(bus, marker.extra);
+  } else if (bods) {
+    marker.extra.bodsOccupancy = bods;
   }
   fetchLimitNear(ll.lat, ll.lng, marker.extra.limitMph).then((limit) => {
     if (gen !== marker._enrichGen) return;
@@ -3592,6 +6425,7 @@ async function enrichBustimes(event) {
     refreshPopup(marker);
   });
   refreshPopup(marker);
+  if (isFollowingMarker(marker)) updateFollowChip();
   followJourney(marker, true);
   loadPhotoIntoMarker(marker);
 }
@@ -3624,7 +6458,6 @@ function staffPopup(item, extra = {}) {
       <div class="popup-title popup-nis">Alton Towers employee-only service</div>
       ${routeBlock(from, to)}
       ${via ? `<div class="popup-meta">${esc(via)}</div>` : ""}
-      ${seatsBlock({ vehicle: extra.vehicle }, extra)}
       <div class="popup-actions">
         ${followButtonHtml({ staff: item })}
         ${playStaffRouteButtonHtml(item, popupExtra)}
@@ -3636,7 +6469,18 @@ function staffPopup(item, extra = {}) {
       })}
       ${historyBlock(popupExtra)}
       <div class="popup-details">
-        <div>${esc([parsed.fleet && `#${parsed.fleet}`, parsed.reg, "D&G Bus", extra.liveryName, size].filter(Boolean).join(" · "))}</div>
+        <div>${[
+          parsed.fleet ? esc(`#${parsed.fleet}`) : "",
+          fleetRegButtonHtml(parsed.reg || extra.btVehicle?.reg || "", {
+            fleet: parsed.fleet || "",
+            vehicleId: extra.btVehicle?.id || "",
+          }) || (parsed.reg ? esc(parsed.reg) : ""),
+          esc("D&G Bus"),
+          esc(extra.liveryName || ""),
+          esc(size),
+        ]
+          .filter(Boolean)
+          .join(" · ")}</div>
         <div class="popup-details-live">${esc(formatSpeedLine(item.speedMph, extra.limitMph ?? item.limitMph))} · ${esc(recorded)}</div>
       </div>
     </div>
@@ -3792,11 +6636,16 @@ function dropServiceBus(id) {
 
 function upsertLiveBus(bus, snapped) {
   const existing = markers.get(bus.id);
-  const reg = existing?.extra?.vehicle?.reg || bus.vehicle?.reg || "";
+  const reg =
+    busRegistration(bus, existing?.extra || {}) ||
+    existing?.extra?.vehicle?.reg ||
+    bus.vehicle?.reg ||
+    "";
   recordVehicleTrail(bus.id, snapped.lat, snapped.lng, snapped.heading, {
     journeyId: bus.journey_id,
     tripId: bus.trip_id,
     line: bus.service?.line_name || "",
+    operator: trailOperatorForBus(bus),
     t: bus.datetime ? new Date(bus.datetime).getTime() || Date.now() : Date.now(),
     reg,
   });
@@ -3830,9 +6679,9 @@ function upsertLiveBus(bus, snapped) {
 async function loadBuses({ replace = false } = {}) {
   const zoom = map.getZoom();
   const showLocal = zoom >= MIN_ZOOM;
-  const showFlix = zoom >= FLIX_MIN_ZOOM;
+  const showCoach = zoom >= FLIX_MIN_ZOOM;
 
-  if (!showLocal && !showFlix) {
+  if (!showLocal && !showCoach) {
     cluster.clearLayers();
     markers.clear();
     if (followTarget) stopFollowBus();
@@ -3841,9 +6690,9 @@ async function loadBuses({ replace = false } = {}) {
     return;
   }
 
-  if (!showLocal && showFlix) {
+  if (!showLocal && showCoach) {
     hint.hidden = false;
-    hint.textContent = "FlixBus nationwide · zoom in further for local buses";
+    hint.textContent = "FlixBus & National Express nationwide · zoom in further for local buses";
   } else {
     hint.hidden = true;
   }
@@ -3866,9 +6715,11 @@ async function loadBuses({ replace = false } = {}) {
 
   try {
     showMessage("");
-    const [localRes, flixBuses] = await Promise.all([
+    const [localRes, flixBuses, natxBuses, bodsLive] = await Promise.all([
       showLocal ? fetch(`/api/vehicles?${params}`, { signal }) : Promise.resolve(null),
-      showFlix ? fetchFlixBuses(signal) : Promise.resolve([]),
+      showCoach ? fetchFlixBuses(signal) : Promise.resolve([]),
+      showCoach ? fetchNatxBuses(signal) : Promise.resolve([]),
+      showLocal ? fetchBodsVehicles(params, signal) : Promise.resolve({ vehicles: [], ok: false }),
     ]);
     let localBuses = [];
     if (localRes) {
@@ -3876,13 +6727,17 @@ async function loadBuses({ replace = false } = {}) {
       const data = await localRes.json();
       localBuses = Array.isArray(data) ? data : [];
     }
+    if (bodsLive?.ok) attachFeedSpeedFromBods(localBuses, bodsLive.vehicles);
 
     const byId = new Map();
     for (const bus of localBuses) {
-      if (!showLocal && !isFlixBus(bus)) continue;
+      if (!showLocal && !isFlixBus(bus) && !isNationalExpress(bus)) continue;
       byId.set(bus.id, bus);
     }
     for (const bus of flixBuses) {
+      byId.set(bus.id, bus);
+    }
+    for (const bus of natxBuses) {
       byId.set(bus.id, bus);
     }
 
@@ -3893,15 +6748,15 @@ async function loadBuses({ replace = false } = {}) {
       const [lng, lat] = bus.coordinates || [];
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
       if (isStalePing(bus.datetime)) continue;
-      const flix = isFlixBus(bus);
-      if (!showLocal && !flix) continue;
-      if (!showFlix && flix) continue;
+      const coach = isFlixBus(bus) || isNationalExpress(bus);
+      if (!showLocal && !coach) continue;
+      if (!showCoach && coach) continue;
       if (isNotInService(bus)) {
         dropServiceBus(bus.id);
         continue;
       }
       live.push(bus);
-      bus.speedMph = updateMotion(`bus-${bus.id}`, lat, lng, bus.datetime);
+      bus.speedMph = resolveBusSpeedMph(`bus-${bus.id}`, bus, lat, lng, bus.datetime);
       const snapped = liveWhere(bus);
       bus.limitMph = snapped.limitMph ?? nearestRoadLimit(snapped.lat, snapped.lng);
       seenService.add(bus.id);
@@ -3909,9 +6764,9 @@ async function loadBuses({ replace = false } = {}) {
     }
 
     for (const [id, marker] of markers) {
-      const flix = isFlixBus(marker.bus);
+      const coach = isFlixBus(marker.bus) || isNationalExpress(marker.bus);
       const keep = seenService.has(id) && !isStalePing(marker.bus?.datetime);
-      const allowed = (showLocal || flix) && (showFlix || !flix);
+      const allowed = (showLocal || coach) && (showCoach || !coach);
       if (!keep || !allowed) {
         dropServiceBus(id);
         motion.delete(`bus-${id}`);
@@ -4662,12 +7517,7 @@ function focusMarker(marker) {
   marker.setZIndexOffset(4000);
   const latlng = marker.getLatLng();
   map.setView(latlng, Math.max(map.getZoom(), 16));
-  const open = () => marker.openPopup();
-  if (cluster.hasLayer(marker) && typeof cluster.zoomToShowLayer === "function") {
-    cluster.zoomToShowLayer(marker, open);
-  } else {
-    open();
-  }
+  marker.openPopup();
 }
 
 function revealPendingFocus() {
@@ -4963,6 +7813,48 @@ function updateMotion(id, lat, lng, iso) {
   return speedMph;
 }
 
+/** Prefer GPS velocity from BODS SIRI-VM when the operator sends it; else estimate from pings. */
+function feedSpeedMph(bus) {
+  const v = Number(bus?.feedSpeedMph ?? bus?._bods?.velocityMph);
+  if (!Number.isFinite(v) || v < 0 || v > 90) return null;
+  return v;
+}
+
+function resolveBusSpeedMph(key, bus, lat, lng, iso) {
+  const motionMph = updateMotion(key, lat, lng, iso);
+  const feed = feedSpeedMph(bus);
+  if (feed == null) return motionMph;
+  const prev = motion.get(key);
+  if (prev) motion.set(key, { ...prev, speedMph: feed });
+  return feed;
+}
+
+/** Copy BODS SIRI Velocity onto matching Bustimes vehicles for the live card. */
+function attachFeedSpeedFromBods(btBuses, bodsBuses) {
+  const bodsList = Array.isArray(bodsBuses) ? bodsBuses : [];
+  if (!bodsList.length) return btBuses;
+  for (const bt of btBuses || []) {
+    if (!bt || isFlixBus(bt)) continue;
+    let best = null;
+    let bestScore = 0;
+    for (const bods of bodsList) {
+      const feed = Number(bods.speedMph ?? bods._bods?.velocityMph);
+      if (!Number.isFinite(feed)) continue;
+      const score = liveBusMatchScore(bods, bt);
+      if (score > bestScore) {
+        best = bods;
+        bestScore = score;
+      }
+    }
+    if (!best || bestScore < 18) continue;
+    const feed = Number(best.speedMph ?? best._bods?.velocityMph);
+    if (!Number.isFinite(feed) || feed < 0 || feed > 90) continue;
+    bt.feedSpeedMph = feed;
+    bt._bods = { ...(bt._bods || {}), ...(best._bods || {}), velocityMph: feed };
+  }
+  return btBuses;
+}
+
 function destinationPoint(lat, lng, bearingDeg, meters) {
   const R = 6371000;
   const br = (Number(bearingDeg) * Math.PI) / 180;
@@ -5093,7 +7985,8 @@ function placeOnRoad(marker, snapped) {
       journeyId: marker.bus.journey_id,
       tripId: marker.bus.trip_id,
       line: marker.bus.service?.line_name || marker.extra?.line || "",
-      reg: marker.extra?.vehicle?.reg || marker.bus.vehicle?.reg || "",
+      operator: trailOperatorForBus(marker.bus),
+      reg: busRegistration(marker.bus, marker.extra || {}),
     });
   }
   const prev = marker._roadHeading;
@@ -5248,6 +8141,518 @@ function keepOnRoad(holder, lat, lng, heading, meters = 0) {
 
 function snapToRoad(lat, lng, heading) {
   return keepOnRoad({}, lat, lng, heading, 0);
+}
+
+const trailAlignCache = new Map();
+const trailAlignPending = new Map();
+
+function trailPathHash(latlngs) {
+  if (!latlngs?.length) return "";
+  const flat = Array.isArray(latlngs[0]?.[0]) ? latlngs.flat() : latlngs;
+  if (!flat.length) return "";
+  const a = flat[0];
+  const b = flat[flat.length - 1];
+  return `${flat.length}:${Number(a[0]).toFixed(5)},${Number(a[1]).toFixed(5)}:${Number(b[0]).toFixed(5)},${Number(b[1]).toFixed(5)}`;
+}
+
+function thinTrailPoints(latlngs, minGapM = 12) {
+  if (!Array.isArray(latlngs) || latlngs.length < 3) return latlngs || [];
+  const out = [latlngs[0]];
+  for (let i = 1; i < latlngs.length - 1; i += 1) {
+    const prev = out[out.length - 1];
+    const cur = latlngs[i];
+    if (haversineMeters(prev[0], prev[1], cur[0], cur[1]) >= minGapM) out.push(cur);
+  }
+  const last = latlngs[latlngs.length - 1];
+  const prev = out[out.length - 1];
+  if (haversineMeters(prev[0], prev[1], last[0], last[1]) > 2) out.push(last);
+  else out[out.length - 1] = last;
+  return out;
+}
+
+function dedupeNearTrailPoints(latlngs, minGapM = 3) {
+  if (!Array.isArray(latlngs) || latlngs.length < 2) return latlngs || [];
+  const out = [latlngs[0]];
+  for (let i = 1; i < latlngs.length; i += 1) {
+    const prev = out[out.length - 1];
+    const cur = latlngs[i];
+    if (haversineMeters(prev[0], prev[1], cur[0], cur[1]) >= minGapM) out.push(cur);
+  }
+  return out;
+}
+
+function pointsAlongSameRoad(hitA, hitB) {
+  if (!hitA?.road || !hitB?.road || hitA.road !== hitB.road) {
+    return [
+      [hitA.lat, hitA.lng],
+      [hitB.lat, hitB.lng],
+    ];
+  }
+  const pts = hitA.road.latlngs;
+  const i0 = hitA.i;
+  const i1 = hitB.i;
+  const out = [[hitA.lat, hitA.lng]];
+  if (i0 === i1) {
+    out.push([hitB.lat, hitB.lng]);
+    return out;
+  }
+  if (i1 > i0) {
+    for (let i = i0 + 1; i <= i1; i += 1) out.push(pts[i]);
+  } else {
+    for (let i = i0; i >= i1 + 1; i -= 1) out.push(pts[i]);
+  }
+  out.push([hitB.lat, hitB.lng]);
+  return out;
+}
+
+function bridgeTrailRoads(hitA, hitB) {
+  const out = [[hitA.lat, hitA.lng]];
+  let hit = { ...hitA };
+  for (let step = 0; step < 70; step += 1) {
+    const dist = haversineMeters(hit.lat, hit.lng, hitB.lat, hitB.lng);
+    if (dist < 12) break;
+    if (hit.road && hitB.road && hit.road === hitB.road) {
+      const along = pointsAlongSameRoad(hit, hitB);
+      for (const p of along.slice(1)) out.push(p);
+      return out;
+    }
+    const bear = segmentBearing([hit.lat, hit.lng], [hitB.lat, hitB.lng]);
+    const stepped = walkAlongRoad(
+      { ...hit, heading: bear },
+      Math.min(28, Math.max(8, dist * 0.45)),
+    );
+    if (!stepped || haversineMeters(hit.lat, hit.lng, stepped.lat, stepped.lng) < 0.8) {
+      const t = Math.min(0.4, 18 / Math.max(dist, 1));
+      const midLat = hit.lat + (hitB.lat - hit.lat) * t;
+      const midLng = hit.lng + (hitB.lng - hit.lng) * t;
+      const mid = snapHit(midLat, midLng, bear, 130);
+      if (!mid) break;
+      hit = mid;
+    } else {
+      const resnap =
+        snapHit(stepped.lat, stepped.lng, stepped.heading ?? bear, 45) || {
+          ...stepped,
+          road: hit.road,
+          i: hit.i,
+          forward: hit.forward,
+        };
+      hit = resnap;
+    }
+    const last = out[out.length - 1];
+    if (haversineMeters(last[0], last[1], hit.lat, hit.lng) >= 3) out.push([hit.lat, hit.lng]);
+  }
+  out.push([hitB.lat, hitB.lng]);
+  return out;
+}
+
+/** Snap GPS breadcrumbs onto road geometry so the trail follows the streets driven. */
+function alignTrailToRoadsLocal(latlngs, breakOpts = {}) {
+  if (!Array.isArray(latlngs) || latlngs.length < 2) return latlngs || [];
+  const limits = trailBreakLimits(breakOpts);
+  const inputSegs = splitLatLngsByGaps(latlngs, limits.gapM, breakOpts);
+  const sourceSegs = inputSegs.length ? inputSegs : [latlngs];
+  const alignedSegs = [];
+  for (const seg of sourceSegs) {
+    const out = [];
+    let prevHit = null;
+    let prevHeading = null;
+    for (let i = 0; i < seg.length; i += 1) {
+      const cur = seg[i];
+      const next = seg[i + 1];
+      const heading = next ? segmentBearing(cur, next) : Number.isFinite(prevHeading) ? prevHeading : null;
+      // Prefer the nearest road — never keep raw GPS in fields (that draws chords across country).
+      const hit = snapHit(cur[0], cur[1], heading, 280) || snapHit(cur[0], cur[1], heading, 420);
+      if (!hit) {
+        if (out.length >= 2) {
+          alignedSegs.push(out.slice());
+          out.length = 0;
+        }
+        prevHit = null;
+        prevHeading = heading;
+        continue;
+      }
+      if (!prevHit) {
+        out.push([hit.lat, hit.lng]);
+      } else if (isTrailGapJump(prevHit, hit, limits.gapM, breakOpts)) {
+        if (out.length >= 2) alignedSegs.push(out.slice());
+        out.length = 0;
+        out.push([hit.lat, hit.lng]);
+      } else if (prevHit.road === hit.road) {
+        const along = pointsAlongSameRoad(prevHit, hit);
+        for (const p of along.slice(1)) {
+          if (haversineMeters(out[out.length - 1][0], out[out.length - 1][1], p[0], p[1]) >= 2) out.push(p);
+        }
+      } else {
+        const bridge = bridgeTrailRoads(prevHit, hit);
+        const bridgeJump =
+          bridge.length >= 2 &&
+          bridge.slice(1).some((p, idx) => {
+            const a = idx === 0 ? [prevHit.lat, prevHit.lng] : bridge[idx];
+            const bridgeGap =
+              isCoachTrailOperator(breakOpts.operator) || breakOpts.coach
+                ? limits.gapM
+                : Math.min(limits.gapM, 900);
+            return isTrailGapJump(a, p, bridgeGap, breakOpts);
+          });
+        if (
+          bridgeJump ||
+          isTrailGapJump(
+            prevHit,
+            hit,
+            isCoachTrailOperator(breakOpts.operator) || breakOpts.coach
+              ? limits.gapM
+              : Math.min(limits.gapM, 900),
+            breakOpts,
+          )
+        ) {
+          if (out.length >= 2) alignedSegs.push(out.slice());
+          out.length = 0;
+          out.push([hit.lat, hit.lng]);
+        } else {
+          for (const p of bridge.slice(1)) {
+            if (haversineMeters(out[out.length - 1][0], out[out.length - 1][1], p[0], p[1]) >= 2) out.push(p);
+          }
+        }
+      }
+      prevHit = hit;
+      prevHeading = hit.heading ?? heading;
+    }
+    const cleaned = dedupeNearTrailPoints(out, 2);
+    if (cleaned.length >= 2) alignedSegs.push(cleaned);
+  }
+  if (!alignedSegs.length) return [];
+  return alignedSegs.length === 1 ? alignedSegs[0] : alignedSegs;
+}
+
+function osrmCoordsFromLngLat(coords) {
+  if (!Array.isArray(coords) || coords.length < 2) return null;
+  const part = [];
+  for (const [lng, lat] of coords) {
+    if (Number.isFinite(lat) && Number.isFinite(lng)) part.push([lat, lng]);
+  }
+  const cleaned = dedupeNearTrailPoints(part, 2.5);
+  return cleaned.length >= 2 ? cleaned : null;
+}
+
+async function osrmRoadBridge(a, b, signal) {
+  if (!a || !b) return null;
+  const coords = `${Number(a[1]).toFixed(5)},${Number(a[0]).toFixed(5)};${Number(b[1]).toFixed(5)},${Number(b[0]).toFixed(5)}`;
+  try {
+    const routeRes = await fetch(
+      `/api/osrm-route/${coords}?overview=full&geometries=geojson`,
+      { signal },
+    );
+    if (routeRes.ok) {
+      const data = await routeRes.json();
+      const part = osrmCoordsFromLngLat(data?.routes?.[0]?.geometry?.coordinates);
+      if (part) return part;
+    }
+  } catch {
+    /* try match fallback */
+  }
+  // Public OSRM rejects large radiuses (TooBig) — keep match snap tight.
+  for (const radius of [35, 25]) {
+    try {
+      const res = await fetch(
+        `/api/osrm-match/${coords}?overview=full&geometries=geojson&gaps=ignore&radiuses=${radius};${radius}`,
+        { signal },
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      const part = osrmCoordsFromLngLat(data?.matchings?.[0]?.geometry?.coordinates);
+      if (part) return part;
+    } catch {
+      /* try next radius */
+    }
+  }
+  return null;
+}
+
+/** When map-matching fails, stitch consecutive GPS points via OSRM driving routes (always on roads). */
+async function stitchTrailViaOsrmRoutes(latlngs, signal, breakOpts = {}) {
+  const limits = trailBreakLimits(breakOpts);
+  const coach = isCoachTrailOperator(breakOpts.operator) || !!breakOpts.coach;
+  const inputSegs = splitLatLngsByGaps(latlngs, limits.gapM, breakOpts);
+  const sourceSegs = inputSegs.length ? inputSegs : [latlngs];
+  const alignedSegs = [];
+  // Coaches: wider sample spacing so long motorway legs stay fast + on-road.
+  const thinGap = coach ? 180 : 28;
+  const bridgeBatch = coach ? 8 : 4;
+  for (const source of sourceSegs) {
+    const thinned = thinTrailPoints(source, thinGap);
+    if (thinned.length < 2) continue;
+    const bridges = new Array(thinned.length - 1).fill(null);
+    for (let start = 0; start < thinned.length - 1; start += bridgeBatch) {
+      if (signal?.aborted) return alignedSegs.length ? alignedSegs : null;
+      const jobs = [];
+      for (let i = start; i < Math.min(thinned.length - 1, start + bridgeBatch); i += 1) {
+        const a = thinned[i];
+        const b = thinned[i + 1];
+        const jump = isTrailGapJump(
+          { lat: a[0], lng: a[1], t: a[3] },
+          { lat: b[0], lng: b[1], t: b[3] },
+          limits.gapM,
+          breakOpts,
+        );
+        if (jump) {
+          bridges[i] = null;
+          continue;
+        }
+        jobs.push(
+          osrmRoadBridge(a, b, signal).then((part) => {
+            bridges[i] = part;
+          }),
+        );
+      }
+      await Promise.all(jobs);
+    }
+    let merged = [thinned[0]];
+    for (let i = 1; i < thinned.length; i += 1) {
+      const bridge = bridges[i - 1];
+      const next = thinned[i];
+      if (bridge?.length >= 2) {
+        for (const p of bridge.slice(1)) {
+          const last = merged[merged.length - 1];
+          if (haversineMeters(last[0], last[1], p[0], p[1]) >= 2) merged.push(p);
+        }
+      } else {
+        // No road route — break rather than draw a chord off the road.
+        if (merged.length >= 2) alignedSegs.push(dedupeNearTrailPoints(merged, 2.5));
+        merged = [next];
+      }
+    }
+    if (merged.length >= 2) alignedSegs.push(dedupeNearTrailPoints(merged, 2.5));
+  }
+  if (!alignedSegs.length) return null;
+  return alignedSegs.length === 1 ? alignedSegs[0] : alignedSegs;
+}
+
+async function matchOsrmChunk(chunk, signal, radius) {
+  if (!Array.isArray(chunk) || chunk.length < 2) return [];
+  const coords = chunk
+    .map(([lat, lng]) => `${Number(lng).toFixed(5)},${Number(lat).toFixed(5)}`)
+    .join(";");
+  const radiuses = chunk.map(() => String(radius)).join(";");
+  const res = await fetch(
+    `/api/osrm-match/${coords}?overview=full&geometries=geojson&tidy=true&gaps=ignore&radiuses=${radiuses}`,
+    { signal },
+  );
+  if (!res.ok) return [];
+  const data = await res.json();
+  const matchings = Array.isArray(data?.matchings) ? data.matchings : [];
+  const parts = [];
+  for (const matching of matchings) {
+    const part = osrmCoordsFromLngLat(matching?.geometry?.coordinates);
+    if (part) parts.push(part);
+  }
+  return parts;
+}
+
+async function matchTrailViaOsrm(latlngs, signal, breakOpts = {}) {
+  const limits = trailBreakLimits(breakOpts);
+  const inputSegs = splitLatLngsByGaps(latlngs, limits.gapM, breakOpts);
+  const sourceSegs = inputSegs.length ? inputSegs : [latlngs];
+  const alignedSegs = [];
+  for (const source of sourceSegs) {
+    const thinned = thinTrailPoints(source, 18);
+    if (thinned.length < 2) continue;
+    const chunkSize = 40;
+    const chunkParts = [];
+    for (let i = 0; i < thinned.length; i += chunkSize - 1) {
+      const chunk = thinned.slice(i, i + chunkSize);
+      if (chunk.length < 2) continue;
+      let parts = [];
+      // Public demo OSRM returns TooBig for large radiuses — try tight snaps first.
+      for (const radius of [35, 25]) {
+        try {
+          parts = await matchOsrmChunk(chunk, signal, radius);
+          if (parts.length) break;
+        } catch {
+          parts = [];
+        }
+      }
+      if (!parts.length && chunk.length > 8) {
+        // Smaller chunks often succeed when a long match is rejected.
+        const mid = Math.ceil(chunk.length / 2);
+        for (const half of [chunk.slice(0, mid + 1), chunk.slice(mid)]) {
+          if (half.length < 2) continue;
+          try {
+            const halfParts = await matchOsrmChunk(half, signal, 30);
+            for (const p of halfParts) parts.push(p);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      if (!parts.length) {
+        // Last resort for this chunk: route-stitch so we still stay on roads.
+        try {
+          const stitched = await stitchTrailViaOsrmRoutes(chunk, signal, breakOpts);
+          const segs = trailSegmentsOf(stitched, breakOpts);
+          for (const seg of segs) parts.push(seg);
+        } catch {
+          /* leave gap */
+        }
+      }
+      for (const part of parts) chunkParts.push(part);
+    }
+    // Stitch adjacent OSRM matchings on-road only — never draw a field chord between chunks.
+    let merged = [];
+    for (const part of chunkParts) {
+      if (!merged.length) {
+        merged = part.slice();
+        continue;
+      }
+      const prev = merged[merged.length - 1];
+      const next = part[0];
+      const joinDist = haversineMeters(prev[0], prev[1], next[0], next[1]);
+      if (joinDist < 90) {
+        for (const p of part.slice(joinDist < 4 ? 1 : 0)) {
+          if (haversineMeters(merged[merged.length - 1][0], merged[merged.length - 1][1], p[0], p[1]) >= 2) {
+            merged.push(p);
+          }
+        }
+      } else if (joinDist < 3500) {
+        const bridge = await osrmRoadBridge(prev, next, signal);
+        if (bridge?.length >= 2) {
+          for (const p of bridge.slice(1)) {
+            if (haversineMeters(merged[merged.length - 1][0], merged[merged.length - 1][1], p[0], p[1]) >= 2) {
+              merged.push(p);
+            }
+          }
+          for (const p of part.slice(1)) {
+            if (haversineMeters(merged[merged.length - 1][0], merged[merged.length - 1][1], p[0], p[1]) >= 2) {
+              merged.push(p);
+            }
+          }
+        } else {
+          if (merged.length >= 2) alignedSegs.push(merged);
+          merged = part.slice();
+        }
+      } else {
+        if (merged.length >= 2) alignedSegs.push(merged);
+        merged = part.slice();
+      }
+    }
+    if (merged.length >= 2) alignedSegs.push(merged);
+  }
+  if (!alignedSegs.length) return null;
+  return alignedSegs.length === 1 ? alignedSegs[0] : alignedSegs;
+}
+
+async function ensureSnapRoadsForBounds(bounds, signal) {
+  if (!bounds) return;
+  const template = await getOfmTemplate();
+  let z = Math.min(Math.max(map.getZoom(), 13), 14);
+  let tiles = tilesForBounds(bounds, z);
+  if (tiles.length > 28) {
+    z = Math.max(12, z - 1);
+    tiles = tilesForBounds(bounds, z);
+  }
+  tiles = tiles.slice(0, 28);
+  const decoded = await Promise.all(
+    tiles.map((tile) => decodeRoadTile(template, tile.z, tile.x, tile.y, signal)),
+  );
+  if (signal?.aborted) return;
+  snapRoads = decoded.flat();
+}
+
+async function ensureSnapRoadsForPath(latlngs, signal) {
+  const flat = Array.isArray(latlngs?.[0]?.[0]) ? latlngs.flat() : latlngs;
+  if (!Array.isArray(flat) || flat.length < 2) return;
+  let minLat = 90;
+  let maxLat = -90;
+  let minLng = 180;
+  let maxLng = -180;
+  for (const pt of flat) {
+    const lat = Array.isArray(pt) ? pt[0] : pt?.lat;
+    const lng = Array.isArray(pt) ? pt[1] : pt?.lng;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
+  }
+  if (!(minLat <= maxLat) || !(minLng <= maxLng)) return;
+  const bounds = L.latLngBounds([minLat, minLng], [maxLat, maxLng]).pad(0.03);
+  await ensureSnapRoadsForBounds(bounds, signal);
+}
+
+function trailSegmentsOf(path, breakOpts = {}) {
+  if (!Array.isArray(path) || !path.length) return [];
+  if (Array.isArray(path[0]) && Array.isArray(path[0][0])) {
+    return path.filter((seg) => Array.isArray(seg) && seg.length >= 2);
+  }
+  const limits = trailBreakLimits(breakOpts);
+  const split = splitLatLngsByGaps(path, limits.gapM, breakOpts);
+  return split.length ? split : path.length >= 2 ? [path] : [];
+}
+
+async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
+  if (!Array.isArray(latlngs) || latlngs.length < 2) return latlngs || [];
+  const coach = isCoachTrailOperator(breakOpts.operator) || !!breakOpts.coach;
+  const key = `${trailPathHash(latlngs)}|${coach ? "coach" : "bus"}|v5`;
+  if (trailAlignCache.has(key)) return trailAlignCache.get(key);
+  if (trailAlignPending.has(key)) return trailAlignPending.get(key);
+  const pending = (async () => {
+    try {
+      await ensureSnapRoadsForPath(latlngs, signal);
+      const flat = Array.isArray(latlngs?.[0]?.[0]) ? latlngs.flat() : latlngs;
+      let aligned = null;
+      let segs = [];
+      try {
+        if (coach) {
+          // Flix / NATX: route-stitch first so sparse motorway AVL stays on roads.
+          const thinned = thinTrailPoints(flat, 160);
+          aligned = await stitchTrailViaOsrmRoutes(
+            thinned.length >= 2 ? thinned : flat,
+            signal,
+            { ...breakOpts, coach: true },
+          );
+          segs = trailSegmentsOf(aligned, breakOpts);
+          if (!segs.length) {
+            aligned = await matchTrailViaOsrm(thinned.length >= 2 ? thinned : flat, signal, {
+              ...breakOpts,
+              coach: true,
+            });
+            segs = trailSegmentsOf(aligned, breakOpts);
+          }
+        } else {
+          aligned = await matchTrailViaOsrm(latlngs, signal, breakOpts);
+          segs = trailSegmentsOf(aligned, breakOpts);
+          if (!segs.length) {
+            aligned = await stitchTrailViaOsrmRoutes(latlngs, signal, breakOpts);
+            segs = trailSegmentsOf(aligned, breakOpts);
+          }
+        }
+      } catch {
+        segs = [];
+      }
+      if (!segs.length) {
+        // Local OFM snap — still roads, never raw GPS chords.
+        segs = trailSegmentsOf(alignTrailToRoadsLocal(latlngs, breakOpts), breakOpts);
+      } else {
+        segs = segs.map((seg) => dedupeNearTrailPoints(seg, 2)).filter((seg) => seg.length >= 2);
+      }
+      // Coaches: never paint raw GPS (cuts across fields/buildings). Prefer empty over off-road.
+      if (!segs.length) return [];
+      const result = segs.length === 1 ? segs[0] : segs;
+      trailAlignCache.set(key, result);
+      if (trailAlignCache.size > 48) {
+        trailAlignCache.delete(trailAlignCache.keys().next().value);
+      }
+      return result;
+    } catch {
+      /* keep empty — caller keeps previous road path / deferred arrows */
+    }
+    return [];
+  })();
+  trailAlignPending.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    trailAlignPending.delete(key);
+  }
 }
 
 async function ensureSnapRoads(signal) {
@@ -5511,6 +8916,9 @@ const fleetBrowser = fleetContentEl
         setAppTab("map");
         startRoutePlayback({ ...opts, showTail: true });
       },
+      onShowRouteTails: (opts) => {
+        showFleetRouteTails(opts);
+      },
       onUploadBusPhoto: async ({ file, reg, fleet, operator, uploaderName }) => {
         if (!requirePlus("bus-photo")) {
           throw new Error("Plus is required to submit bus photos");
@@ -5591,6 +8999,14 @@ document.getElementById("search-form").addEventListener("submit", async (event) 
 
 updateUkClock();
 setInterval(updateUkClock, 1000);
+refreshUkLiveBusCount({ force: true }).then(() => updateLiveBusCount());
+setInterval(() => {
+  refreshUkLiveBusCount().then(() => updateLiveBusCount());
+}, 30_000);
+refreshUkLiveBusCount({ force: true }).then(() => updateLiveBusCount());
+setInterval(() => {
+  refreshUkLiveBusCount().then(() => updateLiveBusCount());
+}, 30_000);
 
 map.whenReady(() => {
   map.invalidateSize();
@@ -5766,34 +9182,6 @@ function applyPlusEntitlements(on) {
   if (open) refreshPopup(open, { force: true });
 }
 
-const MAINTENANCE_START_MIN = 21 * 60 + 30; // 21:30 UK
-const MAINTENANCE_END_MIN = 22 * 60; // 22:00 UK
-
-function ukMinutesNow(date = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/London",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(date);
-  const hour = Number(parts.find((p) => p.type === "hour")?.value);
-  const minute = Number(parts.find((p) => p.type === "minute")?.value);
-  if (![hour, minute].every(Number.isFinite)) return null;
-  return hour * 60 + minute;
-}
-
-function isMaintenanceWindow(date = new Date()) {
-  const mins = ukMinutesNow(date);
-  if (mins == null) return false;
-  return mins >= MAINTENANCE_START_MIN && mins < MAINTENANCE_END_MIN;
-}
-
-function syncMaintenanceBanner() {
-  const el = document.getElementById("maintenance-banner");
-  if (!el) return;
-  el.hidden = !isMaintenanceWindow();
-}
-
 setupAuth({
   onChange: (user) => {
     syncPlusFromAccount(user);
@@ -5801,5 +9189,3 @@ setupAuth({
 });
 setupPlus({ onChange: applyPlusEntitlements });
 setupDonateBox();
-syncMaintenanceBanner();
-setInterval(syncMaintenanceBanner, 15_000);

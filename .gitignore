@@ -5,3 +5,7 @@ dist
 .env
 .env.*
 !.env.example
+data/trails/
+data/pg/
+data/pc-database.url
+scripts/_empty.bin

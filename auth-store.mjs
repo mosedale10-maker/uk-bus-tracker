@@ -19,6 +19,15 @@ export function hasDatabase() {
   return Boolean(String(process.env.DATABASE_URL || "").trim());
 }
 
+function dbSslOption() {
+  const url = String(process.env.DATABASE_URL || "");
+  if (process.env.DATABASE_SSL === "1") return { rejectUnauthorized: false };
+  if (url.includes("railway.internal")) return false;
+  // Public Railway / proxy URLs need SSL.
+  if (/rlwy\.net|railway\.app|proxy/i.test(url)) return { rejectUnauthorized: false };
+  return undefined;
+}
+
 export async function initAuthStore() {
   if (ready) return ready;
   ready = (async () => {
@@ -28,12 +37,7 @@ export async function initAuthStore() {
     }
     pool = new pg.Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl:
-        process.env.DATABASE_SSL === "1"
-          ? { rejectUnauthorized: false }
-          : process.env.DATABASE_URL?.includes("railway.internal")
-            ? false
-            : undefined,
+      ssl: dbSslOption(),
       max: 5,
     });
     await pool.query(`
@@ -54,9 +58,30 @@ export async function initAuthStore() {
     await pool.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS plus_cancelled BOOLEAN NOT NULL DEFAULT FALSE;
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS plus_purchases (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        email TEXT NOT NULL DEFAULT '',
+        provider TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        amount TEXT NOT NULL DEFAULT '',
+        currency TEXT NOT NULL DEFAULT 'GBP',
+        plus_until TIMESTAMPTZ NULL,
+        email_sent_at TIMESTAMPTZ NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (provider, external_id)
+      );
+      CREATE INDEX IF NOT EXISTS plus_purchases_user_idx ON plus_purchases (user_id, created_at DESC);
+    `);
     console.log("[auth] users table ready");
     return true;
-  })();
+  })().catch((error) => {
+    // Allow a later request to retry after disk / DB recovers.
+    ready = null;
+    pool = null;
+    throw error;
+  });
   return ready;
 }
 
@@ -228,6 +253,39 @@ export async function authenticateUser(email, password) {
   return mapUserRow(row);
 }
 
+/** Logged-in password change — requires the current password. */
+export async function changePassword(userId, currentPassword, newPassword) {
+  await initAuthStore();
+  if (!pool) throw Object.assign(new Error("Accounts are not available yet"), { status: 503 });
+  const id = Number(userId);
+  if (!Number.isFinite(id) || id <= 0) {
+    throw Object.assign(new Error("Not signed in"), { status: 401 });
+  }
+  if (String(newPassword || "").length < 8) {
+    throw Object.assign(new Error("New password must be at least 8 characters"), { status: 400 });
+  }
+  if (String(currentPassword || "") === String(newPassword || "")) {
+    throw Object.assign(new Error("New password must be different from the current one"), {
+      status: 400,
+    });
+  }
+  const result = await pool.query(
+    `SELECT id, email, plus, plus_until, plus_cancelled, password_hash FROM users WHERE id = $1`,
+    [id],
+  );
+  const row = result.rows[0];
+  if (!row) throw Object.assign(new Error("Account not found"), { status: 404 });
+  if (!(await verifyPassword(currentPassword, row.password_hash))) {
+    throw Object.assign(new Error("Current password is incorrect"), { status: 401 });
+  }
+  const passwordHash = await hashPassword(newPassword);
+  await pool.query(`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`, [
+    passwordHash,
+    id,
+  ]);
+  return mapUserRow(row);
+}
+
 export async function getUserById(id) {
   await initAuthStore();
   if (!pool || !id) return null;
@@ -236,6 +294,21 @@ export async function getUserById(id) {
     [id],
   );
   return mapUserRow(result.rows[0]);
+}
+
+/** Active Plus accounts (for receipt backfill / admin). */
+export async function listPlusUsers({ limit = 200 } = {}) {
+  await initAuthStore();
+  if (!pool) return [];
+  const result = await pool.query(
+    `SELECT id, email, plus, plus_until, plus_cancelled
+     FROM users
+     WHERE plus = TRUE OR (plus_until IS NOT NULL AND plus_until > NOW())
+     ORDER BY id ASC
+     LIMIT $1`,
+    [Math.min(500, Math.max(1, Number(limit) || 200))],
+  );
+  return result.rows.map(mapUserRow);
 }
 
 export async function setUserPlus(id, plus = true, { months = 1 } = {}) {
@@ -308,6 +381,56 @@ export async function grantPlusByEmail(email, { months = 1 } = {}) {
     throw Object.assign(new Error(`No account found for ${normalized}`), { status: 404 });
   }
   return setUserPlus(found.rows[0].id, true, { months });
+}
+
+/** Record a Plus payment; returns whether a thank-you email still needs sending. */
+export async function recordPlusPurchase({
+  userId,
+  email = "",
+  provider = "paypal",
+  externalId,
+  amount = "",
+  currency = "GBP",
+  plusUntil = null,
+} = {}) {
+  await initAuthStore();
+  if (!pool) return { shouldEmail: false, reason: "no_db" };
+  const providerKey = String(provider || "paypal").trim().toLowerCase() || "paypal";
+  const ext = String(externalId || "").trim();
+  if (!ext) return { shouldEmail: false, reason: "no_id" };
+  const result = await pool.query(
+    `INSERT INTO plus_purchases (user_id, email, provider, external_id, amount, currency, plus_until)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (provider, external_id) DO UPDATE
+       SET email = COALESCE(NULLIF(EXCLUDED.email, ''), plus_purchases.email),
+           plus_until = COALESCE(EXCLUDED.plus_until, plus_purchases.plus_until)
+     RETURNING id, email_sent_at`,
+    [
+      Number(userId) || 0,
+      String(email || "").trim().slice(0, 160),
+      providerKey,
+      ext.slice(0, 120),
+      String(amount || "").trim().slice(0, 20),
+      String(currency || "GBP").trim().slice(0, 8),
+      plusUntil || null,
+    ],
+  );
+  const row = result.rows[0];
+  return {
+    id: row?.id || null,
+    shouldEmail: Boolean(row && !row.email_sent_at),
+  };
+}
+
+export async function markPlusPurchaseEmailed(provider, externalId) {
+  await initAuthStore();
+  if (!pool) return;
+  await pool.query(
+    `UPDATE plus_purchases
+     SET email_sent_at = NOW()
+     WHERE provider = $1 AND external_id = $2 AND email_sent_at IS NULL`,
+    [String(provider || "").trim().toLowerCase(), String(externalId || "").trim()],
+  );
 }
 
 export async function userFromRequest(req) {

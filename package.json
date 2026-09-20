@@ -8,14 +8,17 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "node server.mjs",
-    "serve": "npm run build && npm start"
+    "serve": "npm run build && npm start",
+    "pc:postgres": "node scripts/pc-postgres.mjs",
+    "pc:site": "powershell -ExecutionPolicy Bypass -File scripts/start-all-on-pc.ps1"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5"
   },
   "dependencies": {
     "@mapbox/vector-tile": "^3.0.0",
     "compression": "^1.8.2",
+    "embedded-postgres": "^18.4.0-beta.17",
     "express": "^5.1.0",
     "http-proxy-middleware": "^3.0.5",
     "leaflet": "^1.9.4",
@@ -25,5 +28,9 @@
   },
   "devDependencies": {
     "vite": "^7.1.5"
+  },
+  "allowScripts": {
+    "@embedded-postgres/windows-x64@18.4.0-beta.17": true,
+    "esbuild@0.28.2": true
   }
 }

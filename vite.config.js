@@ -1,5 +1,7 @@
 import { defineConfig, loadEnv } from "vite";
 import { bodsOccupancyPlugin } from "./bods-occupancy.js";
+import { firstOccupancyPlugin } from "./first-occupancy.js";
+import { dgAtTimetablePlugin } from "./dg-at-timetable.js";
 
 function dgProxy() {
   return {
@@ -20,7 +22,7 @@ function dgProxy() {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   return {
-  plugins: [bodsOccupancyPlugin(env.BODS_API_KEY)],
+  plugins: [bodsOccupancyPlugin(env.BODS_API_KEY), firstOccupancyPlugin(), dgAtTimetablePlugin()],
   build: {
     target: "es2022",
     cssCodeSplit: true,
@@ -96,6 +98,12 @@ export default defineConfig(({ mode }) => {
         target: "https://tiles.openfreemap.org",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/ofm/, ""),
+        headers: { "User-Agent": "uk-bus-tracker/1.0 (local map app)" },
+      },
+      "/api/osrm-match": {
+        target: "https://router.project-osrm.org",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/osrm-match/, "/match/v1/driving"),
         headers: { "User-Agent": "uk-bus-tracker/1.0 (local map app)" },
       },
       "/api/first-next-bus": {
