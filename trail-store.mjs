@@ -10,7 +10,7 @@ import pg from "pg";
 export const TRAIL_KEEP_DAYS = 7;
 const MAX_BATCH = 250;
 const MAX_POINTS_PER_KEY = 4_000;
-const MAX_KEYS_PER_QUERY = 12;
+const MAX_KEYS_PER_QUERY = 24;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DIR = path.join(__dirname, "data", "trails");
@@ -18,7 +18,10 @@ const DEFAULT_DIR = path.join(__dirname, "data", "trails");
 let db = null;
 let ready = null;
 let lastPruneAt = 0;
+let lastWalCheckpointAt = 0;
+let lastWalWarnAt = 0;
 let backend = "none";
+const WAL_WARN_BYTES = 500 * 1024 * 1024; // 500MB — previously ballooned to ~244GB
 
 function trailDataDir() {
   return String(process.env.TRAIL_DATA_DIR || DEFAULT_DIR).trim() || DEFAULT_DIR;
@@ -42,9 +45,11 @@ function openSqlite(filePath) {
     const database = new DatabaseSync(filePath);
     database.exec("PRAGMA journal_mode = WAL;");
     database.exec("PRAGMA synchronous = NORMAL;");
+    // Fail fast on corrupt files so callers can recover instead of silent disable.
+    database.prepare("SELECT 1 FROM sqlite_master LIMIT 1").get();
     return { database, kind: "node:sqlite" };
-  } catch {
-    /* fall through */
+  } catch (error) {
+    console.warn("[trails] node:sqlite open failed:", error?.message || error);
   }
   try {
     const require = createRequire(import.meta.url);
@@ -52,8 +57,10 @@ function openSqlite(filePath) {
     const database = new Database(filePath);
     database.pragma("journal_mode = WAL");
     database.pragma("synchronous = NORMAL");
+    database.prepare("SELECT 1 FROM sqlite_master LIMIT 1").get();
     return { database, kind: "better-sqlite3" };
-  } catch {
+  } catch (error) {
+    console.warn("[trails] better-sqlite3 open failed:", error?.message || error);
     return null;
   }
 }
@@ -111,7 +118,8 @@ export async function initTrailStore() {
         trip_id TEXT NOT NULL DEFAULT '',
         line TEXT NOT NULL DEFAULT '',
         operator TEXT NOT NULL DEFAULT '',
-        direction TEXT NOT NULL DEFAULT ''
+        direction TEXT NOT NULL DEFAULT '',
+        destination TEXT NOT NULL DEFAULT ''
       );
       CREATE INDEX IF NOT EXISTS vehicle_trail_points_key_t_idx
         ON vehicle_trail_points (trail_key, t DESC);
@@ -127,6 +135,11 @@ export async function initTrailStore() {
         detail TEXT NOT NULL DEFAULT ''
       );
     `);
+    try {
+      sqlExec(`ALTER TABLE vehicle_trail_points ADD COLUMN destination TEXT NOT NULL DEFAULT ''`);
+    } catch {
+      /* column already exists */
+    }
     console.log(`[trails] filesystem store ready (${backend}) path=${filePath}`);
     return true;
   })().catch((error) => {
@@ -174,16 +187,63 @@ function normalizePoint(raw) {
     heading: Number.isFinite(heading) ? heading : null,
     journeyId: String(raw?.journeyId || "").slice(0, 80),
     tripId: String(raw?.tripId || "").slice(0, 80),
-    line: String(raw?.line || "").slice(0, 40),
+    line: String(raw?.line || "")
+      .trim()
+      .toUpperCase()
+      .slice(0, 40),
     operator: String(raw?.operator || "")
       .trim()
       .toUpperCase()
       .slice(0, 16),
     direction: normalizeDirection(raw?.direction || raw?.directionRef),
+    destination: String(raw?.destination || raw?.dest || "")
+      .trim()
+      .slice(0, 80),
   };
 }
 
-export async function pruneOldTrailPoints({ force = false, days = TRAIL_KEEP_DAYS } = {}) {
+function walFilePath() {
+  return path.join(trailDataDir(), "trails.sqlite-wal");
+}
+
+function warnIfWalLarge() {
+  try {
+    const st = fs.statSync(walFilePath());
+    if (st.size < WAL_WARN_BYTES) return;
+    const now = Date.now();
+    if (now - lastWalWarnAt < 10 * 60_000) return;
+    lastWalWarnAt = now;
+    const mb = (st.size / (1024 * 1024)).toFixed(1);
+    console.warn(
+      `[trails] WAL file is ${mb}MB (>500MB) — checkpoint may be stuck; disk risk`,
+    );
+  } catch {
+    /* no wal file yet */
+  }
+}
+
+function checkpointWal({ force = false } = {}) {
+  if (!db) return;
+  const now = Date.now();
+  // Truncate often — without this the .sqlite-wal can grow without bound on long-lived PC hosts.
+  if (!force && now - lastWalCheckpointAt < 5 * 60_000) return;
+  lastWalCheckpointAt = now;
+  try {
+    // PASSIVE returns immediately if writers/readers hold the WAL; TRUNCATE can stall the
+    // whole Node process for many seconds on a busy PC host.
+    const mode = force ? "TRUNCATE" : "PASSIVE";
+    if (backend === "node:sqlite") {
+      db.prepare(`PRAGMA wal_checkpoint(${mode})`).all();
+    } else {
+      db.pragma(`wal_checkpoint(${mode})`);
+    }
+  } catch (error) {
+    console.warn("[trails] wal_checkpoint failed", error?.message || error);
+  }
+  warnIfWalLarge();
+}
+
+export async function pruneOldTrailPoints({ force = false, days = TRAIL_KEEP_DAYS, vacuum = false } = {}) {
   await initTrailStore();
   if (!db) return 0;
   const now = Date.now();
@@ -191,13 +251,22 @@ export async function pruneOldTrailPoints({ force = false, days = TRAIL_KEEP_DAY
   lastPruneAt = now;
   const keepDays = Math.min(TRAIL_KEEP_DAYS, Math.max(1, Number(days) || TRAIL_KEEP_DAYS));
   const cutoff = now - keepDays * 86400000;
+  // Yield so a large DELETE does not stall HTTP for seconds on the PC host.
+  await new Promise((r) => setImmediate(r));
   const result = sqlRun(`DELETE FROM vehicle_trail_points WHERE t < ?`, [cutoff]);
   const n = Number(result?.changes || 0);
   if (n) console.log(`[trails] pruned ${n} points older than ${keepDays}d`);
-  try {
-    sqlExec("VACUUM");
-  } catch {
-    /* ignore */
+  // Prefer PASSIVE after prune so HTTP stays responsive; hourly force truncate is enough.
+  checkpointWal({ force: false });
+  // VACUUM rewrites the whole DB synchronously and freezes the event loop —
+  // never run it on the request/recorder path. Opt-in for rare admin/maintenance.
+  if (vacuum) {
+    await new Promise((r) => setImmediate(r));
+    try {
+      sqlExec("VACUUM");
+    } catch {
+      /* ignore */
+    }
   }
   return n;
 }
@@ -232,10 +301,24 @@ export async function reclaimTrailDisk({ truncate = true } = {}) {
       } catch {
         /* ignore */
       }
+      // Skip VACUUM when nothing large remains — full VACUUM stalls Plus/auth under load.
+      let needsVacuum = false;
       try {
-        await client.query("VACUUM");
-      } catch (error) {
-        console.warn("[trails] postgres vacuum skipped", error?.message || error);
+        const left = await client.query(`
+          SELECT to_regclass('public.vehicle_trail_points') AS trails,
+                 pg_database_size(current_database()) AS bytes
+        `);
+        const row = left.rows[0] || {};
+        needsVacuum = Boolean(row.trails) || Number(row.bytes) > 40 * 1024 * 1024;
+      } catch {
+        needsVacuum = false;
+      }
+      if (needsVacuum) {
+        try {
+          await client.query("VACUUM");
+        } catch (error) {
+          console.warn("[trails] postgres vacuum skipped", error?.message || error);
+        }
       }
       let after = { db_size: "unknown" };
       try {
@@ -276,8 +359,8 @@ export async function appendTrailPoints(trailKey, points) {
 
   const insert = db.prepare(`
     INSERT INTO vehicle_trail_points
-      (trail_key, t, lat, lng, heading, journey_id, trip_id, line, operator, direction)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (trail_key, t, lat, lng, heading, journey_id, trip_id, line, operator, direction, destination)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   if (backend === "node:sqlite") {
@@ -295,6 +378,7 @@ export async function appendTrailPoints(trailKey, points) {
           p.line,
           p.operator,
           p.direction,
+          p.destination,
         );
       }
       db.exec("COMMIT");
@@ -320,6 +404,7 @@ export async function appendTrailPoints(trailKey, points) {
           p.line,
           p.operator,
           p.direction,
+          p.destination,
         );
       }
     });
@@ -337,7 +422,9 @@ export async function appendTrailPoints(trailKey, points) {
     [key, MAX_POINTS_PER_KEY],
   );
 
-  pruneOldTrailPoints().catch(() => {});
+  // Do not prune/VACUUM here — that froze HTTP (HTML/API) for seconds on every batch.
+  // Hourly poller handles retention; checkpoint is rate-limited inside checkpointWal.
+  checkpointWal();
   return { ok: true, inserted: list.length };
 }
 
@@ -352,6 +439,7 @@ function rowToPoint(row) {
     line: row.line || "",
     operator: row.operator || "",
     direction: row.direction || "",
+    destination: row.destination || "",
   };
 }
 
@@ -377,7 +465,7 @@ export async function getTrailPoints(
   }
   params.push(Math.min(MAX_POINTS_PER_KEY, Math.max(50, Number(limit) || MAX_POINTS_PER_KEY)));
   const rows = sqlAll(
-    `SELECT t, lat, lng, heading, journey_id, trip_id, line, operator, direction
+    `SELECT t, lat, lng, heading, journey_id, trip_id, line, operator, direction, destination
      FROM vehicle_trail_points
      WHERE ${where}
      ORDER BY t ASC
@@ -423,7 +511,7 @@ export async function listTrailKeysForLines(
     `SELECT trail_key, MAX(line) AS line, MAX(operator) AS operator,
             COUNT(*) AS n, MAX(t) AS last_t
      FROM vehicle_trail_points
-     WHERE UPPER(TRIM(line)) IN (${placeholders})
+     WHERE line IN (${placeholders})
        AND t >= ?
      GROUP BY trail_key
      HAVING COUNT(*) >= 2
@@ -462,7 +550,7 @@ export async function listTrailKeysForOperators(
     `SELECT trail_key, MAX(line) AS line, MAX(operator) AS operator,
             COUNT(*) AS n, MAX(t) AS last_t
      FROM vehicle_trail_points
-     WHERE UPPER(TRIM(operator)) IN (${placeholders})
+     WHERE operator IN (${placeholders})
        AND t >= ?
      GROUP BY trail_key
      HAVING COUNT(*) >= 2
@@ -477,6 +565,231 @@ export async function listTrailKeysForOperators(
     points: Number(row.n) || 0,
     lastT: Number(row.last_t) || 0,
   }));
+}
+
+const DEAD_RUN_OPS = new Set(["FPOT", "DAGC"]);
+const DEAD_RUN_GAP_MS = 20 * 60_000;
+
+function isDeadRunLineSql(line) {
+  const raw = String(line || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+  if (!raw) return false;
+  if (raw === "DR" || raw === "DEADRUN" || raw === "DEAD RUN") return true;
+  return /\bDEAD\s*RUN\b/.test(raw);
+}
+
+function isBaseVehicleTrailKey(key) {
+  const k = String(key || "").trim();
+  if (!k) return false;
+  if (
+    k.startsWith("jny:") ||
+    k.startsWith("trip:") ||
+    k.startsWith("run:") ||
+    k.startsWith("at:")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function ukDateKeyFromMs(ms) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(ms));
+}
+
+function identityFromDeadRunTrailKey(key, operator = "") {
+  const raw = String(key || "").trim();
+  const op = String(operator || "")
+    .trim()
+    .toUpperCase();
+  if (raw.startsWith("reg:")) {
+    const reg = raw.slice(4).replace(/\s+/g, "").toUpperCase();
+    const regLabel = reg.replace(/([A-Z]{2}\d{2})([A-Z]{3})/i, "$1 $2");
+    return { trailKey: raw, vehicleId: "", fleet: "", reg, regLabel };
+  }
+  if (/^\d+$/.test(raw)) {
+    return { trailKey: raw, vehicleId: raw, fleet: "", reg: "", regLabel: "" };
+  }
+  const bods = raw.match(/^bods-([A-Z0-9]+)-(.+)$/i);
+  if (bods) {
+    let body = String(bods[2] || "")
+      .replace(/_/g, " ")
+      .trim();
+    const plate = body.match(/\b([A-Z]{1,3}\d{1,2}\s*[A-Z]{3})\b/i);
+    if (plate) {
+      const regLabel = plate[1].replace(/\s+/g, " ").toUpperCase();
+      const reg = regLabel.replace(/\s+/g, "");
+      return { trailKey: raw, vehicleId: "", fleet: "", reg, regLabel };
+    }
+    const fleetOnly = body.match(/^(\d{1,5})$/);
+    if (fleetOnly) {
+      return {
+        trailKey: raw,
+        vehicleId: "",
+        fleet: fleetOnly[1],
+        reg: "",
+        regLabel: "",
+      };
+    }
+    return {
+      trailKey: raw,
+      vehicleId: "",
+      fleet: "",
+      reg: "",
+      regLabel: body || "",
+    };
+  }
+  if (raw.startsWith("staff-")) {
+    const ref = raw.slice("staff-".length);
+    const plate = ref.match(/\b([A-Z]{1,3}\d{1,2}\s*[A-Z]{3})\b/i);
+    if (plate) {
+      const regLabel = plate[1].replace(/\s+/g, " ").toUpperCase();
+      return {
+        trailKey: raw,
+        vehicleId: "",
+        fleet: "",
+        reg: regLabel.replace(/\s+/g, ""),
+        regLabel,
+      };
+    }
+    return { trailKey: raw, vehicleId: "", fleet: ref, reg: "", regLabel: "" };
+  }
+  return {
+    trailKey: raw,
+    vehicleId: "",
+    fleet: "",
+    reg: "",
+    regLabel: op ? "" : raw.slice(0, 24),
+  };
+}
+
+function operatorDisplayName(op) {
+  if (op === "FPOT") return "First Potteries";
+  if (op === "DAGC") return "D & G Bus";
+  return op || "Operator";
+}
+
+/**
+ * Continuous Ticketer dead-run segments (FPOT / DAGC) from the keep window.
+ * One row per gap/journey-split stint on a base vehicle trail key.
+ */
+export async function listDeadRunSegments({
+  days = TRAIL_KEEP_DAYS,
+  limit = 60,
+  operators = ["FPOT", "DAGC"],
+} = {}) {
+  await initTrailStore();
+  if (!db) return [];
+  const keepDays = Math.min(TRAIL_KEEP_DAYS, Math.max(1, Number(days) || TRAIL_KEEP_DAYS));
+  const cutoff = Date.now() - keepDays * 86400000;
+  const cap = Math.min(120, Math.max(4, Number(limit) || 60));
+  const ops = [
+    ...new Set(
+      (operators || [])
+        .map((o) => String(o || "").trim().toUpperCase())
+        .filter((o) => DEAD_RUN_OPS.has(o)),
+    ),
+  ];
+  if (!ops.length) return [];
+  const placeholders = ops.map(() => "?").join(",");
+  // Broad pull then filter in JS — Ticketer uses Dead_Run / DEAD_RUN / DR.
+  const rows = sqlAll(
+    `SELECT trail_key, t, journey_id, line, operator, destination
+     FROM vehicle_trail_points
+     WHERE t >= ?
+       AND operator IN (${placeholders})
+       AND (
+         line IN ('DEADRUN', 'DR', 'DEAD RUN')
+         OR line LIKE '%DEAD%RUN%'
+       )
+     ORDER BY trail_key ASC, t ASC`,
+    [cutoff, ...ops],
+  );
+  const byKey = new Map();
+  for (const row of rows) {
+    const key = String(row.trail_key || "").trim();
+    if (!isBaseVehicleTrailKey(key)) continue;
+    if (!isDeadRunLineSql(row.line)) continue;
+    const list = byKey.get(key) || [];
+    list.push(row);
+    byKey.set(key, list);
+  }
+  const segments = [];
+  for (const [key, pts] of byKey) {
+    let cur = null;
+    for (const p of pts) {
+      const t = Number(p.t);
+      if (!Number.isFinite(t)) continue;
+      const op = String(p.operator || "")
+        .trim()
+        .toUpperCase();
+      const jid = String(p.journey_id || "").trim();
+      const dest = String(p.destination || "").trim();
+      const gap = cur ? t - cur.lastT : Infinity;
+      const journeyChanged = Boolean(cur?.journeyId && jid && cur.journeyId !== jid);
+      if (!cur || journeyChanged || gap > DEAD_RUN_GAP_MS) {
+        if (cur && cur.n >= 2) segments.push(cur);
+        cur = {
+          trailKey: key,
+          operator: op,
+          journeyId: jid,
+          dest: dest || "",
+          startT: t,
+          lastT: t,
+          n: 1,
+        };
+      } else {
+        cur.lastT = t;
+        cur.n += 1;
+        if (jid && !cur.journeyId) cur.journeyId = jid;
+        if (dest) cur.dest = dest;
+        if (op && !cur.operator) cur.operator = op;
+      }
+    }
+    if (cur && cur.n >= 2) segments.push(cur);
+  }
+  segments.sort((a, b) => b.startT - a.startT);
+  const seen = new Set();
+  const out = [];
+  for (const seg of segments) {
+    if (out.length >= cap) break;
+    const id = `dr-${seg.trailKey}-${seg.startT}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const ident = identityFromDeadRunTrailKey(seg.trailKey, seg.operator);
+    const destRaw = String(seg.dest || "").trim();
+    const dest =
+      destRaw && !/^dead\s*run$/i.test(destRaw.replace(/[_-]+/g, " "))
+        ? destRaw
+        : "Dead run";
+    out.push({
+      id,
+      trailKey: ident.trailKey || seg.trailKey,
+      vehicleId: ident.vehicleId || "",
+      operator: seg.operator,
+      operatorName: operatorDisplayName(seg.operator),
+      fleet: ident.fleet || "",
+      reg: ident.reg || "",
+      regLabel: ident.regLabel || "",
+      line: "DEAD_RUN",
+      dest,
+      journeyId: seg.journeyId || "",
+      datetime: new Date(seg.startT).toISOString(),
+      endDatetime: new Date(seg.lastT).toISOString(),
+      date: ukDateKeyFromMs(seg.startT),
+      points: seg.n,
+      startT: seg.startT,
+      lastT: seg.lastT,
+    });
+  }
+  return out;
 }
 
 export function startTrailPrunePoller(intervalMs = 60 * 60_000) {

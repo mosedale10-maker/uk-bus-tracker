@@ -121,20 +121,35 @@ async function submitAuth(event) {
   const password = String(modalEl?.querySelector("#auth-password")?.value || "");
   const mode = modalEl?.dataset.mode === "signup" ? "signup" : "login";
   const btn = modalEl?.querySelector("[data-auth-submit]");
-  if (btn) btn.disabled = true;
+  const idleLabel = btn?.textContent || (mode === "signup" ? "Sign up" : "Log in");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = mode === "signup" ? "Creating account…" : "Signing in…";
+  }
   try {
     const data = await api(mode === "signup" ? "/api/auth/signup" : "/api/auth/login", {
       method: "POST",
       body: { email, password },
     });
+    // Prefer login response — do not wait on /api/auth/me before closing the modal.
     currentUser = data.user || null;
     syncAccountUi();
-    onAuthChange?.(currentUser);
     closeAuthModal();
+    // Plus sync can run after paint; keep it off the submit critical path.
+    queueMicrotask(() => {
+      try {
+        onAuthChange?.(currentUser);
+      } catch {
+        /* ignore */
+      }
+    });
   } catch (error) {
     showAuthError(error.message || "Could not continue");
   } finally {
-    if (btn) btn.disabled = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = idleLabel;
+    }
   }
 }
 
@@ -231,7 +246,15 @@ export function setupAuth({ onChange } = {}) {
     }
   });
 
-  return refreshSession();
+  // Defer /api/auth/me so it does not compete with the first vehicles poll.
+  const schedule = (fn) => {
+    if (typeof requestIdleCallback === "function") requestIdleCallback(fn, { timeout: 3500 });
+    else setTimeout(fn, 1200);
+  };
+  schedule(() => {
+    refreshSession().catch(() => {});
+  });
+  return Promise.resolve(null);
 }
 
 export function authStatusHtml() {

@@ -1,0 +1,49 @@
+{
+  "object": "domain",
+  "id": "cbbc9857-2ade-4505-9332-365ddcd84d56",
+  "name": "owenstream.co.uk",
+  "created_at": "2026-09-19 17:03:55.220248+00",
+  "status": "verified",
+  "capabilities": {
+    "sending": "enabled",
+    "receiving": "disabled"
+  },
+  "records": [
+    {
+      "record": "DKIM",
+      "name": "resend._domainkey",
+      "value": "p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDCELSpq9pMETIz7ydqTdFUi9M0UOOi0rN2YlDAcxCdEYUP8XhwiDkGKQo559xoOeKa5HutkJOTYz6UJbUk98f92GjbDsy3ssPbMMNeOe7RJiLVa05uCQnxQuABEvZuMcsn9Dov3hVjyy+oJ58DN6oxXAkNoepPAKUQF0PXmwvT+wIDAQAB",
+      "type": "TXT",
+      "status": "verified",
+      "ttl": "Auto"
+    },
+    {
+      "record": "SPF",
+      "name": "send",
+      "type": "MX",
+      "ttl": "Auto",
+      "status": "verified",
+      "value": "feedback-smtp.us-east-1.amazonses.com",
+      "priority": 10
+    },
+    {
+      "record": "SPF",
+      "name": "send",
+      "value": "v=spf1 include:amazonses.com ~all",
+      "type": "TXT",
+      "ttl": "Auto",
+      "status": "verified"
+    },
+    {
+      "record": "SPF",
+      "name": "rsend",
+      "value": "send.forge.rmta.net",
+      "type": "CNAME",
+      "status": "verified",
+      "ttl": "Auto"
+    }
+  ],
+  "region": "us-east-1",
+  "open_tracking": false,
+  "click_tracking": false
+}

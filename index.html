@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en-GB">
   <head>
     <meta charset="UTF-8" />
@@ -12,6 +12,8 @@
     <meta name="google-site-verification" content="peWrrmLki3FHbG9VWWBpd09GEJ1D1MA8Cc_ka4m0F0w" />
     <meta name="theme-color" content="#0b1f33" />
     <link rel="canonical" href="https://ukbustracker.up.railway.app/" />
+    <link rel="icon" type="image/jpeg" href="/logos/ukbustracker-logo.jpg" />
+    <link rel="apple-touch-icon" href="/logos/ukbustracker-logo.jpg" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="UK Bus Tracker" />
     <meta property="og:title" content="UK Bus Tracker — Live bus map across Britain" />
@@ -20,6 +22,7 @@
       content="Free live UK bus tracker. See buses on a map in real time, search by place, postcode or registration."
     />
     <meta property="og:url" content="https://ukbustracker.up.railway.app/" />
+    <meta property="og:image" content="https://ukbustracker.co.uk/logos/ukbustracker-logo.jpg" />
     <meta property="og:locale" content="en_GB" />
     <meta name="twitter:card" content="summary" />
     <meta name="twitter:title" content="UK Bus Tracker — Live bus map across Britain" />
@@ -47,9 +50,17 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
       rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Sora:wght@600;700;800&display=swap"
+      media="print"
+      onload="this.media='all'"
     />
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Sora:wght@600;700;800&display=swap"
+      />
+    </noscript>
   </head>
   <body>
     <noscript>
@@ -59,12 +70,40 @@
       </p>
     </noscript>
     <div id="app">
+      <aside id="site-moved-banner" class="site-moved-banner" hidden role="region" aria-label="Site moved">
+        <div class="site-moved-banner-inner">
+          <p>
+            <strong>We’ve moved.</strong>
+            This Railway address shuts down on <strong>25 September at 3pm UK time</strong> —
+            head to the new site
+            <a href="https://ukbustracker.co.uk/">https://ukbustracker.co.uk</a>
+            (same tracker, now running on the owner’s PC).
+          </p>
+          <a class="site-moved-banner-go" href="https://ukbustracker.co.uk/">Go to new site</a>
+        </div>
+      </aside>
+      <aside id="connection-issues-banner" class="connection-issues-banner" hidden role="status" aria-live="polite">
+        <div class="connection-issues-banner-inner">
+          <p><strong>Connection issues.</strong> We’re having trouble reaching the live map host. Retrying…</p>
+        </div>
+      </aside>
+      <aside id="background-work-notice" class="background-work-notice" role="status" aria-live="polite">
+        <p><strong>Background work in progress.</strong> Some live data may be briefly delayed while we make updates.</p>
+        <button type="button" id="background-work-close" aria-label="Close background work notice">Close</button>
+      </aside>
       <header class="topbar">
-        <nav class="app-tabs" aria-label="Main">
-          <button type="button" class="app-tab is-on" data-tab="map">Map</button>
-          <button type="button" class="app-tab" data-tab="fleet">Fleet</button>
-        </nav>
-        <form id="search-form" class="search">
+        <a class="site-brand" href="/" data-nav="home" aria-label="UK Bus Tracker home">
+          <img
+            class="site-brand-logo"
+            src="/logos/ukbustracker-logo.jpg"
+            alt=""
+            width="44"
+            height="44"
+            decoding="async"
+          />
+          <span class="site-brand-text">UK Bus Tracker</span>
+        </a>
+        <form id="search-form" class="search" hidden>
           <label class="sr-only" for="query">Search place, postcode or registration</label>
           <input
             id="query"
@@ -72,48 +111,157 @@
             type="search"
             placeholder="Place, postcode or reg"
             autocomplete="off"
+            enterkeyhint="search"
           />
           <button type="submit">Search</button>
         </form>
-        <label class="announce-toggle">
-          <input id="announce-toggle" type="checkbox" />
-          <span>Announcements <span class="plus-tag" title="Plus feature">Plus</span></span>
-        </label>
-        <label class="announce-toggle">
-          <input id="stops-toggle" type="checkbox" />
-          <span>Stops</span>
-        </label>
-        <label class="announce-toggle">
-          <input id="stop-board-toggle" type="checkbox" />
-          <span>Stop board <span class="plus-tag" title="Plus feature">Plus</span></span>
-        </label>
-        <button type="button" id="account-btn" class="account-btn">Account</button>
-        <button type="button" id="plus-btn" class="plus-btn" aria-pressed="false">Go Plus</button>
-        <button type="button" id="alerts-btn" class="alerts-btn" aria-pressed="false" aria-controls="alerts-panel">
-          Alerts
-          <span id="alerts-badge" class="alerts-badge" hidden>0</span>
-        </button>
+        <div class="topbar-end">
+          <div class="uk-clock-stack" aria-live="polite">
+            <time id="uk-clock" datetime="">
+              <span id="uk-clock-date" class="uk-clock-date"></span>
+              <span id="uk-clock-time" class="uk-clock-time"></span>
+            </time>
+          </div>
+          <button
+            type="button"
+            id="more-btn"
+            class="more-btn"
+            aria-expanded="false"
+            aria-controls="topbar-tools"
+          >
+            Menu
+          </button>
+        </div>
+        <div id="topbar-tools" class="topbar-tools" hidden>
+          <nav class="menu-nav" aria-label="Go to">
+            <button type="button" class="menu-nav-btn" data-tab="home">Home</button>
+            <button type="button" class="menu-nav-btn" data-tab="map">Map</button>
+            <button type="button" class="menu-nav-btn" data-tab="fleet">Fleet</button>
+            <button type="button" class="menu-nav-btn" data-tab="about">About</button>
+          </nav>
+          <label class="announce-toggle">
+            <input id="announce-toggle" type="checkbox" />
+            <span>Announcements <span class="plus-tag" title="Plus feature">Plus</span></span>
+          </label>
+          <label class="announce-toggle">
+            <input id="stops-toggle" type="checkbox" />
+            <span>Stops</span>
+          </label>
+          <label class="announce-toggle">
+            <input id="stop-board-toggle" type="checkbox" />
+            <span>Stop board <span class="plus-tag" title="Plus feature">Plus</span></span>
+          </label>
+          <button type="button" id="account-btn" class="account-btn">Account</button>
+          <button type="button" id="plus-btn" class="plus-btn" aria-pressed="false">Go Plus</button>
+          <button type="button" id="alerts-btn" class="alerts-btn" aria-pressed="false" aria-controls="alerts-panel">
+            Alerts
+            <span id="alerts-badge" class="alerts-badge" hidden>0</span>
+          </button>
+        </div>
         <button type="button" id="follow-chip" class="follow-chip" hidden></button>
         <div id="playback-bar" class="playback-bar" hidden>
           <span id="playback-label" class="playback-label"></span>
-          <button type="button" id="playback-stop" class="playback-btn">Clear</button>
-        </div>
-        <div class="uk-clock-stack">
-          <time id="uk-clock" datetime="" aria-live="polite"></time>
-          <p id="live-bus-count" class="live-bus-count" aria-live="polite"></p>
+          <button type="button" id="playback-replay" class="playback-btn" hidden title="Replay the recorded GPS pings">▶ Replay</button>
+          <input type="range" id="playback-scrub" class="playback-scrub" min="0" max="1000" value="0" hidden aria-label="Replay position" />
+          <span id="playback-clock" class="playback-clock" hidden></span>
+          <button type="button" id="playback-speed" class="playback-btn" hidden title="Replay speed">×60</button>
+          <button type="button" id="playback-stop" class="playback-btn">Close tail</button>
         </div>
         <p id="message" class="message" hidden></p>
       </header>
-      <main class="map-wrap" data-view="map">
+      <section id="home-screen" class="home-screen" aria-label="Home">
+        <div class="home-atmosphere" aria-hidden="true"></div>
+        <div class="home-inner">
+          <img
+            class="home-logo"
+            src="/logos/ukbustracker-logo.jpg"
+            alt=""
+            width="72"
+            height="72"
+            decoding="async"
+          />
+          <p class="home-brand">UK Bus Tracker</p>
+          <p class="home-lead">Live buses across Britain — map, fleet and stop boards in one place.</p>
+          <p id="home-live-count" class="home-live-count" aria-live="polite">Counting UK buses…</p>
+          <form id="home-search-form" class="home-search">
+            <label class="sr-only" for="home-query">Search place, postcode or registration</label>
+            <input
+              id="home-query"
+              name="home-query"
+              type="search"
+              placeholder="Place, postcode or bus reg"
+              autocomplete="off"
+              enterkeyhint="search"
+            />
+            <button type="submit">Search</button>
+          </form>
+          <div class="home-actions">
+            <button type="button" class="home-action home-action-map" data-tab="map">Open live map</button>
+            <button type="button" class="home-action home-action-fleet" data-tab="fleet">Browse fleet</button>
+          </div>
+          <section class="home-explore" aria-labelledby="home-explore-title">
+            <h2 id="home-explore-title" class="home-explore-title">Explore by area</h2>
+            <p class="home-explore-lead">Pick a nation or region to open the live map there.</p>
+            <div
+              id="home-nation-filters"
+              class="home-nation-filters"
+              role="tablist"
+              aria-label="Filter areas by nation"
+            ></div>
+            <div id="home-region-grid" class="home-region-grid" role="list"></div>
+          </section>
+        </div>
+      </section>
+      <main class="map-wrap" data-view="map" hidden>
+        <aside id="journey-panel" class="journey-panel" hidden aria-label="Selected bus or journey">
+          <header class="journey-panel-head">
+            <p id="journey-panel-crumb" class="journey-panel-crumb"></p>
+            <button type="button" id="journey-panel-close" class="journey-panel-close" aria-label="Close panel">×</button>
+          </header>
+          <div id="journey-panel-detail" class="journey-panel-detail"></div>
+          <section id="journey-panel-timetable" class="journey-panel-timetable" hidden>
+            <button
+              type="button"
+              id="journey-panel-timetable-toggle"
+              class="journey-panel-timetable-toggle"
+              aria-expanded="true"
+              aria-controls="journey-panel-timetable-body"
+            >
+              <span id="journey-panel-timetable-label" class="journey-panel-timetable-label">Route timetable</span>
+              <span class="journey-panel-timetable-hint" aria-hidden="true">Hide</span>
+              <span class="journey-panel-timetable-chevron" aria-hidden="true"></span>
+            </button>
+            <div id="journey-panel-timetable-body" class="journey-panel-timetable-body">
+              <div id="journey-panel-cols" class="journey-panel-cols" hidden aria-hidden="true">
+                <span></span>
+                <span>Scheduled</span>
+                <span>Actual</span>
+              </div>
+              <div id="journey-panel-stops" class="journey-panel-stops"></div>
+            </div>
+          </section>
+          <footer class="journey-panel-foot">
+            <p id="journey-panel-meta" class="journey-panel-meta"></p>
+          </footer>
+        </aside>
         <div id="map"></div>
+        <button type="button" id="tail-close" class="tail-close-chip" hidden>Close tail</button>
         <aside id="map-welcome" class="map-welcome" hidden>
           <button type="button" id="map-welcome-close" class="map-welcome-close" aria-label="Dismiss">×</button>
+          <img
+            class="map-welcome-logo"
+            src="/logos/ukbustracker-logo.jpg"
+            alt=""
+            width="88"
+            height="88"
+            decoding="async"
+          />
           <p class="map-welcome-brand">UK Bus Tracker</p>
           <p class="map-welcome-lead">Live buses across Britain</p>
           <ol class="map-welcome-steps">
             <li>Search a place, postcode or reg</li>
             <li>Zoom into a town to load buses</li>
-            <li>Tap a bus for details and route</li>
+            <li>Tap a bus for details</li>
           </ol>
           <button type="button" id="map-welcome-gotit" class="map-welcome-gotit">Got it</button>
         </aside>
@@ -171,7 +319,17 @@
               />
               <button type="submit">Routes</button>
             </form>
-            <p class="fleet-scope">Staffs companies · UK-wide reg · route history</p>
+            <form id="fleet-vehicle-form" class="fleet-vehicle-form">
+              <label class="sr-only" for="fleet-vehicle-query">Add vehicle registration</label>
+              <input
+                id="fleet-vehicle-query"
+                type="search"
+                placeholder="Add vehicle reg e.g. YX23 ABC"
+                autocomplete="off"
+              />
+              <button type="submit">Add</button>
+            </form>
+            <p class="fleet-scope">Staffs companies · UK-wide reg · saved buses · route history</p>
           </div>
           <div id="fleet-content" class="fleet-content"></div>
           <nav class="fleet-bottom-tabs" aria-label="Fleet sections">
@@ -179,19 +337,6 @@
             <button type="button" class="fleet-bottom-tab" data-fleet-tab="private-hire">Private hire</button>
           </nav>
         </section>
-        <aside id="donate-box" class="donate-box" aria-label="Donate">
-          <button type="button" id="donate-close" class="donate-close" aria-label="Dismiss donation box">×</button>
-          <p class="donate-kicker">Support the tracker</p>
-          <p class="donate-title">Buy me a coffee</p>
-          <p class="donate-lead">Keeps the map running and updated. Thanks.</p>
-          <div class="donate-amounts" role="group" aria-label="Donation amount">
-            <a class="donate-amount" data-amount="3" href="#" target="_blank" rel="noopener noreferrer">£3</a>
-            <a class="donate-amount" data-amount="5" href="#" target="_blank" rel="noopener noreferrer">£5</a>
-            <a class="donate-amount" data-amount="10" href="#" target="_blank" rel="noopener noreferrer">£10</a>
-          </div>
-          <a id="donate-link" class="donate-btn" href="#" target="_blank" rel="noopener noreferrer">Donate</a>
-          <p id="donate-hint" class="donate-hint" hidden>Set <code>VITE_DONATE_URL</code> in <code>.env</code> to your PayPal / Ko-fi link.</p>
-        </aside>
         <aside id="stop-board" class="stop-board" hidden aria-label="Virtual bus stop display">
           <div class="stop-board-shell">
             <div class="stop-board-hood" aria-hidden="true"></div>
@@ -236,6 +381,63 @@
         </aside>
       </main>
     </div>
+    <section id="about-screen" class="about-screen" aria-label="About" hidden>
+      <div class="about-inner">
+        <img
+          class="about-logo"
+          src="/logos/ukbustracker-logo.jpg"
+          alt=""
+          width="64"
+          height="64"
+          decoding="async"
+        />
+        <h1 class="about-title">UK Bus Tracker</h1>
+        <p class="about-lead">Free, live bus tracking across Britain — map, fleet and stop boards in one place.</p>
+
+        <section class="about-section">
+          <h2>What is this?</h2>
+          <p>UK Bus Tracker shows real-time positions of buses across the United Kingdom. Data comes from national and regional AVL (Automatic Vehicle Location) feeds, refreshed every few seconds.</p>
+        </section>
+
+        <section class="about-section">
+          <h2>How to use it</h2>
+          <ol class="about-steps">
+            <li><strong>Search</strong> — type a town, postcode or bus registration in the search box.</li>
+            <li><strong>Map</strong> — zoom into any area to see live buses. Tap a bus pin for details, route and timing.</li>
+            <li><strong>Fleet</strong> — browse all Staffordshire operators and tracked vehicles.</li>
+            <li><strong>Stop board</strong> — tap a bus stop on the map for a live departure board (Plus feature).</li>
+          </ol>
+        </section>
+
+        <section class="about-section">
+          <h2>Free vs Plus</h2>
+          <p>The core tracker is completely free. <strong>UK Bus Tracker Plus</strong> adds extras for enthusiasts:</p>
+          <ul class="about-list">
+            <li>Live spoken announcements as buses approach</li>
+            <li>Virtual stop departure board</li>
+            <li>3-day and 7-day vehicle history</li>
+            <li>Add bus photos (after approval)</li>
+          </ul>
+          <p>Plus is <strong>£2.99&nbsp;/&nbsp;month</strong>, billed through PayPal, and can be cancelled any time.</p>
+        </section>
+
+        <section class="about-section">
+          <h2>Data sources</h2>
+          <ul class="about-list">
+            <li><a href="https://bustimes.org" target="_blank" rel="noopener noreferrer">bustimes.org</a> — UK-wide live vehicle positions and timetable data</li>
+            <li><a href="https://www.bus-data.dft.gov.uk/" target="_blank" rel="noopener noreferrer">Bus Open Data Service (BODS)</a> — DfT national AVL feed</li>
+            <li><a href="https://www.openstreetmap.org/" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> — map tiles</li>
+          </ul>
+        </section>
+
+        <section class="about-section">
+          <h2>Contact &amp; feedback</h2>
+          <p>UK Bus Tracker is an independent hobby project focused on Staffordshire and the wider UK network. Feedback, corrections and bus photos are welcome — use the Account section to sign in and get in touch.</p>
+        </section>
+
+        <p class="about-version">UK Bus Tracker · <a href="https://ukbustracker.co.uk/" target="_blank" rel="noopener noreferrer">ukbustracker.co.uk</a></p>
+      </div>
+    </section>
     <div id="plus-modal" class="plus-modal" hidden role="dialog" aria-modal="true" aria-labelledby="plus-modal-title">
       <div class="plus-dialog">
         <button type="button" class="plus-dialog-close" data-plus-close aria-label="Close">×</button>
@@ -256,7 +458,7 @@
             </ul>
           </div>
           <div class="plus-col plus-col-on">
-            <h3>Plus · <span data-plus-price>£4.99/month</span></h3>
+            <h3>Plus · <span data-plus-price>£2.99/month</span></h3>
             <ul>
               <li>Live spoken announcements</li>
               <li>Virtual stop board</li>
@@ -266,7 +468,7 @@
             </ul>
           </div>
         </div>
-        <button type="button" class="plus-checkout-btn" data-plus-checkout>Pay with PayPal · <span data-plus-price>£4.99/month</span></button>
+        <button type="button" class="plus-checkout-btn" data-plus-checkout>Pay with PayPal · <span data-plus-price>£2.99/month</span></button>
         <button type="button" class="plus-cancel-btn" data-plus-cancel hidden>Cancel Plus</button>
         <p class="plus-error" data-plus-error hidden></p>
         <button type="button" class="plus-later" data-plus-close>Not now</button>

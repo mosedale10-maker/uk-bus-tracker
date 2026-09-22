@@ -1,0 +1,8 @@
+# Connection-gate Worker DISABLED — it burned the free Workers quota (CF Error 1027)
+# and took the whole site down. Traffic should go Cloudflare → VPS with no Worker.
+# Do not re-add [[routes]] for ukbustracker.co.uk unless you are on a paid Workers plan.
+#
+# name = "uk-bus-tracker-gate"
+# main = "cloudflare/connection-gate.js"
+# compatibility_date = "2026-09-20"
+# account_id = "7a2cf737fde1ecc6c799971b9d85753e"

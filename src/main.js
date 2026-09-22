@@ -2,7 +2,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { VectorTile } from "@mapbox/vector-tile";
 import { PbfReader } from "pbf";
-import { createFleetBrowser, isSchoolBusLive, isStokeFcShuttleLive, isStokeFcLine, sameServiceLine, normalizeStokeFcLine, extractRouteFromVehicle, enrichJourneyRow, liveVehicleAsHistoryRow, mergeLiveHistoryRow, fetchAtHistoryFromTrails, mergeAtHistoryRows, isDivertedText, STAFFS_SCHOOL_ROUTES, STOKE_FC_SHUTTLE_ROUTES } from "./fleet.js";
+import { createFleetBrowser, isSchoolBusLive, isStokeFcShuttleLive, isStokeFcLine, sameServiceLine, normalizeStokeFcLine, extractRouteFromVehicle, enrichJourneyRow, liveVehicleAsHistoryRow, mergeLiveHistoryRow, fetchAtHistoryFromTrails, mergeAtHistoryRows, fetchCoachHistoryFromTrails, isDivertedText, STAFFS_SCHOOL_ROUTES, STOKE_FC_SHUTTLE_ROUTES } from "./fleet.js";
 import { setupPlus, isPlus, requirePlus, syncPlusFromAccount } from "./plus.js";
 import { getUser } from "./auth.js";
 import {
@@ -19,21 +19,66 @@ import {
   scfcScheduledDeparturesForStop,
 } from "./scfc-stops.js";
 import { setupAuth } from "./auth.js";
+import { brandLiveryForBus, brandColourForBus, brandLiveryForLine } from "./operator-liveries.js";
+import { fleetLiveryForBus } from "./fleet-liveries.js";
 import "./style.css";
 
 window.L = L;
 
-const MIN_ZOOM = 10;
+const MIN_ZOOM = 8;
 const FLIX_MIN_ZOOM = 6;
 const UK_TZ = "Europe/London";
 
+/** Rough Staffordshire + Potteries box — when the map overlaps this, always load local operators. */
+const STAFFS_VIEW_BBOX = { south: 52.55, north: 53.28, west: -2.6, east: -1.65 };
+/** Operators treated as Staffordshire for stale-ping / trail helpers. */
+const STAFFS_LIVE_OPS = ["FPOT", "DAGC", "CRDR", "SLBS", "BANG", "HIPK", "TBTN", "DIAM", "MDCL", "SOST"];
+/**
+ * Force-load these when the view covers Staffs (bbox polls can miss overnight / sparse AVL).
+ * Keep this short — full TBTN/DIAM/HIPK fleets previously flooded nginx and killed /api/bt-paint
+ * (liveries vanished while pins still showed).
+ */
+const STAFFS_FORCE_OPS = ["FPOT", "DAGC", "CRDR", "SLBS", "BANG", "SOST"];
+
+function mapOverlapsStaffordshire(bounds = map.getBounds()) {
+  try {
+    const b = bounds || map.getBounds();
+    return (
+      b.getSouth() < STAFFS_VIEW_BBOX.north &&
+      b.getNorth() > STAFFS_VIEW_BBOX.south &&
+      b.getWest() < STAFFS_VIEW_BBOX.east &&
+      b.getEast() > STAFFS_VIEW_BBOX.west
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Leave History · Map / Map · tails mode so live Staffs buses can load again. */
+function exitHistoryMapMode({ reload = false } = {}) {
+  const had =
+    Boolean(playback) || Boolean(multiTailActiveGroup) || pinnedTrailKeys.size > 0;
+  if (playback) stopRoutePlayback("", { clearTail: true });
+  else clearPinnedTrails();
+  if (had && reload) loadBuses({ replace: true }).catch(() => {});
+  return had;
+}
+
 const map = L.map("map", { zoomControl: true }).setView([54.2, -2.5], 6);
 
-const streetsLayer = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution:
-    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-  maxZoom: 19,
-});
+/** Day / night street basemap — OSM tiles (no API key). Night look via CSS filter on the tile pane.
+ *  Carto free URLs now watermark “API KEY REQUIRED” and blank the map. */
+const dayStreetsLayer = L.tileLayer(
+  "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+  {
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 19,
+  },
+);
+
+/** Streets group so the layer control keeps one "Streets" entry while we swap day/night tiles. */
+const streetsLayer = L.layerGroup([dayStreetsLayer]);
 
 const satelliteLayer = L.layerGroup([
   L.tileLayer(
@@ -52,6 +97,75 @@ const satelliteLayer = L.layerGroup([
 
 streetsLayer.addTo(map);
 
+/** 'streets' = auto day/night; 'satellite' = leave alone. */
+let mapBaseKind = "streets";
+let mapIsNight = null;
+
+/**
+ * Approximate solar elevation (degrees) at lat/lng (NOAA-style).
+ * Positive = above horizon; civil twilight ≈ −6°.
+ */
+function solarElevationDeg(date, lat, lng) {
+  const rad = Math.PI / 180;
+  const start = Date.UTC(date.getUTCFullYear(), 0, 0);
+  const dayOfYear = Math.floor(
+    (Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) -
+      start) /
+      86400000,
+  );
+  const minutes =
+    date.getUTCHours() * 60 +
+    date.getUTCMinutes() +
+    date.getUTCSeconds() / 60;
+  const gamma =
+    ((2 * Math.PI) / 365) * (dayOfYear - 1 + (minutes / 1440 - 0.5));
+  const eqTime =
+    229.18 *
+    (0.000075 +
+      0.001868 * Math.cos(gamma) -
+      0.032077 * Math.sin(gamma) -
+      0.014615 * Math.cos(2 * gamma) -
+      0.040849 * Math.sin(2 * gamma));
+  const decl =
+    0.006918 -
+    0.399912 * Math.cos(gamma) +
+    0.070257 * Math.sin(gamma) -
+    0.006758 * Math.cos(2 * gamma) +
+    0.000907 * Math.sin(2 * gamma) -
+    0.002697 * Math.cos(3 * gamma) +
+    0.00148 * Math.sin(3 * gamma);
+  const trueSolarTime = minutes + eqTime + 4 * lng;
+  let ha = trueSolarTime / 4 - 180;
+  while (ha < -180) ha += 360;
+  while (ha > 180) ha -= 360;
+  const latR = lat * rad;
+  const cosZen =
+    Math.sin(latR) * Math.sin(decl) +
+    Math.cos(latR) * Math.cos(decl) * Math.cos(ha * rad);
+  return Math.asin(Math.min(1, Math.max(-1, cosZen))) / rad;
+}
+
+/** Night once the sun is below civil twilight (−6°); day once it rises above. */
+function shouldUseNightMap(lat, lng, when = new Date()) {
+  const elev = solarElevationDeg(when, lat, lng);
+  // Hysteresis so dawn/dusk does not flicker the tiles.
+  if (mapIsNight === true) return elev < -4;
+  if (mapIsNight === false) return elev < -6;
+  return elev < -6;
+}
+
+function applyMapDayNight({ force = false } = {}) {
+  if (mapBaseKind !== "streets") return;
+  const c = map.getCenter();
+  const wantNight = shouldUseNightMap(c.lat, c.lng);
+  if (!force && wantNight === mapIsNight) return;
+  mapIsNight = wantNight;
+  // One OSM tile layer; night is a CSS invert on the tile pane (no Carto API key).
+  if (!streetsLayer.hasLayer(dayStreetsLayer)) streetsLayer.addLayer(dayStreetsLayer);
+  document.documentElement.classList.toggle("map-night", wantNight);
+  document.documentElement.classList.toggle("map-day", !wantNight);
+}
+
 L.control
   .layers(
     { Streets: streetsLayer, Satellite: satelliteLayer },
@@ -59,6 +173,21 @@ L.control
     { position: "topright", collapsed: false },
   )
   .addTo(map);
+
+map.on("baselayerchange", (e) => {
+  if (e?.layer === satelliteLayer) {
+    mapBaseKind = "satellite";
+    document.documentElement.classList.remove("map-night", "map-day");
+    return;
+  }
+  if (e?.layer === streetsLayer) {
+    mapBaseKind = "streets";
+    applyMapDayNight({ force: true });
+  }
+});
+
+applyMapDayNight({ force: true });
+setInterval(() => applyMapDayNight(), 60_000);
 
 // Always show every bus — no numbered cluster bubbles when zoomed out.
 const cluster = L.layerGroup().addTo(map);
@@ -281,8 +410,29 @@ let liveIndex = null;
 let liveIndexAt = 0;
 
 const messageEl = document.getElementById("message");
+const backgroundWorkNoticeEl = document.getElementById("background-work-notice");
+const backgroundWorkCloseEl = document.getElementById("background-work-close");
+
+try {
+  if (sessionStorage.getItem("uk-bus-background-work-notice-dismissed") === "1") {
+    backgroundWorkNoticeEl.hidden = true;
+  }
+} catch {
+  /* private browsing may block session storage */
+}
+backgroundWorkCloseEl?.addEventListener("click", () => {
+  backgroundWorkNoticeEl.hidden = true;
+  try {
+    sessionStorage.setItem("uk-bus-background-work-notice-dismissed", "1");
+  } catch {
+    /* keep the dismissal in memory */
+  }
+});
 const clockEl = document.getElementById("uk-clock");
+const clockDateEl = document.getElementById("uk-clock-date");
+const clockTimeEl = document.getElementById("uk-clock-time");
 const liveBusCountEl = document.getElementById("live-bus-count");
+const homeLiveCountEl = document.getElementById("home-live-count");
 const mapWrapEl = document.querySelector(".map-wrap");
 const hint = document.createElement("div");
 hint.className = "zoom-hint";
@@ -527,11 +677,16 @@ let timer = null;
 let coastTimer = null;
 let busesBusy = false;
 let busesGen = 0;
-const BUS_POLL_MS = 3500;
+/** Last bustimes paint rows — reused on BODS position polls so pins stay light/fast. */
+let lastPaintBuses = [];
+let lastPaintAt = 0;
+const BUS_POLL_MS = 7000;
 const STALE_PING_MS = 5 * 60 * 1000;
+/** Staffs Ticketer buses often sit quietly at termini on overnight routes — keep them a bit longer. */
+const STAFFS_STALE_PING_MS = 20 * 60 * 1000;
 /** Only bridge short gaps between AVL polls — never keep driving once the feed stalls. */
-const COAST_MIN_AGE_MS = 1500;
-const COAST_MAX_AGE_MS = 6500;
+const COAST_MIN_AGE_MS = 900;
+const COAST_MAX_AGE_MS = 4500;
 const COAST_MAX_M = 36;
 
 function showMessage(text) {
@@ -546,13 +701,28 @@ function pingAgeMs(iso) {
   return Date.now() - at;
 }
 
-function isStalePing(iso) {
-  return pingAgeMs(iso) > STALE_PING_MS;
+function stalePingLimitMs(bus) {
+  if (!bus) return STALE_PING_MS;
+  const line = String(bus.service?.line_name || "").trim();
+  if (!line || !isPassengerServiceLine(line)) return STALE_PING_MS;
+  if (isFirstPotteriesBus(bus) || isDgBus(bus)) return STAFFS_STALE_PING_MS;
+  const op = String(
+    bus.operator?.noc || bus.operator?.id || bus.service?.operator?.noc || bus._bods?.operator || "",
+  )
+    .trim()
+    .toUpperCase();
+  // Sparse rural Staffs AVL — keep Chaserider / Select / High Peak / etc. longer too.
+  if (STAFFS_LIVE_OPS.includes(op) || isStaffsTrailOperator(op)) return STAFFS_STALE_PING_MS;
+  return STALE_PING_MS;
+}
+
+function isStalePing(iso, limitMs = STALE_PING_MS) {
+  return pingAgeMs(iso) > limitMs;
 }
 
 function pruneStaleMarkers() {
   for (const [id, marker] of markers) {
-    if (!isStalePing(marker.bus?.datetime)) continue;
+    if (!isStalePing(marker.bus?.datetime, stalePingLimitMs(marker.bus))) continue;
     dropServiceBus(id);
     motion.delete(`bus-${id}`);
   }
@@ -596,35 +766,47 @@ async function refreshUkLiveBusCount({ force = false } = {}) {
 }
 
 function updateLiveBusCount() {
-  if (!liveBusCountEl) return;
+  if (!liveBusCountEl && !homeLiveCountEl) return;
   const n = ukLiveBusCount;
+  let text = "";
   if (n == null) {
-    if (!liveBusCountEl.textContent) liveBusCountEl.textContent = "Counting UK buses…";
-    return;
+    text = "Counting UK buses…";
+  } else if (n === 0) {
+    text = "No buses tracked across the UK right now";
+  } else if (n === 1) {
+    text = "1 bus currently tracked across the UK";
+  } else {
+    text = `${n.toLocaleString("en-GB")} buses currently tracked across the UK`;
   }
-  liveBusCountEl.textContent =
-    n === 0
-      ? "No buses tracked across the UK right now"
-      : n === 1
-        ? "1 bus currently tracked across the UK"
-        : `${n.toLocaleString("en-GB")} buses currently tracked across the UK`;
+  if (liveBusCountEl) {
+    if (n == null && liveBusCountEl.textContent) {
+      /* keep existing while loading */
+    } else {
+      liveBusCountEl.textContent = text;
+    }
+  }
+  if (homeLiveCountEl) homeLiveCountEl.textContent = text;
 }
 
 function updateUkClock() {
   const now = new Date();
-  clockEl.dateTime = now.toISOString();
-  clockEl.textContent = new Intl.DateTimeFormat("en-GB", {
+  if (clockEl) clockEl.dateTime = now.toISOString();
+  const dateText = new Intl.DateTimeFormat("en-GB", {
     timeZone: UK_TZ,
     weekday: "short",
     day: "numeric",
     month: "short",
-    year: "numeric",
+  }).format(now);
+  const timeText = new Intl.DateTimeFormat("en-GB", {
+    timeZone: UK_TZ,
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
     hour12: false,
     timeZoneName: "short",
   }).format(now);
+  if (clockDateEl) clockDateEl.textContent = dateText;
+  if (clockTimeEl) clockTimeEl.textContent = timeText;
   updateLiveBusCount();
 }
 
@@ -697,6 +879,133 @@ function tripDelaySeconds(times) {
   return last;
 }
 
+/** Delay from already-mapped card stops (expected/actual vs aimed). */
+function tripDelaySecondsFromStops(stops) {
+  let last = null;
+  for (const stop of stops || []) {
+    if (stop?.delaySec == null || Number.isNaN(Number(stop.delaySec))) continue;
+    last = Number(stop.delaySec);
+    if (!stop.done) return last;
+  }
+  return last;
+}
+
+/**
+ * Live early/late for the bus card.
+ * Prefer real feed Delay, then bustimes expected−aimed, then schedule vs clock.
+ * Never treat missing delay (null) as 0 via Number(null) → "On time".
+ */
+function readFeedDelaySec(bus) {
+  const raw = bus?.delay;
+  if (raw == null || raw === "") return null;
+  const feed = Number(raw);
+  return Number.isFinite(feed) ? feed : null;
+}
+
+function resolveLiveDelaySec(bus, extra = {}, lat, lng, { live = false } = {}) {
+  const feed = readFeedDelaySec(bus);
+  if (feed != null) return feed;
+  const fromStops = tripDelaySecondsFromStops(extra.stops);
+  // Bustimes expected−aimed is the real lateness; wall-clock vs aimed of the
+  // nearest stop often reads "On time" while the service is several minutes late.
+  if (fromStops != null) return fromStops;
+  const inferred = inferDelaySeconds(
+    extra.stops,
+    lat,
+    lng,
+    live ? null : bus?.datetime,
+  );
+  if (inferred != null) return inferred;
+  const sticky = Number(extra.delaySec);
+  return Number.isFinite(sticky) ? sticky : null;
+}
+
+function tripIdForMarker(marker) {
+  const bus = marker?.bus;
+  const extra = marker?.extra || {};
+  return (
+    bus?.trip_id ||
+    extra.tripId ||
+    extra.btTripId ||
+    extra.stops?._tripId ||
+    ""
+  );
+}
+
+/** Re-fetch trip stop predictions so early/late is not frozen on the open / followed card. */
+function scheduleTripDelayRefresh(marker) {
+  const tripId = tripIdForMarker(marker);
+  if (!tripId) return;
+  const open =
+    selectedMapMarker === marker ||
+    marker.isPopupOpen?.() ||
+    isFollowingMarker(marker);
+  if (!open) return;
+  const now = Date.now();
+  const minGap = isFollowingMarker(marker) ? 8000 : 15000;
+  if (marker._tripDelayAt && now - marker._tripDelayAt < minGap) return;
+  marker._tripDelayAt = now;
+  const gen = (marker._tripDelayGen = (marker._tripDelayGen || 0) + 1);
+  tripEnds(tripId, { force: true })
+    .then((ends) => {
+      if (!ends || marker._tripDelayGen !== gen) return;
+      if (String(tripIdForMarker(marker) || "") !== String(tripId)) return;
+      marker.extra ||= {};
+      if (ends.stops?.length) {
+        marker.extra.stops = ends.stops;
+        marker.extra.from = ends.from || marker.extra.from;
+        marker.extra.to = ends.to || marker.extra.to;
+        marker.extra._nextStopIdx = undefined;
+      }
+      const [lng, lat] = marker.bus.coordinates || [];
+      const live = isFollowingMarker(marker) || selectedMapMarker === marker;
+      marker.extra._tripDelayFreshAt = Date.now();
+      // Prefer fresh bustimes trip delay (expected−aimed) when the feed has it.
+      marker.extra.delaySec =
+        ends.delaySec != null && Number.isFinite(Number(ends.delaySec))
+          ? Number(ends.delaySec)
+          : resolveLiveDelaySec(marker.bus, marker.extra, lat, lng, { live });
+      refreshPopup(marker);
+      if (isFollowingMarker(marker)) updateFollowChip();
+    })
+    .catch(() => {});
+}
+
+let followDelayTimer = null;
+
+function stopFollowDelayPolling() {
+  if (followDelayTimer) {
+    clearInterval(followDelayTimer);
+    followDelayTimer = null;
+  }
+}
+
+/** Keep early/late moving on the card + follow chip while tracking a bus. */
+function ensureFollowDelayPolling(marker) {
+  stopFollowDelayPolling();
+  if (!marker?.bus) return;
+  const tick = () => {
+    const followed = followedMarker();
+    if (!followed?.bus) {
+      stopFollowDelayPolling();
+      return;
+    }
+    const bus = followed.bus;
+    const extra = followed.extra || (followed.extra = {});
+    const [lng, lat] = bus.coordinates || [];
+    const delaySec = resolveLiveDelaySec(bus, extra, lat, lng, { live: true });
+    if (delaySec != null) extra.delaySec = delaySec;
+    scheduleTripDelayRefresh(followed);
+    // Patch card even if structure key thinks nothing changed.
+    if (selectedMapMarker === followed || followed.isPopupOpen?.()) {
+      patchPopupLive(followed);
+    }
+    updateFollowChip();
+  };
+  tick();
+  followDelayTimer = setInterval(tick, 2000);
+}
+
 function clockPartsSeconds(date) {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: UK_TZ,
@@ -753,8 +1062,12 @@ function mapTripStops(times) {
     const loc = row.stop?.location;
     const lng = Number(loc?.[0]);
     const lat = Number(loc?.[1]);
+    const aimedArr = clockLabel(row.aimed_arrival_time);
+    const aimedDep = clockLabel(row.aimed_departure_time);
     const aimed = clockLabel(rowAimed(row));
     const expected = clockLabel(row.expected_departure_time || row.expected_arrival_time || row.expected);
+    const actualArr = clockLabel(row.actual_arrival_time);
+    const actualDep = clockLabel(row.actual_departure_time);
     const actual = clockLabel(row.actual_departure_time || row.actual_arrival_time);
     return {
       name: row.stop?.name || row.stop?.common_name || row.name || "",
@@ -762,8 +1075,12 @@ function mapTripStops(times) {
       lat: Number.isFinite(lat) ? lat : null,
       lng: Number.isFinite(lng) ? lng : null,
       aimed,
+      aimedArr,
+      aimedDep,
       expected,
       actual,
+      actualArr,
+      actualDep,
       live: actual || expected || aimed,
       delaySec: stopDelaySeconds(row),
       timingStatus: String(row.timing_status || "").toUpperCase(),
@@ -865,9 +1182,16 @@ function ukDateKey(value = new Date()) {
 }
 
 function historyCutoffDate(days = historyDays) {
-  const d = new Date();
-  d.setDate(d.getDate() - (Math.max(1, days) - 1));
-  return ukDateKey(d);
+  const n = Math.max(1, Number(days) || 1);
+  // Work in UK calendar days (not the browser's local midnight).
+  const today = ukDateKey();
+  const [y, m, d] = today.split("-").map(Number);
+  const utc = new Date(Date.UTC(y, m - 1, d));
+  // N days including today → go back (N - 1). For the free 1d window, also keep yesterday
+  // so overnight journeys (e.g. route 25 into the early hours) don't vanish at midnight.
+  const back = n <= 1 ? 1 : n - 1;
+  utc.setUTCDate(utc.getUTCDate() - back);
+  return utc.toISOString().slice(0, 10);
 }
 
 function formatHistoryDay(dateStr) {
@@ -890,7 +1214,18 @@ function formatHistoryTime(iso) {
 }
 
 function historyVehicleId(bus, extra = {}) {
-  for (const id of [extra.btVehicle?.id, bus?.id]) {
+  // Prefer real bustimes vehicle ids — never Flix journey ids used as bus.id.
+  for (const id of [extra.btVehicle?.id, extra.vehicle?.id, bus?.vehicle?.id, bus?.btId]) {
+    if (id == null || id === "") continue;
+    const s = String(id);
+    if (s.startsWith("dg-") || s.startsWith("staff-") || s.startsWith("bods-")) continue;
+    if (/^\d+$/.test(s)) return s;
+  }
+  if (bus && isFlixBus(bus)) {
+    // Anonymised Flix AVL: bus.id is the journey, not a bustimes vehicle.
+    return "";
+  }
+  for (const id of [bus?.id]) {
     if (id == null || id === "") continue;
     const s = String(id);
     if (s.startsWith("dg-") || s.startsWith("staff-") || s.startsWith("bods-")) continue;
@@ -902,6 +1237,22 @@ function historyVehicleId(bus, extra = {}) {
 function staffTrailKey(item) {
   const id = item?.vehicle?.ref || item?.vehicle?.vehicleUniqueId || "";
   return id ? `staff-${id}` : "";
+}
+
+function isAltonLine(line) {
+  return ALTON_LINES.has(String(line || "").trim().toUpperCase());
+}
+
+/** AT1–AT3 headsign when D&G omits destination.name (outbound → Towers). */
+function atTrailDestination(line, direction = "") {
+  const code = String(line || "").trim().toUpperCase();
+  if (!ALTON_LINES.has(code)) return "";
+  const dir = normalizeTrailDirection(direction);
+  if (dir === "in") {
+    if (code === "AT3") return "Bentilee";
+    return "Fenton";
+  }
+  return "Alton Towers";
 }
 
 function recordStaffTrail(marker, lat, lng, heading, meta = {}) {
@@ -923,12 +1274,19 @@ function recordStaffTrail(marker, lat, lng, heading, meta = {}) {
   const direction =
     meta.direction ||
     normalizeTrailDirection(item?.currentJourney?.directionRef || item?.directionRef || "");
+  const destination =
+    meta.destination ||
+    item?.currentJourney?.destination?.name ||
+    item?.currentJourney?.destinationRef ||
+    atTrailDestination(line, direction) ||
+    "";
   const trailMeta = {
     ...meta,
     reg,
     line,
     journeyId: journeyId ? String(journeyId) : meta.journeyId || "",
     direction,
+    destination,
     operator: meta.operator || "DAGC",
   };
   if (key) recordVehicleTrail(key, lat, lng, heading, trailMeta);
@@ -965,10 +1323,6 @@ async function fetchVehicleHistory(vehicleId, days = historyDays) {
   })().catch(() => []);
   historyCache.set(key, promise);
   return promise;
-}
-
-function isAltonLine(line) {
-  return ALTON_LINES.has(String(line || "").trim().toUpperCase());
 }
 
 function isDgBusContext(marker, extra = {}) {
@@ -1131,13 +1485,15 @@ function historyBlock(extra = {}) {
               row.route_name ||
               "?";
             const dest = row.destination || "Unknown";
+            const direction = normalizeTrailDirection(row.direction || "");
+            const directionLabel = direction === "in" ? "inbound" : direction === "out" ? "outbound" : "";
             const divertTag = row.diverted
               ? ` <span class="history-divert-tag" title="Diverted">div</span>`
               : "";
             const liveTag = row.live ? ` <span class="history-live-tag">live</span>` : "";
-            return `<div class="popup-history-row"><span class="history-time">${esc(formatHistoryTime(row.datetime))}</span><span class="history-line">${esc(line)}${divertTag}${liveTag}</span><span class="history-dest">${esc(dest)}</span>${
-              row.trip_id || row.vehicle?.id || extra.trailKey || row.live || row.atTrail || row.atLive
-                ? `<button type="button" class="history-play-btn" data-trip-id="${esc(row.trip_id || "")}" data-journey-id="${esc(trailFilterJourneyId(row.journey_id || row.id || "", line))}" data-vehicle-id="${esc(row.vehicle?.id || extra.btVehicle?.id || "")}" data-trail-key="${esc(row.trailKey || extra.trailKey || "")}" data-reg="${esc(extra.vehicle?.reg || extra.btVehicle?.reg || "")}" data-line="${esc(line)}" data-direction="${esc(normalizeTrailDirection(row.direction || ""))}" data-dest="${esc(dest)}" data-datetime="${esc(row.datetime || "")}" title="Show this route on the map">Map</button>`
+            return `<div class="popup-history-row"><span class="history-time">${esc(formatHistoryTime(row.datetime))}</span><span class="history-line">${esc(line)}${divertTag}${liveTag}</span><span class="history-dest">${esc(dest)}${directionLabel ? ` · ${esc(directionLabel)}` : ""}</span>${
+              row.trip_id || row.vehicle?.id || row.trailKey || extra.trailKey || row.live
+                ? `<button type="button" class="history-play-btn" data-live="${row.live ? "1" : "0"}" data-trip-id="${esc(row.trip_id || "")}" data-journey-id="${esc(trailFilterJourneyId(row.journey_id || row.id || "", line))}" data-vehicle-id="${esc(row.vehicle?.id || extra.btVehicle?.id || "")}" data-trail-key="${esc(row.trailKey || extra.trailKey || "")}" data-reg="${esc(extra.vehicle?.reg || extra.btVehicle?.reg || "")}" data-line="${esc(line)}" data-operator="${esc(extra.operatorNoc || extra.operator || "")}" data-direction="${esc(normalizeTrailDirection(row.direction || ""))}" data-dest="${esc(dest)}" data-datetime="${esc(row.datetime || "")}" data-diverted="${row.diverted ? "1" : "0"}" title="${row.live ? "Follow this bus live" : "Show this journey on the map"}">Map</button>`
                 : `<span></span>`
             }</div>`;
           })
@@ -1358,13 +1714,420 @@ const followChipEl = document.getElementById("follow-chip");
 const playbackBarEl = document.getElementById("playback-bar");
 const playbackLabelEl = document.getElementById("playback-label");
 const playbackStopEl = document.getElementById("playback-stop");
+const playbackReplayEl = document.getElementById("playback-replay");
+const playbackScrubEl = document.getElementById("playback-scrub");
+const playbackClockEl = document.getElementById("playback-clock");
+const playbackSpeedEl = document.getElementById("playback-speed");
+
+/**
+ * GPS replay: animates a bus marker along the recorded BODS pings (trail points),
+ * with a scrub bar, play/pause and speed multiplier — a true "as it happened" replay.
+ */
+let gpsReplay = null; // { pts, idx, frac, speed, playing, raf, marker, arrow, t0, t1 }
+const GPS_REPLAY_SPEEDS = [1, 15, 60, 240];
+
+function gpsReplayControls(show) {
+  if (!playbackReplayEl) return;
+  const hasPts = Boolean(gpsReplay?.pts?.length >= 2);
+  const on = show && hasPts;
+  playbackReplayEl.hidden = !on || gpsReplay?.playing === true;
+  playbackScrubEl.hidden = !on;
+  playbackClockEl.hidden = !on;
+  playbackSpeedEl.hidden = !on;
+}
+
+function gpsReplayMarkerAt(lat, lng, heading) {
+  if (!gpsReplay) return;
+  if (!gpsReplay.marker) {
+    gpsReplay.marker = L.circleMarker([lat, lng], {
+      radius: 8,
+      color: "#0b1018",
+      weight: 3,
+      fillColor: "#73d700",
+      fillOpacity: 1,
+      zIndexOffset: 500,
+      interactive: false,
+    }).addTo(playbackLayer);
+  } else {
+    gpsReplay.marker.setLatLng([lat, lng]);
+  }
+  if (Number.isFinite(heading)) {
+    if (!gpsReplay.arrow) {
+      gpsReplay.arrow = L.marker([lat, lng], {
+        interactive: false,
+        keyboard: false,
+        zIndexOffset: 450,
+        icon: trailArrowIcon(heading),
+      }).addTo(playbackLayer);
+    } else {
+      gpsReplay.arrow.setLatLng([lat, lng]);
+      gpsReplay.arrow.setIcon(trailArrowIcon(heading));
+    }
+  }
+}
+
+function gpsReplaySetClock(ms) {
+  if (!playbackClockEl) return;
+  const txt = formatTrailArrowTime(ms);
+  if (txt) playbackClockEl.textContent = txt.split(" · ")[0];
+}
+
+function gpsReplayInterp(pts, t) {
+  const list = pts;
+  if (!list.length) return null;
+  if (t <= list[0].t) return { ...list[0], frac: 0 };
+  const last = list[list.length - 1];
+  if (t >= last.t) return { ...last, frac: 1 };
+  let lo = 0;
+  let hi = list.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (list[mid].t <= t) lo = mid;
+    else hi = mid;
+  }
+  const a = list[lo];
+  const b = list[hi];
+  const span = b.t - a.t || 1;
+  const f = (t - a.t) / span;
+  return {
+    lat: a.lat + (b.lat - a.lat) * f,
+    lng: a.lng + (b.lng - a.lng) * f,
+    heading: angleDiff(b.heading || 0, a.heading || 0) === 0 ? a.heading : a.heading,
+    t,
+    frac: (lo + f) / (list.length - 1),
+  };
+}
+
+function gpsReplayFrame(ts) {
+  if (!gpsReplay || !gpsReplay.playing) return;
+  if (!gpsReplay.raf) gpsReplay.raf = ts;
+  const wall = (ts - gpsReplay.raf) / 1000;
+  gpsReplay.raf = ts;
+  const span = gpsReplay.t1 - gpsReplay.t0;
+  gpsReplay.pos += wall * gpsReplay.speed;
+  if (gpsReplay.pos >= span) {
+    gpsReplay.pos = span;
+    gpsReplayPause();
+  }
+  const t = gpsReplay.t0 + gpsReplay.pos;
+  const p = gpsReplayInterp(gpsReplay.pts, t);
+  if (p) {
+    gpsReplayMarkerAt(p.lat, p.lng, p.heading);
+    gpsReplaySetClock(t);
+    if (playbackScrubEl) playbackScrubEl.value = String(Math.round((p.frac || 0) * 1000));
+    updateReplayBusMarkerAt(p);
+  }
+  if (gpsReplay?.playing) requestAnimationFrame(gpsReplayFrame);
+}
+
+function updateReplayBusMarkerAt(p) {
+  if (!playback) return;
+  if (Number.isFinite(p?.lat) && Number.isFinite(p?.lng)) {
+    playback.lastPing = { ...p, source: "replay" };
+  }
+}
+
+function gpsReplayStart() {
+  if (!gpsReplay?.pts?.length) return;
+  gpsReplay.playing = true;
+  gpsReplay.raf = 0;
+  playbackReplayEl.textContent = "⏸ Pause";
+  playbackReplayEl.hidden = false;
+  gpsReplayMarkerAt(gpsReplay.pts[0].lat, gpsReplay.pts[0].lng, gpsReplay.pts[0].heading);
+  requestAnimationFrame(gpsReplayFrame);
+}
+
+function gpsReplayPause() {
+  if (!gpsReplay) return;
+  gpsReplay.playing = false;
+  if (playbackReplayEl) playbackReplayEl.textContent = "▶ Replay";
+}
+
+function gpsReplayTeardown() {
+  if (gpsReplay?.marker) playbackLayer.removeLayer(gpsReplay.marker);
+  if (gpsReplay?.arrow) playbackLayer.removeLayer(gpsReplay.arrow);
+  gpsReplay = null;
+  if (playbackReplayEl) {
+    playbackReplayEl.textContent = "▶ Replay";
+    playbackReplayEl.hidden = true;
+  }
+  if (playbackScrubEl) {
+    playbackScrubEl.hidden = true;
+    playbackScrubEl.value = "0";
+  }
+  if (playbackClockEl) {
+    playbackClockEl.hidden = true;
+    playbackClockEl.textContent = "";
+  }
+  if (playbackSpeedEl) {
+    playbackSpeedEl.hidden = true;
+    playbackSpeedEl.textContent = "×60";
+  }
+}
+
+function gpsReplaySetup(pts) {
+  const clean = normalizeGpsTrailPoints(pts)
+    .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.lat) && Number.isFinite(p.lng))
+    .sort((a, b) => a.t - b.t);
+  if (clean.length < 2 || clean[clean.length - 1].t - clean[0].t < 60_000) {
+    gpsReplayTeardown();
+    return;
+  }
+  gpsReplayTeardown();
+  gpsReplay = {
+    pts: clean,
+    t0: clean[0].t,
+    t1: clean[clean.length - 1].t,
+    pos: 0,
+    speed: 60,
+    playing: false,
+    raf: 0,
+    marker: null,
+    arrow: null,
+  };
+  gpsReplayControls(true);
+}
+const journeyPanelEl = document.getElementById("journey-panel");
+const journeyPanelCrumbEl = document.getElementById("journey-panel-crumb");
+const journeyPanelDetailEl = document.getElementById("journey-panel-detail");
+const journeyPanelTimetableEl = document.getElementById("journey-panel-timetable");
+const journeyPanelTimetableToggleEl = document.getElementById("journey-panel-timetable-toggle");
+const journeyPanelColsEl = document.getElementById("journey-panel-cols");
+const journeyPanelStopsEl = document.getElementById("journey-panel-stops");
+const journeyPanelMetaEl = document.getElementById("journey-panel-meta");
+const journeyPanelCloseEl = document.getElementById("journey-panel-close");
+const JOURNEY_TIMETABLE_MIN_KEY = "uk-bus-journey-timetable-minimized";
+
+function isJourneyTimetableMinimized() {
+  try {
+    return localStorage.getItem(JOURNEY_TIMETABLE_MIN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function setJourneyTimetableMinimized(minimized) {
+  const on = Boolean(minimized);
+  if (journeyPanelTimetableEl) {
+    journeyPanelTimetableEl.classList.toggle("is-minimized", on);
+  }
+  if (journeyPanelEl) {
+    journeyPanelEl.classList.toggle("is-timetable-minimized", on);
+  }
+  if (journeyPanelTimetableToggleEl) {
+    journeyPanelTimetableToggleEl.setAttribute("aria-expanded", on ? "false" : "true");
+    journeyPanelTimetableToggleEl.title = on ? "Show route timetable" : "Hide route timetable";
+    const label = journeyPanelTimetableToggleEl.querySelector(".journey-panel-timetable-label");
+    const hint = journeyPanelTimetableToggleEl.querySelector(".journey-panel-timetable-hint");
+    if (label) label.textContent = "Route timetable";
+    if (hint) hint.textContent = on ? "Show" : "Hide";
+  }
+  try {
+    localStorage.setItem(JOURNEY_TIMETABLE_MIN_KEY, on ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+  requestAnimationFrame(() => {
+    try {
+      map.invalidateSize({ animate: false });
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
+function syncJourneyTimetableMinimized() {
+  setJourneyTimetableMinimized(isJourneyTimetableMinimized());
+}
 
 const playbackLayer = L.layerGroup().addTo(map);
 const liveTrailLayer = L.layerGroup().addTo(map);
 /** Active static route overlay (not animated playback). */
 let playback = null;
+/** Live bus / staff marker shown in the left side panel (replaces the old popup card). */
+let selectedMapMarker = null;
 
-const TRAIL_STORE_KEY = "uk-bus-trails-v1";
+function journeyStopTimeStack(arr, dep) {
+  const a = String(arr || "").trim();
+  const d = String(dep || "").trim();
+  if (!a && !d) return `<span class="is-empty">—</span>`;
+  if (a && d && a !== d) return `<span>${esc(a)}</span><span>${esc(d)}</span>`;
+  return `<span>${esc(a || d)}</span>`;
+}
+
+function setJourneyPanelOpen(open) {
+  if (!journeyPanelEl || !mapWrapEl) return;
+  journeyPanelEl.hidden = !open;
+  mapWrapEl.classList.toggle("is-journey", Boolean(open));
+  requestAnimationFrame(() => {
+    try {
+      map.invalidateSize({ animate: false });
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
+function renderJourneyPanelStops(stops, { lat = null, lng = null } = {}) {
+  if (!journeyPanelStopsEl) return;
+  const rows = cardStops(stops || [], lat, lng);
+  if (journeyPanelTimetableEl) {
+    journeyPanelTimetableEl.hidden = !rows.length;
+  }
+  if (journeyPanelColsEl) {
+    journeyPanelColsEl.hidden = !rows.length;
+    journeyPanelColsEl.setAttribute("aria-hidden", rows.length ? "false" : "true");
+  }
+  if (!rows.length) {
+    journeyPanelStopsEl.innerHTML = "";
+    return;
+  }
+  syncJourneyTimetableMinimized();
+  journeyPanelStopsEl.innerHTML = rows
+    .map((stop) => {
+      const cls = stop.done ? " is-done" : stop.next ? " is-next" : "";
+      return `<div class="journey-stop${cls}">
+        <p class="journey-stop-name">${esc(stop.name || "Stop")}</p>
+        <div class="journey-stop-times">${journeyStopTimeStack(stop.aimedArr, stop.aimedDep || stop.aimed)}</div>
+        <div class="journey-stop-times is-actual">${journeyStopTimeStack(stop.actualArr, stop.actualDep || stop.actual)}</div>
+      </div>`;
+    })
+    .join("");
+}
+
+function showJourneyPanel({
+  operator = "",
+  line = "",
+  headsign = "",
+  date = "",
+  stops = [],
+  lat = null,
+  lng = null,
+  detailHtml = "",
+} = {}) {
+  if (!journeyPanelEl || !mapWrapEl) return;
+  const op = String(operator || "").trim() || "Service";
+  const ln = String(line || "").trim() || "—";
+  const dest = String(headsign || "").trim();
+  if (journeyPanelCrumbEl) {
+    journeyPanelCrumbEl.innerHTML = dest
+      ? `${esc(op)} › <strong>${esc(ln)}</strong> › ${esc(dest)}`
+      : `${esc(op)} › <strong>${esc(ln)}</strong>`;
+  }
+  if (journeyPanelDetailEl) {
+    journeyPanelDetailEl.innerHTML = detailHtml || "";
+    journeyPanelDetailEl.hidden = !detailHtml;
+  }
+  if (journeyPanelMetaEl) {
+    const bits = [`Service: ${ln}`];
+    if (date) bits.push(`Date: ${date}`);
+    bits.push(`${(stops || []).length} stops · bustimes.org`);
+    journeyPanelMetaEl.textContent = bits.join(" · ");
+  }
+  renderJourneyPanelStops(stops, { lat, lng });
+  setJourneyPanelOpen(true);
+}
+
+function hideJourneyPanel() {
+  selectedMapMarker = null;
+  if (journeyPanelDetailEl) {
+    journeyPanelDetailEl.innerHTML = "";
+    journeyPanelDetailEl.hidden = true;
+  }
+  if (journeyPanelTimetableEl) journeyPanelTimetableEl.hidden = true;
+  if (journeyPanelColsEl) {
+    journeyPanelColsEl.hidden = true;
+    journeyPanelColsEl.setAttribute("aria-hidden", "true");
+  }
+  if (journeyPanelStopsEl) journeyPanelStopsEl.innerHTML = "";
+  if (journeyPanelCrumbEl) journeyPanelCrumbEl.textContent = "";
+  if (journeyPanelMetaEl) journeyPanelMetaEl.textContent = "";
+  setJourneyPanelOpen(false);
+}
+
+function sidePanelCrumbForMarker(marker) {
+  if (marker?.staff) {
+    const line = staffLineName(marker.staff) || "AT";
+    const dest =
+      marker.extra?.to ||
+      marker.staff.currentJourney?.destination?.name ||
+      "Alton Towers";
+    return { operator: "D&G Bus", line, dest };
+  }
+  const bus = marker?.bus;
+  if (!bus) return { operator: "Service", line: "—", dest: "" };
+  const op = operatorName(bus, marker.extra || {}) || (isNationalExpress(bus) ? "National Express" : isFlixBus(bus) ? "FlixBus" : "Service");
+  const line =
+    extractRouteFromVehicle(bus) ||
+    bus.service?.line_name ||
+    (isNotInService(bus) ? "Not in service" : "—");
+  const dest = marker.extra?.to || bus.destination || "";
+  return { operator: op, line, dest };
+}
+
+function refreshBusSidePanel(marker) {
+  if (!marker || selectedMapMarker !== marker || !journeyPanelEl || journeyPanelEl.hidden) return;
+  rememberNextStop(marker);
+  const crumb = sidePanelCrumbForMarker(marker);
+  const ll = marker.getLatLng?.() || {};
+  const stops = marker.extra?.stops || [];
+  const detailHtml = marker.bus
+    ? popupHtml(marker.bus, marker.extra || {}, { omitStops: true, sidePanel: true })
+    : marker.staff
+      ? staffPopup(marker.staff, marker.extra || {}, { omitStops: true, sidePanel: true })
+      : "";
+  if (journeyPanelCrumbEl) {
+    journeyPanelCrumbEl.innerHTML = crumb.dest
+      ? `${esc(crumb.operator)} › <strong>${esc(crumb.line)}</strong> › ${esc(crumb.dest)}`
+      : `${esc(crumb.operator)} › <strong>${esc(crumb.line)}</strong>`;
+  }
+  if (journeyPanelDetailEl) {
+    journeyPanelDetailEl.innerHTML = detailHtml || "";
+    journeyPanelDetailEl.hidden = !detailHtml;
+  }
+  renderJourneyPanelStops(stops, { lat: ll.lat, lng: ll.lng });
+  if (journeyPanelMetaEl) {
+    const bits = [`Service: ${crumb.line}`];
+    if (stops.length) bits.push(`${stops.length} stops`);
+    if (marker.bus?.datetime) bits.push(timeAgo(marker.bus.datetime));
+    journeyPanelMetaEl.textContent = bits.join(" · ");
+  }
+}
+
+function selectMapMarker(marker) {
+  if (!marker) return;
+  try {
+    marker.closePopup?.();
+  } catch {
+    /* ignore */
+  }
+  selectedMapMarker = marker;
+  const crumb = sidePanelCrumbForMarker(marker);
+  const ll = marker.getLatLng?.() || {};
+  showJourneyPanel({
+    operator: crumb.operator,
+    line: crumb.line,
+    headsign: crumb.dest,
+    stops: marker.extra?.stops || [],
+    lat: ll.lat,
+    lng: ll.lng,
+    detailHtml: marker.bus
+      ? popupHtml(marker.bus, marker.extra || {}, { omitStops: true, sidePanel: true })
+      : marker.staff
+        ? staffPopup(marker.staff, marker.extra || {}, { omitStops: true, sidePanel: true })
+        : "",
+  });
+  if (marker.bus) enrichBustimes(marker);
+  else if (marker.staff) enrichStaff(marker);
+}
+
+function clearMapMarkerSelection({ keepPlayback = false } = {}) {
+  selectedMapMarker = null;
+  if (!keepPlayback && !playback) hideJourneyPanel();
+  else if (!playback) hideJourneyPanel();
+}
+
+const TRAIL_STORE_KEY = "uk-bus-trails-v2";
 const TRAIL_MAX_POINTS = 8000;
 const TRAIL_MAX_VEHICLES = 60;
 /** Server + local GPS tails are always kept for this many days (independent of Plus history chips). */
@@ -1469,6 +2232,18 @@ function pruneTrailPoints(points, days = TRAIL_KEEP_DAYS) {
   return kept;
 }
 
+function trailPointMetaScore(p) {
+  if (!p) return 0;
+  let score = 0;
+  if (p.journeyId) score += 4;
+  if (p.tripId) score += 2;
+  if (normalizeTrailDirection(p.direction)) score += 2;
+  if (String(p.destination || "").trim()) score += 2;
+  if (p.line) score += 1;
+  if (p.operator) score += 1;
+  return score;
+}
+
 function mergeTrailPoints(existing, incoming) {
   const map = new Map();
   for (const raw of [...(existing || []), ...(incoming || [])]) {
@@ -1479,7 +2254,9 @@ function mergeTrailPoints(existing, incoming) {
     if (!Number.isFinite(t) || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
     const p = { ...raw, t, lat, lng };
     const k = `${Math.round(p.t / 500)}:${p.lat.toFixed(5)}:${p.lng.toFixed(5)}`;
-    if (!map.has(k)) map.set(k, p);
+    const prev = map.get(k);
+    // Prefer server/recorder metadata over sparse local samples at the same ping.
+    if (!prev || trailPointMetaScore(p) > trailPointMetaScore(prev)) map.set(k, p);
   }
   return pruneTrailPoints([...map.values()].sort((a, b) => a.t - b.t));
 }
@@ -1506,8 +2283,10 @@ async function flushTrailUpload() {
   const batches = [];
   for (const [key, points] of trailUploadQueue.entries()) {
     if (!points.length) continue;
-    batches.push({ key, points: points.splice(0, 200) });
+    batches.push({ key, points: points.splice(0, 80) });
   }
+  // Cap payload so nginx/express never reject with PayloadTooLargeError.
+  while (batches.length > 12) batches.pop();
   for (const [key, points] of [...trailUploadQueue.entries()]) {
     if (!points.length) trailUploadQueue.delete(key);
   }
@@ -1527,8 +2306,24 @@ async function flushTrailUpload() {
   }
 }
 
+function preferTrailFetchKeys(keys, { limit = 12 } = {}) {
+  const list = [...new Set((keys || []).map((k) => String(k || "").trim()).filter(Boolean))];
+  const rank = (key) => {
+    // Journey/trip first so Map · trail keeps FPOT/Staffs per-trip GPS when the key budget is tight.
+    if (key.startsWith("jny:") || key.startsWith("trip:")) return 0;
+    if (key.startsWith("at:")) return 1;
+    if (key.startsWith("staff-")) return 2;
+    if (key.startsWith("run:") && key.includes(":jny:")) return 3;
+    if (key.startsWith("run:")) return 4;
+    if (key.startsWith("reg:")) return 5;
+    return 6;
+  };
+  list.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  return Number.isFinite(limit) && limit > 0 ? list.slice(0, limit) : list;
+}
+
 async function fetchServerTrails(keys, { fromMs = 0, toMs = 0, force = false } = {}) {
-  const list = [...new Set((keys || []).map((k) => String(k || "").trim()).filter(Boolean))].slice(0, 8);
+  const list = preferTrailFetchKeys(keys, { limit: 12 });
   if (!list.length) return;
   const now = Date.now();
   const need = force
@@ -1548,6 +2343,7 @@ async function fetchServerTrails(keys, { fromMs = 0, toMs = 0, force = false } =
     const res = await fetch(`/api/trails?${params}`);
     if (!res.ok) return;
     const data = await res.json();
+    if (data?.disabled) return;
     const trails = data?.trails && typeof data.trails === "object" ? data.trails : {};
     for (const key of need) {
       trailServerFetched.set(key, now);
@@ -1614,6 +2410,16 @@ function normalizeTrailDirection(raw) {
   return "";
 }
 
+function normalizeTrailDestination(raw) {
+  return String(raw || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+/** Live follow tracks the bus only — Map · trail / Map · tails draw per-journey GPS. */
+const SHOW_LIVE_TAIL_WHILE_FOLLOWING = true;
+
 function trailKeysForVehicle({
   vehicleId = "",
   trailKey = "",
@@ -1635,6 +2441,10 @@ function trailKeysForVehicle({
   };
   push(trailKey);
   push(vehicleId);
+  for (const raw of [trailKey, vehicleId]) {
+    const bods = String(raw || "").match(/^bods-(NATX|FLIX)-(.+)$/i);
+    if (bods) push(`bods-${bods[2]}`);
+  }
   push(regTrailKey(reg));
   const jid = trailFilterJourneyId(journeyId, line);
   const tid = String(tripId || "").trim();
@@ -1655,6 +2465,11 @@ function trailKeysForVehicle({
           push(`run:${primary}:${lineCode}:${dir}:${utcDay}`);
           if (ALTON_LINES.has(lineCode)) push(`at:${lineCode}:${dir}:${primary}:${utcDay}`);
         }
+      } else if (jid) {
+        // First Potteries / Staffs locals often omit in/out — keep one run key per journey.
+        push(`run:${primary}:${lineCode}:jny:${jid}`);
+        push(`run:${primary}:${lineCode}:${day}`);
+        if (ALTON_LINES.has(lineCode)) push(`at:${lineCode}:${primary}:${day}`);
       } else {
         // No direction yet — undirected keys only (direction will be inferred/clipped later).
         push(`run:${primary}:${lineCode}:${day}`);
@@ -1686,16 +2501,7 @@ function recordVehicleTrail(key, lat, lng, heading, meta = {}) {
   const tripId = meta.tripId != null ? String(meta.tripId) : "";
   const line = meta.line != null ? String(meta.line) : "";
   const direction = normalizeTrailDirection(meta.direction);
-  // Direction flip on the live vehicle key — don't draw a chord across the turnaround.
-  if (
-    last &&
-    direction &&
-    last.direction &&
-    direction !== last.direction &&
-    !meta._segmented
-  ) {
-    // Still record the point; segment keys below isolate in vs out.
-  }
+  const destination = String(meta.destination || meta.dest || "").trim();
   points.push({
     t: now,
     lat,
@@ -1705,6 +2511,7 @@ function recordVehicleTrail(key, lat, lng, heading, meta = {}) {
     tripId,
     line,
     direction,
+    destination,
     operator: meta.operator != null ? String(meta.operator).trim().toUpperCase() : "",
   });
   queueTrailUpload(id, points[points.length - 1]);
@@ -1739,6 +2546,13 @@ function recordVehicleTrail(key, lat, lng, heading, meta = {}) {
         const atSeg = `at:${lineCode}:${direction}:${id}:${day}`;
         if (atSeg !== id) recordVehicleTrail(atSeg, lat, lng, heading, { ...meta, reg: "", _segmented: true });
       }
+    } else if (journeyId) {
+      const runSeg = `run:${id}:${lineCode}:jny:${journeyId}`;
+      if (runSeg !== id) recordVehicleTrail(runSeg, lat, lng, heading, { ...meta, reg: "", _segmented: true });
+      if (ALTON_LINES.has(lineCode)) {
+        const atSeg = `at:${lineCode}:${id}:${day}`;
+        if (atSeg !== id) recordVehicleTrail(atSeg, lat, lng, heading, { ...meta, reg: "", _segmented: true });
+      }
     } else {
       const runSeg = `run:${id}:${lineCode}:${day}`;
       if (runSeg !== id) recordVehicleTrail(runSeg, lat, lng, heading, { ...meta, reg: "", _segmented: true });
@@ -1763,11 +2577,11 @@ function trackedPointsFor(key, { journeyId = "", tripId = "", fromMs = 0, toMs =
     if (jid && p.journeyId && String(p.journeyId) !== jid) return false;
     if (tid && p.tripId && String(p.tripId) !== tid) return false;
     if (wantLine && p.line && !sameServiceLine(p.line, wantLine)) return false;
-    // Strict: when a direction is requested, never include the opposite leg (or undirected mix-ins).
+    // When a direction is requested, drop the opposite leg — but keep undirected
+    // pings so sparse AVL (common on Staffs routes) does not freeze the live tail.
     if (wantDir) {
       const pDir = normalizeTrailDirection(p.direction);
       if (pDir && pDir !== wantDir) return false;
-      if (!pDir) return false;
     }
     return true;
   });
@@ -1813,6 +2627,7 @@ function trailHeadingDelta(a, b) {
 /**
  * Split GPS into one continuous run per trip.
  * Hanley→Newcastle and Newcastle→Hanley become separate segments (never one there-and-back line).
+ * Intermediate stop dwells (headsign / journey-id flap) stay on the same run until terminus turnaround.
  */
 function segmentTrailIntoTrips(points, { gapMs = 18 * 60_000 } = {}) {
   const list = (Array.isArray(points) ? points.slice() : [])
@@ -1825,6 +2640,12 @@ function segmentTrailIntoTrips(points, { gapMs = 18 * 60_000 } = {}) {
     .sort((a, b) => Number(a.t) - Number(b.t));
   if (list.length < 2) return list.length ? [list] : [];
 
+  // Journey/trip id noise at stops is common — only honour an id flip after a real layover.
+  // Coaches (gapMs ≥ 45m): allow long intermediate stops (Hanley, airports) without splitting.
+  const idFlipMs =
+    gapMs >= 40 * 60_000
+      ? Math.min(Math.max(45 * 60_000, gapMs), 90 * 60_000)
+      : Math.min(Math.max(5 * 60_000, gapMs * 0.25), 12 * 60_000);
   const runs = [];
   let cur = [list[0]];
   for (let i = 1; i < list.length; i += 1) {
@@ -1837,14 +2658,55 @@ function segmentTrailIntoTrips(points, { gapMs = 18 * 60_000 } = {}) {
     const nextJ = String(next.journeyId || "").trim();
     const prevTrip = String(prev.tripId || "").trim();
     const nextTrip = String(next.tripId || "").trim();
-    const journeyFlip = Boolean(prevJ && nextJ && prevJ !== nextJ);
-    const tripFlip = Boolean(prevTrip && nextTrip && prevTrip !== nextTrip);
+    const prevLine = String(prev.line || "").trim().toUpperCase();
+    const nextLine = String(next.line || "").trim().toUpperCase();
+    const lineFlip = Boolean(prevLine && nextLine && prevLine !== nextLine);
     // Direction flip always starts a new trip — even when the bus turns at the terminus.
     const dirFlip = Boolean(prevDir && nextDir && prevDir !== nextDir);
+    const sameDir = Boolean(prevDir && nextDir && prevDir === nextDir);
+    const sameLine = Boolean(prevLine && nextLine && prevLine === nextLine);
+    // Journey/trip id change:
+    // - Different direction or line → always split (Hanley→Newcastle vs Newcastle→Hanley).
+    // - Same directed run → ignore short id flaps at intermediate stops.
+    // - Missing direction on same line → still split after a short dwell so there-and-back
+    //   legs are never glued into one continuous history trail.
+    const journeyFlip = Boolean(
+      prevJ &&
+        nextJ &&
+        prevJ !== nextJ &&
+        (dirFlip ||
+          lineFlip ||
+          !sameDir ||
+          (Number.isFinite(dt) && dt > Math.min(idFlipMs, 3 * 60_000))),
+    );
+    const tripFlip = Boolean(
+      prevTrip &&
+        nextTrip &&
+        prevTrip !== nextTrip &&
+        (dirFlip ||
+          lineFlip ||
+          !sameDir ||
+          (Number.isFinite(dt) && dt > Math.min(idFlipMs, 3 * 60_000))),
+    );
+    // Destination flip when journey/trip ids are missing — not mid-trip next-stop headsign noise.
+    const prevDest = normalizeTrailDestination(prev.destination);
+    const nextDest = normalizeTrailDestination(next.destination);
+    const sameJourney = Boolean(prevJ && nextJ && prevJ === nextJ);
+    const sameTrip = Boolean(prevTrip && nextTrip && prevTrip === nextTrip);
+    const destFlip = Boolean(
+      !sameJourney &&
+        !sameTrip &&
+        !sameDir &&
+        prevDest &&
+        nextDest &&
+        prevDest !== nextDest &&
+        Number.isFinite(dt) &&
+        dt > Math.min(idFlipMs, 2 * 60_000),
+    );
     const gap = Number.isFinite(dt) && dt > gapMs;
 
     let turnaround = false;
-    if (!dirFlip && !journeyFlip && !tripFlip && !gap && cur.length >= 10) {
+    if (!dirFlip && !journeyFlip && !tripFlip && !destFlip && !gap && !lineFlip && cur.length >= 10) {
       const start = cur[0];
       const runDist = haversineMeters(start.lat, start.lng, prev.lat, prev.lng);
       const step = haversineMeters(prev.lat, prev.lng, next.lat, next.lng);
@@ -1853,7 +2715,7 @@ function segmentTrailIntoTrips(points, { gapMs = 18 * 60_000 } = {}) {
       if (runDist >= 700 && headFlip && step < 140) turnaround = true;
     }
 
-    if (journeyFlip || tripFlip || dirFlip || gap || turnaround) {
+    if (journeyFlip || tripFlip || dirFlip || destFlip || gap || turnaround || lineFlip) {
       if (cur.length >= 2) runs.push(cur);
       cur = [next];
     } else {
@@ -1918,7 +2780,8 @@ function collectTrailGpsForKeys(keys, filter = {}) {
         !prev ||
         (normalizeTrailDirection(p.direction) && !normalizeTrailDirection(prev.direction)) ||
         (p.journeyId && !prev.journeyId) ||
-        (p.tripId && !prev.tripId)
+        (p.tripId && !prev.tripId) ||
+        (String(p.destination || "").trim() && !String(prev.destination || "").trim())
       ) {
         byT.set(t, p);
       }
@@ -1955,6 +2818,7 @@ function pinSeparateTripTails(segments, { baseKey = "bus", line = "", operator =
         tripId: p.tripId || "",
         line: p.line || line || "",
         direction: normalizeTrailDirection(p.direction) || dir,
+        destination: String(p.destination || "").trim(),
         operator: p.operator || operator || "",
       })),
     );
@@ -1972,18 +2836,10 @@ function pinSeparateTripTails(segments, { baseKey = "bus", line = "", operator =
   return drawn;
 }
 
-const TRAIL_CASING = {
-  color: "#ffffff",
-  weight: 5,
-  opacity: 0.55,
-  lineJoin: "round",
-  lineCap: "round",
-  interactive: false,
-};
 const TRAIL_STROKE = {
-  color: "#0f172a",
-  weight: 2.25,
-  opacity: 1,
+  color: "#5b51e3",
+  weight: 3.5,
+  opacity: 0.96,
   lineJoin: "round",
   lineCap: "round",
   interactive: false,
@@ -1998,21 +2854,58 @@ const TRAIL_BREAK_SPEED_MPH = 100;
 const COACH_TRAIL_NOCS = new Set(["FLIX", "NATX"]);
 const COACH_TRAIL_BREAK_GAP_M = 28000;
 const COACH_TRAIL_BREAK_HARD_M = 95000;
-const COACH_TRAIL_BREAK_GAP_MS = 45 * 60_000;
+const COACH_TRAIL_BREAK_GAP_MS = 90 * 60_000;
 const COACH_TRAIL_BREAK_SPEED_MPH = 130;
 const COACH_TRAIL_LIVE_MS = 14 * 60 * 60 * 1000;
+/** Staffs locals + AT1–AT3 — NextStop/AVL can gap 20–40+ min; keep each A→B stint together. */
+const STAFFS_TRAIL_NOCS = new Set([
+  "FPOT",
+  "DAGC",
+  "SOST",
+  "CRDR",
+  "SLBS",
+  "BANG",
+  "HIPK",
+  "TBTN",
+  "DIAM",
+  "MDCL",
+]);
+const STAFFS_TRAIL_BREAK_GAP_M = 9000;
+const STAFFS_TRAIL_BREAK_HARD_M = 28000;
+const STAFFS_TRAIL_BREAK_GAP_MS = 75 * 60_000;
+const STAFFS_TRAIL_BREAK_SPEED_MPH = 110;
 
 function isCoachTrailOperator(operator) {
   return COACH_TRAIL_NOCS.has(String(operator || "").trim().toUpperCase());
 }
 
-function trailBreakLimits({ coach = false, operator = "" } = {}) {
+function isStaffsTrailOperator(operator) {
+  return STAFFS_TRAIL_NOCS.has(String(operator || "").trim().toUpperCase());
+}
+
+function trailBreakLimits({ coach = false, staffs = false, operator = "", continuous = false } = {}) {
+  if (continuous) {
+    return {
+      gapM: 1e12,
+      hardM: 1e12,
+      gapMs: 1e12,
+      speedMph: 1e12,
+    };
+  }
   if (coach || isCoachTrailOperator(operator)) {
     return {
       gapM: COACH_TRAIL_BREAK_GAP_M,
       hardM: COACH_TRAIL_BREAK_HARD_M,
       gapMs: COACH_TRAIL_BREAK_GAP_MS,
       speedMph: COACH_TRAIL_BREAK_SPEED_MPH,
+    };
+  }
+  if (staffs || isStaffsTrailOperator(operator)) {
+    return {
+      gapM: STAFFS_TRAIL_BREAK_GAP_M,
+      hardM: STAFFS_TRAIL_BREAK_HARD_M,
+      gapMs: STAFFS_TRAIL_BREAK_GAP_MS,
+      speedMph: STAFFS_TRAIL_BREAK_SPEED_MPH,
     };
   }
   return {
@@ -2167,7 +3060,7 @@ function pathLengthMeters(path, { includeGaps = true } = {}) {
 }
 
 function normalizeGpsTrailPoints(gps) {
-  if (!Array.isArray(gps) || gps.length < 2) return [];
+  if (!Array.isArray(gps) || gps.length < 1) return [];
   const out = [];
   for (const p of gps) {
     if (Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])) {
@@ -2177,6 +3070,7 @@ function normalizeGpsTrailPoints(gps) {
         lng: p[1],
         heading: Number.isFinite(p[2]) ? p[2] : null,
         t: Number.isFinite(t) ? t : null,
+        speedMph: null,
         direction: normalizeTrailDirection(p[4] ?? p.direction),
       });
       continue;
@@ -2186,11 +3080,13 @@ function normalizeGpsTrailPoints(gps) {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
     const heading = Number(p?.heading);
     const t = Number(p?.t);
+    const speedMph = Number(p?.speedMph);
     out.push({
       lat,
       lng,
       heading: Number.isFinite(heading) ? heading : null,
       t: Number.isFinite(t) ? t : null,
+      speedMph: Number.isFinite(speedMph) ? speedMph : null,
       direction: normalizeTrailDirection(p?.direction),
     });
   }
@@ -2214,13 +3110,80 @@ function formatTrailArrowTime(ms) {
     day: "numeric",
     month: "short",
   });
-  return `${day} · ${time}`;
+  // Bustimes-style: clock first, then the calendar day.
+  return `${time} · ${day}`;
+}
+
+function trailSampleSpeedMph(a, b) {
+  if (!a || !b) return null;
+  if (!Number.isFinite(a.t) || !Number.isFinite(b.t)) return null;
+  const dt = Math.abs(b.t - a.t);
+  if (!(dt >= 400 && dt <= 20 * 60_000)) return null;
+  const dist = haversineMeters(a.lat, a.lng, b.lat, b.lng);
+  if (!(dist >= 1)) return dt < 2500 ? 0 : null;
+  const mph = (dist / (dt / 1000)) * 2.23694;
+  if (!(mph >= 0) || mph > 100) return null;
+  return mph;
+}
+
+/** Nearest GPS sample (and interpolated time) for an arrow on the drawn path. */
+function gpsSampleForTrailArrow(gpsPts, lat, lng, frac) {
+  const pts = normalizeGpsTrailPoints(gpsPts);
+  if (!pts.length) return null;
+  let bestIdx = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < pts.length; i += 1) {
+    const d = haversineMeters(lat, lng, pts[i].lat, pts[i].lng);
+    if (d < bestDist) {
+      bestDist = d;
+      bestIdx = i;
+    }
+  }
+  const near = pts[bestIdx];
+  let t = Number.isFinite(near?.t) ? near.t : null;
+  // Along-path fraction fills gaps when the road geometry sits far from raw GPS.
+  const fracT = gpsTimeAtPathFraction(pts, frac);
+  if (Number.isFinite(fracT) && (!Number.isFinite(t) || bestDist > 90)) t = fracT;
+  else if (Number.isFinite(fracT) && Number.isFinite(t) && bestDist > 35) {
+    // Blend: prefer spatial when close, fraction when the match pulled us onto the road.
+    t = fracT;
+  }
+  const prev = pts[bestIdx - 1];
+  const next = pts[bestIdx + 1];
+  const speedMph =
+    trailSampleSpeedMph(near, next) ??
+    trailSampleSpeedMph(prev, near) ??
+    (Number.isFinite(near?.speedMph) ? near.speedMph : null);
+  const heading = Number.isFinite(near?.heading)
+    ? near.heading
+    : next
+      ? segmentBearing([near.lat, near.lng], [next.lat, next.lng])
+      : prev
+        ? segmentBearing([prev.lat, prev.lng], [near.lat, near.lng])
+        : null;
+  return { t, speedMph, heading, distM: bestDist };
+}
+
+function trailArrowPopupHtml(sample) {
+  const when = formatTrailArrowTime(sample?.t);
+  const bits = [];
+  if (Number.isFinite(sample?.speedMph)) {
+    bits.push(sample.speedMph < 1.5 ? "Stopped" : `${Math.round(sample.speedMph)} mph`);
+  }
+  if (Number.isFinite(sample?.heading)) {
+    bits.push(`${Math.round(((sample.heading % 360) + 360) % 360)}°`);
+  }
+  const extra = bits.length ? `<div class="trail-arrow-popup-extra">${esc(bits.join(" · "))}</div>` : "";
+  if (when) {
+    return `<div class="trail-arrow-popup"><strong>Bus was here</strong><div class="trail-arrow-popup-time">${esc(when)}</div>${extra}</div>`;
+  }
+  return `<div class="trail-arrow-popup"><strong>Tracked position</strong><div class="trail-arrow-popup-time">Time unknown for this point</div>${extra}</div>`;
 }
 
 function trailArrowIcon(bearingDeg) {
   const rot = Number.isFinite(bearingDeg) ? bearingDeg : 0;
   const z = map.getZoom();
-  const size = z < 13 ? 14 : z < 15 ? 18 : 22;
+  const size = z < 13 ? 12 : z < 15 ? 15 : 18;
   const half = size / 2;
   return L.divIcon({
     className: "trail-arrow-icon",
@@ -2257,25 +3220,45 @@ function interpolateTrailTime(a, b, t) {
 
 function trailBreakOptsFromFilter(filter = {}, key = "") {
   const op = String(filter?.operator || "").trim().toUpperCase();
-  if (op) return { operator: op, coach: isCoachTrailOperator(op) };
-  if (filter?.coach) return { coach: true, operator: op || "" };
-  const pts = trailMem.get(String(key || "")) || [];
+  const line = String(filter?.line || "").trim().toUpperCase();
+  const id = String(key || "");
+  const staffs =
+    Boolean(filter?.staffs) ||
+    isStaffsTrailOperator(op) ||
+    isAltonLine(line) ||
+    id.startsWith("staff-") ||
+    id.startsWith("at:");
+  if (op) return { operator: op, coach: isCoachTrailOperator(op), staffs };
+  if (filter?.coach) return { coach: true, operator: op || "", staffs };
+  const pts = trailMem.get(id) || [];
   for (let i = pts.length - 1; i >= 0; i -= 1) {
     const pOp = String(pts[i]?.operator || "").trim().toUpperCase();
-    if (pOp) return { operator: pOp, coach: isCoachTrailOperator(pOp) };
+    if (pOp) return { operator: pOp, coach: isCoachTrailOperator(pOp), staffs: staffs || isStaffsTrailOperator(pOp) };
   }
   // Live Flix / NATX markers: bus.id is the trail key but points may lack operator yet.
-  const id = String(key || "");
   if (id) {
     for (const marker of markers.values()) {
       if (String(marker?.bus?.id) !== id) continue;
       if (isFlixBus(marker.bus) || isNationalExpress(marker.bus)) {
         const noc = trailOperatorForBus(marker.bus);
-        return { operator: noc, coach: true };
+        return { operator: noc, coach: true, staffs: false };
       }
     }
   }
-  return {};
+  return { staffs };
+}
+
+/**
+ * Prefer road-matched geometry. If roads aren't ready yet, keep GPS so a trail
+ * still appears — async align upgrades it onto roads when matching finishes.
+ */
+function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
+  const roadFlat = flattenTrailLatLngs(roadPath);
+  if (roadFlat.length >= 2) return roadPath;
+  const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
+  if (flattenTrailLatLngs(local).length >= 2) return local;
+  const gpsFlat = flattenTrailLatLngs(gpsPath);
+  return gpsFlat.length >= 2 ? gpsPath : [];
 }
 
 function gpsTimeAtPathFraction(gpsPts, frac) {
@@ -2316,16 +3299,17 @@ function buildTrailArrowsAlongRoad(path, layer, opts = {}) {
   const maxArrows = 480;
   const z = map.getZoom();
   // Fewer, smaller markers when zoomed out so the trail stays readable.
-  const spacingMul = z < 12 ? 2.4 : z < 13 ? 1.85 : z < 14 ? 1.35 : z < 15 ? 1.1 : 1;
+  const spacingMul = z < 12 ? 2.2 : z < 13 ? 1.7 : z < 14 ? 1.25 : z < 15 ? 1 : 0.9;
   const spacing =
     Math.max(
-      28,
-      Math.min(58, total / Math.max(24, Math.min(maxArrows, Math.ceil(total / 32)))),
+      24,
+      Math.min(46, total / Math.max(24, Math.min(maxArrows, Math.ceil(total / 30)))),
     ) * spacingMul;
   let placed = 0;
   let covered = 0;
-  const placeArrow = (lat, lng, bear, atMs) => {
-    const when = formatTrailArrowTime(atMs);
+  const placeArrow = (lat, lng, bear, frac) => {
+    const sample = gpsSampleForTrailArrow(gps, lat, lng, frac);
+    const when = formatTrailArrowTime(sample?.t);
     const marker = L.marker([lat, lng], {
       icon: trailArrowIcon(bear),
       interactive: true,
@@ -2333,12 +3317,11 @@ function buildTrailArrowsAlongRoad(path, layer, opts = {}) {
       zIndexOffset: 250,
       title: when ? `Bus here at ${when}` : "Tracked position",
     });
-    marker.bindPopup(
-      when
-        ? `<div class="trail-arrow-popup"><strong>Bus was here</strong><div class="trail-arrow-popup-time">${esc(when)}</div></div>`
-        : `<div class="trail-arrow-popup"><strong>Tracked position</strong><div class="trail-arrow-popup-time">Time unknown for this point</div></div>`,
-      { className: "trail-arrow-popup-wrap", maxWidth: 220, closeButton: true },
-    );
+    marker.bindPopup(trailArrowPopupHtml(sample), {
+      className: "trail-arrow-popup-wrap",
+      maxWidth: 240,
+      closeButton: true,
+    });
     marker.on("click", (event) => {
       L.DomEvent.stopPropagation(event);
       marker.openPopup();
@@ -2370,7 +3353,7 @@ function buildTrailArrowsAlongRoad(path, layer, opts = {}) {
         const lat = lat1 + (lat2 - lat1) * t;
         const lng = lng1 + (lng2 - lng1) * t;
         const frac = total > 0 ? (covered + nextAt) / total : 0;
-        placeArrow(lat, lng, bear, gpsTimeAtPathFraction(gps, frac));
+        placeArrow(lat, lng, bear, frac);
         nextAt += spacing;
       }
       travelled += edge;
@@ -2387,34 +3370,52 @@ function buildTrailArrowsAlongRoad(path, layer, opts = {}) {
         last[1],
       ) < Math.min(20, spacing * 0.45);
     if (!tooClose && placed < maxArrows + 1) {
-      placeArrow(last[0], last[1], endBear, gpsTimeAtPathFraction(gps, (covered + travelled) / total));
+      placeArrow(last[0], last[1], endBear, total > 0 ? (covered + travelled) / total : 1);
     }
     covered += travelled;
   }
   return arrows;
 }
 
+function trailPairBreakOpts(opts = {}, fallback = {}) {
+  return {
+    operator: opts.operator || fallback.operator || "",
+    coach: !!(opts.coach ?? fallback.coach),
+    staffs: !!(opts.staffs ?? fallback.staffs),
+  };
+}
+
 function makeTrailPair(path, layer, opts = {}) {
-  const breakOpts = { operator: opts.operator || "", coach: !!opts.coach };
+  const breakOpts = trailPairBreakOpts(opts);
   const latlngs = asTrailLatLngs(path, breakOpts);
-  const casing = L.polyline(latlngs, { ...TRAIL_CASING }).addTo(layer);
+  // Single stroke only — a casing + stroke read as a double line on the map.
   const line = L.polyline(latlngs, { ...TRAIL_STROKE }).addTo(layer);
   const gps = opts.gpsPoints || opts.gpsPath || null;
   const arrows = opts.deferArrows
     ? []
     : buildTrailArrowsAlongRoad(path, layer, { gpsPoints: gps, breakOpts });
-  return { casing, line, arrows, layer, gpsPoints: gps || null, breakOpts };
+  return { casing: null, line, arrows, layer, gpsPoints: gps || null, breakOpts, path };
 }
 
 function setTrailPairPath(pair, path, opts = {}) {
   if (!pair) return;
-  const breakOpts = {
-    ...(pair.breakOpts || {}),
-    ...(opts.operator || opts.coach ? { operator: opts.operator || "", coach: !!opts.coach } : {}),
-  };
-  if (opts.operator || opts.coach) pair.breakOpts = breakOpts;
-  const latlngs = asTrailLatLngs(path, pair.breakOpts || breakOpts);
-  pair.casing.setLatLngs(latlngs);
+  const breakOpts = trailPairBreakOpts(
+    {
+      ...(pair.breakOpts || {}),
+      ...(opts.operator != null || opts.coach != null || opts.staffs != null
+        ? {
+            operator: opts.operator ?? pair.breakOpts?.operator,
+            coach: opts.coach ?? pair.breakOpts?.coach,
+            staffs: opts.staffs ?? pair.breakOpts?.staffs,
+          }
+        : {}),
+    },
+    pair.breakOpts || {},
+  );
+  pair.breakOpts = breakOpts;
+  pair.path = path;
+  const latlngs = asTrailLatLngs(path, breakOpts);
+  pair.casing?.setLatLngs?.(latlngs);
   pair.line.setLatLngs(latlngs);
   if (opts.gpsPoints || opts.gpsPath) {
     pair.gpsPoints = opts.gpsPoints || opts.gpsPath;
@@ -2427,7 +3428,7 @@ function setTrailPairPath(pair, path, opts = {}) {
   // Rebuild arrows on the path being shown (road-aligned when prepareRoadTrail finishes).
   pair.arrows = buildTrailArrowsAlongRoad(path, pair.layer, {
     gpsPoints: pair.gpsPoints,
-    breakOpts: pair.breakOpts || breakOpts,
+    breakOpts,
   });
 }
 
@@ -2435,7 +3436,7 @@ function removeTrailPair(pair, layer) {
   if (!pair) return;
   clearTrailArrows(pair, layer || pair.layer);
   const target = layer || pair.layer;
-  target?.removeLayer(pair.casing);
+  if (pair.casing) target?.removeLayer(pair.casing);
   target?.removeLayer(pair.line);
 }
 
@@ -2519,16 +3520,24 @@ function bestTrackedGpsPoints(keys, opts = {}) {
 
 async function resolveTripIdForPlayback({ tripId = "", journeyId = "", vehicleId = "", line = "", datetime = "" } = {}) {
   if (tripId) return String(tripId);
-  if (!vehicleId) return "";
+  const wantJourney = journeyId ? String(journeyId) : "";
+  // Bustimes vehiclejourneys need a numeric vehicle id — skip BODS/Flix journey ids.
+  if (!vehicleId || !/^\d+$/.test(String(vehicleId))) return "";
   const rows = await fetchVehicleHistory(vehicleId, Math.max(historyDays, 7));
   if (!rows.length) return "";
-  const wantJourney = journeyId ? String(journeyId) : "";
   const wantLine = String(line || "").trim();
   const targetMs = datetime ? new Date(datetime).getTime() : NaN;
   let best = null;
   for (const row of rows) {
     if (!row?.trip_id) continue;
-    if (wantJourney && String(row.id) === wantJourney) return String(row.trip_id);
+    if (
+      wantJourney &&
+      (String(row.id) === wantJourney ||
+        String(row.journey_id || "") === wantJourney ||
+        String(row.trip_id) === wantJourney)
+    ) {
+      return String(row.trip_id);
+    }
     if (wantLine && row.route_name && !sameServiceLine(row.route_name, wantLine)) continue;
     const rowMs = row.datetime ? new Date(row.datetime).getTime() : NaN;
     const dt =
@@ -2547,11 +3556,37 @@ function refreshPinnedTrailLine(key) {
     filter.toMs = 0;
     pinnedTrailFilters.set(id, filter);
   }
-  const breakOpts = trailBreakOptsFromFilter(filter, id);
+  const breakOpts = {
+    ...trailBreakOptsFromFilter(filter, id),
+    staffs:
+      isStaffsTrailOperator(filter.operator) ||
+      isAltonLine(filter.line) ||
+      String(id).startsWith("staff-") ||
+      String(id).startsWith("at:"),
+  };
   const gpsPoints = trackedPointsFor(id, filter);
-  const path = pathFromGpsPoints(gpsPoints);
+  // Split there-and-back / multi-route GPS into separate strokes (never one continuous line).
+  // tripseg: keys are already one trip from pinSeparateTripTails.
+  let path;
+  if (String(id).startsWith("tripseg:")) {
+    path = pathFromGpsPoints(gpsPoints);
+  } else {
+    const gapMs = breakOpts.coach
+      ? COACH_TRAIL_BREAK_GAP_MS
+      : breakOpts.staffs
+        ? STAFFS_TRAIL_BREAK_GAP_MS
+        : 18 * 60_000;
+    const segs = segmentTrailIntoTrips(gpsPoints, { gapMs });
+    if (segs.length > 1) {
+      path = segs
+        .map((seg) => pathFromGpsPoints(seg))
+        .filter((latlngs) => latlngs.length >= 2);
+    } else {
+      path = pathFromGpsPoints(gpsPoints);
+    }
+  }
   const existing = pinnedTrailLines.get(id);
-  if (path.length < 2) {
+  if (flattenTrailLatLngs(path).length < 2) {
     if (existing) {
       removeTrailPair(existing, liveTrailLayer);
       pinnedTrailLines.delete(id);
@@ -2559,15 +3594,20 @@ function refreshPinnedTrailLine(key) {
     pinnedTrailAlignWanted.delete(id);
     return;
   }
-  // Never paint raw GPS chords — only show the line after road matching.
+  // Show GPS immediately so rural AT / Staffs runs appear even before OSM matching finishes.
+  // Clickable arrows use GPS times now; prepareRoadTrail rebuilds them onto the road path.
+  const immediate = preferRoadMatchedTrail(path, [], breakOpts);
   if (!existing) {
     pinnedTrailLines.set(
       id,
-      makeTrailPair([], liveTrailLayer, { gpsPoints, deferArrows: true, ...breakOpts }),
+      makeTrailPair(immediate, liveTrailLayer, { gpsPoints, ...breakOpts }),
     );
   } else {
     existing.gpsPoints = gpsPoints;
-    existing.breakOpts = { ...(existing.breakOpts || {}), ...breakOpts };
+    existing.breakOpts = trailPairBreakOpts({ ...(existing.breakOpts || {}), ...breakOpts });
+    if (flattenTrailLatLngs(immediate).length >= 2) {
+      setTrailPairPath(existing, immediate, { gpsPoints, ...breakOpts });
+    }
   }
   pinnedTrailAlignWanted.set(id, { path, gpsPoints, breakOpts });
   runPinnedTrailAlign(id);
@@ -2591,8 +3631,10 @@ async function runPinnedTrailAlign(id) {
       if (!pinnedTrailKeys.has(key)) return;
       if (pinnedTrailAlignGen.get(key) !== gen) continue;
       const pair = pinnedTrailLines.get(key);
-      if (!pair || flattenTrailLatLngs(aligned).length < 2) continue;
-      setTrailPairPath(pair, aligned, { gpsPoints: job.gpsPoints });
+      if (!pair) continue;
+      const drawn = preferRoadMatchedTrail(job.path, aligned, job.breakOpts || {});
+      if (flattenTrailLatLngs(drawn).length < 2) continue;
+      setTrailPairPath(pair, drawn, { gpsPoints: job.gpsPoints, ...job.breakOpts });
     }
   } finally {
     pinnedTrailAlignBusy.set(key, false);
@@ -2612,12 +3654,19 @@ function refreshLiveTrailLine(key) {
     liveTrailAlignWanted = null;
     return;
   }
+  // Show GPS immediately so the tail keeps following even when OSM match is slow/fails.
+  const immediate = preferRoadMatchedTrail(path, [], breakOpts);
   if (!liveTrailLine) {
-    // Empty until road match finishes — avoids chords through buildings.
-    liveTrailLine = makeTrailPair([], liveTrailLayer, { gpsPoints, deferArrows: true, ...breakOpts });
+    liveTrailLine = makeTrailPair(immediate, liveTrailLayer, {
+      gpsPoints,
+      ...breakOpts,
+    });
   } else {
     liveTrailLine.gpsPoints = gpsPoints;
     liveTrailLine.breakOpts = { ...(liveTrailLine.breakOpts || {}), ...breakOpts };
+    if (flattenTrailLatLngs(immediate).length >= 2) {
+      setTrailPairPath(liveTrailLine, immediate, { gpsPoints, ...breakOpts });
+    }
   }
   liveTrailAlignWanted = { key: String(key), path, gpsPoints, breakOpts };
   runLiveTrailAlign();
@@ -2640,8 +3689,9 @@ async function runLiveTrailAlign() {
       }
       if (liveTrailAlignGen !== gen) continue;
       if (String(liveTrailKey) !== String(job.key) || !liveTrailLine) continue;
-      if (flattenTrailLatLngs(aligned).length < 2) continue;
-      setTrailPairPath(liveTrailLine, aligned, { gpsPoints: job.gpsPoints });
+      const drawn = preferRoadMatchedTrail(job.path, aligned, job.breakOpts || {});
+      if (flattenTrailLatLngs(drawn).length < 2) continue;
+      setTrailPairPath(liveTrailLine, drawn, { gpsPoints: job.gpsPoints });
     }
   } finally {
     liveTrailAlignBusy = false;
@@ -2668,10 +3718,19 @@ function routeTailLinesFor(line) {
   return [code];
 }
 
-function trailTimeWindow(datetime) {
-  if (!datetime) return { fromMs: 0, toMs: 0 };
+function trailTimeWindow(datetime, { coach = false } = {}) {
+  if (!datetime) {
+    return coach ? { fromMs: Date.now() - COACH_TRAIL_LIVE_MS, toMs: 0 } : { fromMs: 0, toMs: 0 };
+  }
   const start = new Date(datetime).getTime();
   if (!Number.isFinite(start)) return { fromMs: 0, toMs: 0 };
+  if (coach) {
+    // Long coach runs exceed 5h — never cap the upper end; keep the last ~14h of GPS.
+    return {
+      fromMs: Math.min(start - 30 * 60 * 1000, Date.now() - COACH_TRAIL_LIVE_MS),
+      toMs: 0,
+    };
+  }
   return {
     fromMs: start - 30 * 60 * 1000,
     // One there OR back run — not a full day of both directions.
@@ -2747,7 +3806,7 @@ async function showFleetRouteTails({
     const vTrip = String(v.trip_id || v.tripId || tripId || "").trim();
     const vWhen = v.datetime || v.recordedAtTime || v.trackedAt || datetime || "";
     let vDir = normalizeTrailDirection(v.direction || direction || "");
-    const window = trailTimeWindow(vWhen);
+    const window = trailTimeWindow(vWhen, { coach: isCoachTrailOperator(opCode) });
     const filter = {
       line: vLine,
       journeyId: vJourney,
@@ -2793,10 +3852,45 @@ async function showFleetRouteTails({
     return;
   }
 
+  if (isCoachTrailOperator(opCode) && targets.length === 1) {
+    const v = targets[0];
+    const expanded = await expandCoachTrailKeys([...keys], {
+      operator: opCode,
+      line: String(v.line || v.route_name || code || "").trim(),
+      reg: v.reg || v.regLabel || reg || "",
+      vehicleId: v.id || v.btId || v.vehicleId || vehicleId || "",
+      journeyId: String(v.journey_id || v.journeyId || journeyId || "").trim(),
+      tripId: String(v.trip_id || v.tripId || tripId || "").trim(),
+    });
+    for (const key of expanded) keys.add(key);
+  }
+
   await fetchServerTrailsChunked([...keys], { force: true });
 
   clearPinnedTrails();
-  multiTailActiveGroup = { id: `route:${code || "one"}`, label };
+  const focusRegs = new Set(
+    targets.map((v) => compactReg(v.reg || v.regLabel || reg || "")).filter(Boolean),
+  );
+  const focusVehicleIds = new Set(
+    targets
+      .flatMap((v) => [v.id, v.btId, v.vehicleId, vehicleId])
+      .map((v) => String(v || "").trim())
+      .filter((v) => v && /^\d+$/.test(v)),
+  );
+  const focusTrailKeys = new Set(
+    targets
+      .flatMap((v) => [v.trailKey, v.ref ? `staff-${v.ref}` : "", trailKey])
+      .map((v) => String(v || "").trim())
+      .filter(Boolean),
+  );
+  multiTailActiveGroup = {
+    id: `route:${code || "one"}`,
+    label,
+    focus:
+      targets.length === 1
+        ? { hideAll: false, vehicleIds: focusVehicleIds, trailKeys: focusTrailKeys, regs: focusRegs }
+        : { hideAll: true, vehicleIds: new Set(), trailKeys: new Set(), regs: new Set() },
+  };
   const drawn = [];
   const seenSeg = new Set();
 
@@ -2804,7 +3898,7 @@ async function showFleetRouteTails({
   for (const v of targets) {
     const vLine = String(v.line || v.route_name || code || "").trim();
     const vWhen = v.datetime || v.recordedAtTime || v.trackedAt || datetime || "";
-    const window = trailTimeWindow(vWhen);
+    const window = trailTimeWindow(vWhen, { coach: isCoachTrailOperator(opCode) });
     const vKeys = trailKeysForVehicle({
       vehicleId: v.id || v.btId || v.vehicleId || vehicleId || "",
       trailKey: v.trailKey || (v.ref ? `staff-${v.ref}` : "") || trailKey || "",
@@ -2820,7 +3914,13 @@ async function showFleetRouteTails({
       fromMs: window.fromMs,
       toMs: window.toMs,
     });
-    const segments = segmentTrailIntoTrips(gps);
+    const staffsGap =
+      isStaffsTrailOperator(opCode) ||
+      isAltonLine(vLine || code) ||
+      String(v.trailKey || trailKey || "").startsWith("staff-");
+    const segments = segmentTrailIntoTrips(gps, {
+      gapMs: staffsGap ? STAFFS_TRAIL_BREAK_GAP_MS : 18 * 60_000,
+    });
     const base =
       v.id ||
       v.btId ||
@@ -2870,10 +3970,13 @@ async function showFleetRouteTails({
   if (!drawn.length) {
     showMessage(`No GPS tails for ${label} yet — open the live bus or wait for the server recorder`);
   } else {
+    const prevFocus = multiTailActiveGroup?.focus;
     multiTailActiveGroup = {
       id: `route:${code || "one"}`,
       label: `${label}${drawn.length > 1 ? ` · ${drawn.length} trips` : ""}`,
+      focus: prevFocus,
     };
+    applyHistoryMapFocusToLiveMarkers();
     messageEl.hidden = true;
     updatePlaybackChrome();
   }
@@ -2941,8 +4044,16 @@ function collectLiveTrailKeysForGroup(group) {
   return [...keys];
 }
 
+/** Short-lived cache for /api/trails/keys lookups — same op+line is reused across map clicks. */
+const trailKeysForGroupCache = new Map();
+const TRAIL_KEYS_GROUP_TTL_MS = 90_000;
+
 async function fetchTrailKeysForGroup(group, { days = TRAIL_KEEP_DAYS } = {}) {
   if (!group) return [];
+  const cacheKey = `${String(group.operators || []).join(",")}|${String(group.lines || []).join(",")}|${days}`;
+  const cachedAt = trailKeysForGroupCache.get(cacheKey + ":at") || 0;
+  const cached = trailKeysForGroupCache.get(cacheKey);
+  if (cached && Date.now() - cachedAt < TRAIL_KEYS_GROUP_TTL_MS) return cached;
   try {
     const params = new URLSearchParams({
       days: String(days),
@@ -2951,20 +4062,59 @@ async function fetchTrailKeysForGroup(group, { days = TRAIL_KEEP_DAYS } = {}) {
     if (group.operators?.length) params.set("operators", group.operators.join(","));
     if (group.lines?.length) params.set("lines", group.lines.join(","));
     const res = await fetch(`/api/trails/keys?${params}`);
-    if (!res.ok) return [];
+    if (!res.ok) return cached || [];
     const data = await res.json();
-    return Array.isArray(data?.keys)
+    const keys = Array.isArray(data?.keys)
       ? data.keys.map((row) => String(row?.key || "").trim()).filter(Boolean)
       : [];
+    trailKeysForGroupCache.set(cacheKey, keys);
+    trailKeysForGroupCache.set(cacheKey + ":at", Date.now());
+    return keys;
   } catch {
-    return [];
+    return cached || [];
   }
 }
 
+/** Merge server-side coach GPS keys (reg / bustimes id / journey) for BODS NATX & Flix. */
+async function expandCoachTrailKeys(keys, { operator = "", line = "", reg = "", vehicleId = "", journeyId = "", tripId = "" } = {}) {
+  const out = new Set((keys || []).map((k) => String(k || "").trim()).filter(Boolean));
+  if (!isCoachTrailOperator(operator)) return [...out];
+
+  const plate = compactReg(reg);
+  const jid = trailFilterJourneyId(journeyId, line);
+  const tid = String(tripId || "").trim();
+  const vid = String(vehicleId || "").trim();
+  if (plate) out.add(regTrailKey(plate));
+  if (vid && /^\d+$/.test(vid)) out.add(vid);
+  if (jid) out.add(`jny:${jid}`);
+  if (tid) out.add(`trip:${tid}`);
+
+  try {
+    const op = String(operator || "").trim().toUpperCase();
+    const group = { operators: [op] };
+    const lineCode = String(line || "").trim();
+    if (lineCode) group.lines = [lineCode];
+    const serverKeys = await fetchTrailKeysForGroup(group, { days: TRAIL_KEEP_DAYS });
+    for (const key of serverKeys) {
+      if (!key) continue;
+      if (vid && key === vid) out.add(key);
+      if (plate && (key === regTrailKey(plate) || key.includes(plate))) out.add(key);
+      if (jid && (key === `jny:${jid}` || key.includes(jid))) out.add(key);
+      if (tid && (key === `trip:${tid}` || key.includes(tid))) out.add(key);
+      if (plate && key.startsWith(`run:reg:${plate}:`)) out.add(key);
+      if (vid && key.startsWith(`run:${vid}:`)) out.add(key);
+    }
+  } catch {
+    /* optional */
+  }
+
+  return [...out];
+}
+
 async function fetchServerTrailsChunked(keys, opts = {}) {
-  const list = [...new Set((keys || []).map((k) => String(k || "").trim()).filter(Boolean))];
-  for (let i = 0; i < list.length; i += 8) {
-    await fetchServerTrails(list.slice(i, i + 8), opts);
+  const list = preferTrailFetchKeys(keys, { limit: 0 });
+  for (let i = 0; i < list.length; i += 12) {
+    await fetchServerTrails(list.slice(i, i + 12), opts);
   }
 }
 
@@ -2987,6 +4137,7 @@ function pinVehicleTrail({
   direction = "",
   datetime = "",
   live = false,
+  liveFocus = true,
 } = {}) {
   const safeDirection = normalizeTrailDirection(direction);
   const keys = trailKeysForVehicle({
@@ -3036,7 +4187,8 @@ function pinVehicleTrail({
     refreshPinnedTrailLine(key);
   }
   const primary = String(trailKey || vehicleId || keys[0] || "").trim();
-  if (followLive && primary) setLiveTrailFocus(primary);
+  // History · Map pins its own stroke — skip a second liveTrailLine overlay.
+  if (followLive && primary && liveFocus) setLiveTrailFocus(primary);
   updatePlaybackChrome();
 }
 
@@ -3059,7 +4211,78 @@ function setLiveTrailFocus(key) {
     return;
   }
   rememberTrailVehicle(liveTrailKey);
-  refreshLiveTrailLine(liveTrailKey);
+  hydrateLiveTrailFromServer(liveTrailKey).catch(() => {
+    refreshLiveTrailLine(liveTrailKey);
+  });
+}
+
+/** Pull saved GPS tails before drawing live / history Map arrows. */
+async function hydrateLiveTrailFromServer(key) {
+  const id = String(key || "").trim();
+  if (!id) return;
+  const marker =
+    [...markers.values()].find((m) => String(m?.bus?.id) === id) ||
+    [...markers.values()].find((m) => String(m?.extra?.trailKey || "") === id) ||
+    [...staffMarkers.values()].find(
+      (m) => String(m?.extra?.trailKey || staffTrailKey(m.staff) || "") === id,
+    ) ||
+    null;
+  const bus = marker?.bus || null;
+  const extra = marker?.extra || {};
+  const reg =
+    busRegistration(bus || {}, extra) ||
+    extra.btVehicle?.reg ||
+    extra.vehicle?.reg ||
+    "";
+  const journeyId = String(
+    bus?.journey_id || (!bus?.vehicle?.id && !String(id).startsWith("bods-") ? bus?.id : "") || "",
+  ).trim();
+  const keys = trailKeysForVehicle({
+    trailKey: id,
+    vehicleId: historyVehicleId(bus, extra) || ( /^\d+$/.test(id) ? id : ""),
+    journeyId: journeyId && !/^(live-|at-)/i.test(journeyId) ? journeyId : "",
+    tripId: bus?.trip_id || "",
+    line: bus?.service?.line_name || extra.line || extra.historyLineFilter || "",
+    datetime: bus?.datetime || new Date().toISOString(),
+    reg,
+  });
+  if (journeyId && !/^(live-|at-)/i.test(journeyId)) {
+    if (!keys.includes(journeyId)) keys.push(journeyId);
+    if (!keys.includes(`jny:${journeyId}`)) keys.push(`jny:${journeyId}`);
+  }
+  if (/^\d{6,}$/.test(id) && !keys.includes(`jny:${id}`)) keys.push(`jny:${id}`);
+  const plateKey = regTrailKey(reg);
+  if (plateKey && !keys.includes(plateKey)) keys.push(plateKey);
+  // BODS live id + bustimes numeric id both hold Staffs GPS — merge them.
+  const btId = historyVehicleId(bus, extra);
+  if (btId && !keys.includes(String(btId))) keys.push(String(btId));
+  if (bus?.id && !keys.includes(String(bus.id))) keys.push(String(bus.id));
+
+  const coachOp = isCoachTrailOperator(extra.operatorNoc || trailOperatorForBus(bus) || "");
+  if (coachOp) {
+    const expanded = await expandCoachTrailKeys(keys, {
+      operator: extra.operatorNoc || trailOperatorForBus(bus) || "",
+      line: bus?.service?.line_name || extra.line || "",
+      reg,
+      vehicleId: btId || "",
+      journeyId: journeyId && !/^(live-|at-)/i.test(journeyId) ? journeyId : "",
+      tripId: bus?.trip_id || "",
+    });
+    for (const key of expanded) {
+      if (!keys.includes(key)) keys.push(key);
+    }
+  }
+
+  await fetchServerTrailsChunked(keys, { force: true });
+
+  let merged = trailMem.get(id) || [];
+  for (const k of keys) {
+    if (!k || k === id) continue;
+    const pts = trailMem.get(String(k)) || [];
+    if (pts.length) merged = mergeTrailPoints(merged, pts);
+  }
+  if (merged.length) trailMem.set(id, merged);
+  if (String(liveTrailKey) === id) refreshLiveTrailLine(id);
 }
 
 loadTrailStore();
@@ -3103,7 +4326,9 @@ function updatePlaybackChrome() {
 
 function stopRoutePlayback(message = "", { clearTail = false } = {}) {
   clearPlaybackLayers();
+  gpsReplayTeardown();
   playback = null;
+  hideJourneyPanel();
   if (clearTail) {
     clearPinnedTrails();
     setLiveTrailFocus("");
@@ -3112,6 +4337,108 @@ function stopRoutePlayback(message = "", { clearTail = false } = {}) {
   if (message) showMessage(message);
   const open = openJourneyMarker();
   if (open) refreshPopup(open, { force: true });
+  // Restore normal live map after leaving history Map mode.
+  loadBuses({ replace: true }).catch(() => {});
+}
+
+/** While History · Map is open, prefer that bus — but never freeze the whole live map forever. */
+function historyMapFocus() {
+  if (playback) {
+    const vehicleIds = new Set();
+    const trailKeys = new Set();
+    const regs = new Set();
+    const vid = String(playback.vehicleId || "").trim();
+    const trail = String(playback.trailKey || "").trim();
+    const reg = compactReg(playback.reg || "");
+    const playKey = String(playback.playKey || "").trim();
+    if (vid) {
+      vehicleIds.add(vid);
+      trailKeys.add(vid);
+    }
+    if (trail) trailKeys.add(trail);
+    if (playKey) trailKeys.add(playKey);
+    if (reg) {
+      regs.add(reg);
+      trailKeys.add(`reg:${reg}`);
+    }
+    return { hideAll: false, journeyOnly: true, vehicleIds, trailKeys, regs };
+  }
+  if (multiTailActiveGroup && pinnedTrailKeys.size) {
+    const focus = multiTailActiveGroup.focus;
+    // Single-bus / focused tails: keep that vehicle visible as journeyOnly.
+    if (focus && !focus.hideAll && (focus.vehicleIds?.size || focus.trailKeys?.size || focus.regs?.size)) {
+      return {
+        hideAll: false,
+        journeyOnly: true,
+        vehicleIds: focus.vehicleIds || new Set(),
+        trailKeys: focus.trailKeys || new Set(),
+        regs: focus.regs || new Set(),
+      };
+    }
+    // Route-wide Map · tails: hide other live pins while tails are open —
+    // but loadBuses still runs so exiting tails instantly restores Staffs buses.
+    return { hideAll: true, vehicleIds: new Set(), trailKeys: new Set(), regs: new Set() };
+  }
+  return null;
+}
+
+function busMatchesHistoryFocus(bus, extra = {}, focus) {
+  if (!focus) return true;
+  if (focus.hideAll) return false;
+  const id = String(bus?.id || "").trim();
+  const btId = String(historyVehicleId(bus, extra) || bus?.btId || "").trim();
+  const trail = String(extra?.trailKey || id || "").trim();
+  const reg = compactReg(
+    busRegistration(bus || {}, extra) || bus?.vehicle?.reg || bus?.vehicle?.name || extra?.reg || "",
+  );
+  if (id && focus.trailKeys.has(id)) return true;
+  if (trail && focus.trailKeys.has(trail)) return true;
+  if (btId && (focus.vehicleIds.has(btId) || focus.trailKeys.has(btId))) return true;
+  if (id && focus.vehicleIds.has(id)) return true;
+  if (reg && focus.regs.has(reg)) return true;
+  return false;
+}
+
+function markerMatchesHistoryFocus(marker, focus) {
+  if (!focus) return true;
+  if (focus.hideAll) return false;
+  if (marker?.staff) {
+    const key = String(marker.extra?.trailKey || staffTrailKey(marker.staff) || "").trim();
+    const reg = compactReg(parseFleetReg(marker.staff?.vehicle?.ref).reg || "");
+    if (key && focus.trailKeys.has(key)) return true;
+    if (reg && focus.regs.has(reg)) return true;
+    return false;
+  }
+  return busMatchesHistoryFocus(marker?.bus, marker?.extra || {}, focus);
+}
+
+function applyHistoryMapFocusToLiveMarkers(focus = historyMapFocus()) {
+  if (!focus) return;
+  if (focus.hideAll) {
+    for (const [id] of [...markers.entries()]) {
+      dropServiceBus(id);
+      motion.delete(`bus-${id}`);
+    }
+    for (const [id, marker] of [...staffMarkers.entries()]) {
+      staffLayer.removeLayer(marker);
+      staffMarkers.delete(id);
+      motion.delete(`staff-${id}`);
+    }
+    if (followTarget) stopFollowBus();
+    return;
+  }
+  if (!focus.journeyOnly) return;
+  for (const [id, marker] of [...markers.entries()]) {
+    if (markerMatchesHistoryFocus(marker, focus)) continue;
+    dropServiceBus(id);
+    motion.delete(`bus-${id}`);
+  }
+  for (const [id, marker] of [...staffMarkers.entries()]) {
+    if (markerMatchesHistoryFocus(marker, focus)) continue;
+    staffLayer.removeLayer(marker);
+    staffMarkers.delete(id);
+    motion.delete(`staff-${id}`);
+  }
 }
 
 function routeOverlayActive(playKey, { vehicleId = "", trailKey = "" } = {}) {
@@ -3121,6 +4448,257 @@ function routeOverlayActive(playKey, { vehicleId = "", trailKey = "" } = {}) {
     (vehicleId && String(playback.vehicleId) === String(vehicleId)) ||
     (trailKey && String(playback.trailKey || "") === String(trailKey))
   );
+}
+
+
+function resolvePlaybackVehiclePing({ vehicleId = "", trailKey = "", reg = "", trackedGps = [] } = {}) {
+  const vid = String(vehicleId || "").trim();
+  const trail = String(trailKey || "").trim();
+  const plate = compactReg(reg || "");
+  const focus = {
+    hideAll: false,
+    journeyOnly: true,
+    vehicleIds: new Set([vid].filter(Boolean)),
+    trailKeys: new Set([vid, trail, plate ? "reg:" + plate : ""].filter(Boolean)),
+    regs: new Set([plate].filter(Boolean)),
+  };
+  for (const marker of markers.values()) {
+    if (!busMatchesHistoryFocus(marker.bus, marker.extra || {}, focus)) continue;
+    const [lng, lat] = marker.bus?.coordinates || [];
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    const t = marker.bus?.datetime ? new Date(marker.bus.datetime).getTime() : NaN;
+    return {
+      lat,
+      lng,
+      heading: Number(marker.bus?.heading),
+      t: Number.isFinite(t) ? t : Date.now(),
+      speedMph: Number.isFinite(marker.bus?.speedMph) ? marker.bus.speedMph : null,
+      source: "live",
+    };
+  }
+  for (const marker of staffMarkers.values()) {
+    if (!markerMatchesHistoryFocus(marker, focus)) continue;
+    const lat = Number(marker.staff?.positioning?.latitude);
+    const lng = Number(marker.staff?.positioning?.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    const t = marker.staff?.recordedAtTime ? new Date(marker.staff.recordedAtTime).getTime() : NaN;
+    return {
+      lat,
+      lng,
+      heading: Number(marker.staff?.positioning?.bearing),
+      t: Number.isFinite(t) ? t : Date.now(),
+      speedMph: Number.isFinite(marker.staff?.speedMph) ? marker.staff.speedMph : null,
+      source: "staff",
+    };
+  }
+  const pts = normalizeGpsTrailPoints(trackedGps);
+  if (pts.length) {
+    const last = pts[pts.length - 1];
+    return {
+      lat: last.lat,
+      lng: last.lng,
+      heading: Number(last.heading),
+      t: Number.isFinite(last.t) ? last.t : Date.now(),
+      speedMph: Number.isFinite(last.speedMph) ? last.speedMph : null,
+      source: "trail",
+    };
+  }
+  return null;
+}
+
+/** Build GPS samples for trail arrows: prefer real pings, else last ping projected along the road path. */
+function gpsPointsForJourneyArrows(roadPath, lastPing, trackedGps = [], datetime = "") {
+  const real = normalizeGpsTrailPoints(trackedGps);
+  if (real.length >= 2) return real;
+  const flat = flattenTrailLatLngs(roadPath);
+  if (!lastPing || !Number.isFinite(lastPing.lat) || !Number.isFinite(lastPing.lng) || flat.length < 2) {
+    return real.length
+      ? real
+      : lastPing && Number.isFinite(lastPing.lat)
+        ? [
+            {
+              lat: lastPing.lat,
+              lng: lastPing.lng,
+              t: lastPing.t,
+              heading: lastPing.heading,
+              speedMph: lastPing.speedMph,
+            },
+          ]
+        : [];
+  }
+  let bestI = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < flat.length; i += 1) {
+    const d = haversineMeters(lastPing.lat, lastPing.lng, flat[i][0], flat[i][1]);
+    if (d < bestD) {
+      bestD = d;
+      bestI = i;
+    }
+  }
+  const startMs = datetime ? new Date(datetime).getTime() : NaN;
+  const endMs = Number.isFinite(lastPing.t) ? lastPing.t : Date.now();
+  const origin = Number.isFinite(startMs) && startMs < endMs ? startMs : endMs - 45 * 60_000;
+  const out = [];
+  const step = Math.max(1, Math.floor(Math.max(bestI, 1) / 48));
+  for (let i = 0; i <= bestI; i += step) {
+    const frac = bestI > 0 ? i / bestI : 1;
+    const a = flat[Math.max(0, i - 1)];
+    const b = flat[i];
+    const heading =
+      i === bestI && Number.isFinite(lastPing.heading) ? lastPing.heading : segmentBearing(a, b);
+    out.push({
+      lat: b[0],
+      lng: b[1],
+      t: origin + (endMs - origin) * frac,
+      heading,
+      speedMph: i === bestI ? lastPing.speedMph : null,
+    });
+  }
+  out.push({
+    lat: lastPing.lat,
+    lng: lastPing.lng,
+    t: endMs,
+    heading: Number.isFinite(lastPing.heading) ? lastPing.heading : out[out.length - 1]?.heading,
+    speedMph: lastPing.speedMph,
+  });
+  return out;
+}
+
+/** Bustimes-style playback colour — deep indigo route tail. */
+const PLAYBACK_LINE_COLOR = "#5b51e3";
+
+/** Cut a path at the bus's current ping so the tail never runs ahead of it. */
+function clipTrailPathAtPing(path, ping) {
+  if (!ping || !Number.isFinite(ping.lat) || !Number.isFinite(ping.lng)) return path;
+  const segs = asTrailLatLngs(path);
+  if (!segs.length) return path;
+  let bestSeg = -1;
+  let bestIdx = -1;
+  let bestD = Infinity;
+  for (let s = 0; s < segs.length; s += 1) {
+    const seg = segs[s];
+    for (let i = 0; i < seg.length; i += 1) {
+      const d = haversineMeters(ping.lat, ping.lng, seg[i][0], seg[i][1]);
+      if (d < bestD) {
+        bestD = d;
+        bestSeg = s;
+        bestIdx = i;
+      }
+    }
+  }
+  // Ping must sit on this path (±350m) — otherwise it belongs to another leg; don't clip.
+  if (bestSeg < 0 || bestIdx < 1 || bestD > 350) return path;
+  const out = segs.slice(0, bestSeg).map((seg) => seg.slice());
+  const tail = segs[bestSeg].slice(0, bestIdx + 1);
+  tail.push([ping.lat, ping.lng]);
+  out.push(tail);
+  return out.filter((seg) => seg.length >= 2);
+}
+
+/** One bustimes-style scene: indigo stroke, white chevrons, ping pin, stops.
+ * For GPS-tail playbacks the pinned strokes carry the line + arrows; the scene adds
+ * ping/stop markers only, so nothing is drawn twice.
+ */
+function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
+  const {
+    trackedGps = [],
+    lastPing = null,
+    isHistorical = false,
+    usingTracked = false,
+    alignBreak = {},
+    datetime = "",
+    tripStops = [],
+  } = opts;
+  playbackLayer.clearLayers();
+  const flat = flattenTrailLatLngs(drawPath);
+  if (flat.length < 2) return;
+  if (!usingTracked) {
+    const arrowGps =
+      trackedGps.length >= 2
+        ? normalizeGpsTrailPoints(trackedGps)
+        : gpsPointsForJourneyArrows(drawPath, lastPing, trackedGps, datetime);
+    const pair = makeTrailPair(drawPath, playbackLayer, {
+      gpsPoints: arrowGps.length ? arrowGps : lastPing ? [lastPing] : [],
+      ...alignBreak,
+    });
+    try {
+      pair.line.setStyle({
+        color: PLAYBACK_LINE_COLOR,
+        weight: 4,
+        opacity: 0.96,
+        lineJoin: "round",
+        lineCap: "round",
+      });
+    } catch {
+      /* ignore */
+    }
+    if (!pair?.arrows?.length) {
+      pair.arrows = buildTrailArrowsAlongRoad(drawPath, playbackLayer, {
+        gpsPoints: arrowGps.length ? arrowGps : lastPing ? [lastPing] : [],
+        breakOpts: alignBreak,
+      });
+    }
+  }
+  if (isHistorical) {
+    L.circleMarker(flat[0], {
+      radius: 6,
+      color: "#ffffff",
+      weight: 2,
+      fillColor: "#22c55e",
+      fillOpacity: 1,
+    })
+      .addTo(playbackLayer)
+      .bindTooltip("Start", { direction: "top", opacity: 0.9 });
+    L.circleMarker(flat[flat.length - 1], {
+      radius: 6,
+      color: "#ffffff",
+      weight: 2,
+      fillColor: "#ef4444",
+      fillOpacity: 1,
+    })
+      .addTo(playbackLayer)
+      .bindTooltip("End", { direction: "top", opacity: 0.9 });
+  }
+  // Last AVL ping on the road (where arrows / bus orientation come from).
+  if (lastPing && Number.isFinite(lastPing.lat) && Number.isFinite(lastPing.lng)) {
+    const snap = snapHit(lastPing.lat, lastPing.lng, lastPing.heading, 120) || null;
+    const plat = snap?.lat ?? lastPing.lat;
+    const plng = snap?.lng ?? lastPing.lng;
+    const pHead = Number.isFinite(snap?.heading) ? snap.heading : lastPing.heading;
+    const when = formatTrailArrowTime(lastPing.t);
+    L.circleMarker([plat, plng], {
+      radius: 7,
+      color: "#0b1018",
+      weight: 2,
+      fillColor: "#73d700",
+      fillOpacity: 1,
+    })
+      .addTo(playbackLayer)
+      .bindTooltip(when ? "Last ping · " + when : "Last ping", { direction: "top", opacity: 0.95 });
+    if (Number.isFinite(pHead)) {
+      L.marker([plat, plng], {
+        interactive: false,
+        keyboard: false,
+        zIndexOffset: 400,
+        icon: trailArrowIcon(pHead),
+      }).addTo(playbackLayer);
+    }
+  }
+  for (const stop of tripStops) {
+    if (!Number.isFinite(stop.lat) || !Number.isFinite(stop.lng)) continue;
+    L.circleMarker([stop.lat, stop.lng], {
+      radius: stop.timingStatus === "PTP" ? 4 : 3,
+      color: "#0b1018",
+      weight: 1,
+      fillColor: stop.done ? "#94a3b8" : "#c4b5fd",
+      fillOpacity: 0.95,
+    })
+      .addTo(playbackLayer)
+      .bindTooltip(stop.name || "Stop", { direction: "top", opacity: 0.9 });
+  }
+  if (fit) {
+    map.fitBounds(L.latLngBounds(flat).pad(0.1), { maxZoom: 13, animate: true });
+  }
 }
 
 async function startRoutePlayback({
@@ -3135,6 +4713,7 @@ async function startRoutePlayback({
   datetime = "",
   reg = "",
   showTail = false,
+  diverted = false,
 } = {}) {
   const playKey = tripId || journeyId || trailKey || vehicleId || regTrailKey(reg);
   if (!playKey) {
@@ -3145,7 +4724,13 @@ async function startRoutePlayback({
     stopRoutePlayback("", { clearTail: true });
     return;
   }
+  gpsReplayTeardown();
   showMessage("Loading route…");
+  // A new history row replaces the previous replay immediately; never leave old
+  // outbound/inbound tails visible while the next Bustimes trip is loading.
+  stopRoutePlayback("", { clearTail: true });
+  clearPinnedTrails();
+  setLiveTrailFocus("");
   const safeJourneyId = trailFilterJourneyId(journeyId, line);
   let safeDirection = normalizeTrailDirection(direction);
   const keys = trailKeysForVehicle({
@@ -3160,17 +4745,28 @@ async function startRoutePlayback({
   });
   for (const key of keys) rememberTrailVehicle(key);
 
+  const coachPlayback = isCoachTrailOperator(operator);
   let fromMs = 0;
   let toMs = 0;
   let aroundMs = 0;
+  const historicalPlayback = datetime && Date.now() - new Date(datetime).getTime() > 12 * 60_000;
   if (datetime) {
     const start = new Date(datetime).getTime();
     if (Number.isFinite(start)) {
       aroundMs = start;
-      // One outbound or inbound run — not the whole day there-and-back.
-      fromMs = start - 30 * 60 * 1000;
-      toMs = start + 5 * 60 * 60 * 1000;
+      if (coachPlayback) {
+        fromMs = Math.min(start - 30 * 60 * 1000, Date.now() - COACH_TRAIL_LIVE_MS);
+        toMs = 0;
+      } else {
+        // One outbound or inbound run — not the whole day there-and-back.
+        fromMs = start - 30 * 60 * 1000;
+        toMs = start + 5 * 60 * 60 * 1000;
+      }
     }
+  } else if (coachPlayback) {
+    fromMs = Date.now() - COACH_TRAIL_LIVE_MS;
+    toMs = 0;
+    aroundMs = Date.now();
   }
 
   const resolvedTripId = await resolveTripIdForPlayback({
@@ -3189,7 +4785,20 @@ async function startRoutePlayback({
     const jnySeg = `jny:${safeJourneyId}`;
     if (!keys.includes(jnySeg)) keys.unshift(jnySeg);
   }
-  await fetchServerTrails(keys, {
+  if (coachPlayback) {
+    const expanded = await expandCoachTrailKeys(keys, {
+      operator,
+      line,
+      reg,
+      vehicleId,
+      journeyId: safeJourneyId,
+      tripId: resolvedTripId || tripId,
+    });
+    for (const key of expanded) {
+      if (!keys.includes(key)) keys.push(key);
+    }
+  }
+  await fetchServerTrailsChunked(keys, {
     fromMs: fromMs ? fromMs - 30 * 60_000 : 0,
     toMs: toMs ? toMs + 30 * 60_000 : 0,
     force: true,
@@ -3219,7 +4828,7 @@ async function startRoutePlayback({
       })) {
         if (!keys.includes(key)) keys.push(key);
       }
-      await fetchServerTrails(keys, {
+      await fetchServerTrailsChunked(keys, {
         fromMs: fromMs ? fromMs - 30 * 60_000 : 0,
         toMs: toMs ? toMs + 30 * 60_000 : 0,
         force: true,
@@ -3228,8 +4837,10 @@ async function startRoutePlayback({
   }
 
   // Load the full window without forcing one direction — we split trips below.
-  const coachGapMs = isCoachTrailOperator(operator) ? COACH_TRAIL_BREAK_GAP_MS : 18 * 60_000;
-  const trackOpts = {
+  const staffsGap =
+    isStaffsTrailOperator(operator) || isAltonLine(line) || String(trailKey || "").startsWith("staff-");
+  const coachGapMs = coachPlayback ? COACH_TRAIL_BREAK_GAP_MS : staffsGap ? STAFFS_TRAIL_BREAK_GAP_MS : 18 * 60_000;
+  let trackOpts = {
     journeyId: "",
     tripId: "",
     fromMs,
@@ -3237,7 +4848,12 @@ async function startRoutePlayback({
     line,
     direction: "",
   };
-  const allGps = collectTrailGpsForKeys(keys, trackOpts);
+  let allGps = collectTrailGpsForKeys(keys, trackOpts);
+  if (coachPlayback && allGps.length < 2) {
+    await fetchServerTrailsChunked(keys, { force: true });
+    trackOpts = { ...trackOpts, fromMs: Date.now() - COACH_TRAIL_LIVE_MS, toMs: 0 };
+    allGps = collectTrailGpsForKeys(keys, trackOpts);
+  }
   const tripSegments = segmentTrailIntoTrips(allGps, { gapMs: coachGapMs });
 
   // Playback highlight: the one trip matching journey/trip/direction/time — not the whole there-and-back.
@@ -3250,8 +4866,26 @@ async function startRoutePlayback({
       if (wantJny && seg.some((p) => String(p.journeyId || "") === wantJny)) return true;
       return false;
     });
-    if (match) trackedGps = match;
-    else {
+    if (match) {
+      trackedGps = match;
+      // Journey/trip ids often flap at intermediate stops — if this slice is short, prefer the
+      // longer continuous same-direction run around that time (through to the final destination).
+      if (match.length < 16 && allGps.length > match.length) {
+        const midT =
+          aroundMs ||
+          Number(match[Math.floor(match.length / 2)]?.t) ||
+          Number(match[0]?.t) ||
+          0;
+        const expanded = clipPointsToSingleDirectionRun(allGps, {
+          direction:
+            safeDirection ||
+            inferTrailDirection(match) ||
+            normalizeTrailDirection(match.find((p) => p.direction)?.direction),
+          aroundMs: midT,
+        });
+        if (expanded.length > trackedGps.length) trackedGps = expanded;
+      }
+    } else {
       trackedGps = clipPointsToSingleDirectionRun(allGps, {
         direction: safeDirection,
         aroundMs: aroundMs || (allGps[0] ? Number(allGps[0].t) : 0),
@@ -3270,187 +4904,184 @@ async function startRoutePlayback({
   let tracked = pathFromGpsPoints(trackedGps);
   const trip = resolvedTripId ? await tripEnds(resolvedTripId) : tripId ? await tripEnds(tripId) : null;
   const tripPath = Array.isArray(trip?.path) ? trip.path : [];
-  const coachOp = isCoachTrailOperator(operator);
-  // Always prefer the GPS trail the bus actually drove when we have one —
-  // except coaches: sparse AVL often only covers a stub of a long motorway route.
-  let usingTracked = tracked.length >= 2;
-  if (coachOp && tripPath.length >= 2 && tracked.length >= 2) {
+  const tripStops = Array.isArray(trip?.stops) ? trip.stops : [];
+  const coachOp = coachPlayback;
+  // Prefer real GPS where the coach/bus actually drove. Timetable is fallback only.
+  // GPS-tail playbacks (Staffs locals, coaches, AT) never hard-fail on missing
+  // bustimes geometry — the recorded GPS path IS the route.
+  let usingTracked = !historicalPlayback && tracked.length >= 2;
+  if (historicalPlayback && tripPath.length < 2 && tracked.length >= 2) {
+    // Historical run with GPS but no bustimes geometry — replay the GPS tail instead.
+    usingTracked = true;
+  }
+  if (coachOp && tracked.length >= 2) {
+    // Coaches: always show the roads actually driven — never substitute the full timetable.
+    usingTracked = true;
+  } else if (!historicalPlayback && !coachOp && tripPath.length >= 2 && tracked.length >= 2) {
     const gpsLen = pathLengthMeters(tracked);
     const tripLen = pathLengthMeters(tripPath);
-    const gpsSegs = splitLatLngsByGaps(tracked, undefined, { operator, coach: true });
-    const fragmented = gpsSegs.length >= 4 && gpsLen < tripLen * 0.55;
-    const stub = tripLen > 25000 && gpsLen < tripLen * 0.4;
-    if (fragmented || stub) usingTracked = false;
+    if (gpsLen >= 800 || trackedGps.length >= 6) usingTracked = true;
+    else if (tripLen > 25000 && gpsLen < tripLen * 0.15) usingTracked = false;
   }
-  let path = usingTracked ? tracked : tripPath.length >= 2 ? tripPath : tracked.length >= 2 ? tracked : [];
-  if (path.length < 2 && tripSegments.some((s) => s.length >= 2)) {
+  if (diverted && tracked.length >= 2) usingTracked = true;
+  let path = historicalPlayback && tripPath.length >= 2 && !usingTracked
+    ? tripPath
+    : usingTracked
+      ? tracked
+      : tripPath.length >= 2
+        ? tripPath
+        : tracked.length >= 2
+          ? tracked
+          : [];
+  usingTracked = path === tracked && tracked.length >= 2;
+  if (path.length < 2 && tripSegments.some((seg) => seg.length >= 2)) {
     trackedGps = tripSegments.reduce((best, run) => (run.length > best.length ? run : best), tripSegments[0]);
     tracked = pathFromGpsPoints(trackedGps);
     path = tracked;
     usingTracked = path.length >= 2;
   }
   if (path.length < 2) {
-    const hasAnyTrail = keys.some((key) => (trailMem.get(String(key)) || []).length > 0);
     showMessage(
-      hasAnyTrail
-        ? "Not enough of that journey tracked yet — leave the bus open on the map a little longer, then try Map again"
-        : "No route shape yet — open the live bus on the map first so we can record its path, or try again when a timetable is available",
+      "No GPS path recorded yet for that coach — keep the live map open while it runs so we can record the roads it takes, then open Map again",
     );
     return;
   }
-  showMessage("Matching trail to roads…");
-  const roadPath = usingTracked ? await prepareRoadTrail(path, undefined, { operator }) : path;
-  const hasRoad = flattenTrailLatLngs(roadPath).length >= 2;
-  stopRoutePlayback("", { clearTail: true });
+  const lineName = line || trip?.line || "Bus";
+  const opUpper = String(operator || "").trim().toUpperCase();
+  const opName =
+    opUpper === "FLIX"
+      ? "FlixBus"
+      : opUpper === "NATX"
+        ? "National Express"
+        : trip?.operator || operator || "";
+  const headsign = dest || trip?.headsign || trip?.to || "";
+  const journeyDate = datetime ? String(datetime).slice(0, 10) : "";
+  const roadBreak = {
+    operator,
+    line: lineName,
+    coach: coachOp || isCoachTrailOperator(operator),
+    staffs: isStaffsTrailOperator(operator) || isAltonLine(lineName),
+  };
 
-  // Pin tails: a specific Map row → that trip only; otherwise every trip separately.
-  const baseKey = trailKey || vehicleId || regTrailKey(reg) || playKey;
-  const wantTrip = String(resolvedTripId || tripId || "").trim();
-  const wantJny = String(safeJourneyId || "").trim();
-  let segmentsToPin = tripSegments;
-  if (wantTrip || wantJny || safeDirection) {
-    if (trackedGps.length >= 2) {
-      segmentsToPin = [trackedGps];
-    } else {
-      const matched = tripSegments.filter((seg) => {
-        if (wantTrip && seg.some((p) => String(p.tripId || "") === wantTrip)) return true;
-        if (wantJny && seg.some((p) => String(p.journeyId || "") === wantJny)) return true;
-        if (safeDirection) {
-          const d = inferTrailDirection(seg) || normalizeTrailDirection(seg.find((p) => p.direction)?.direction);
-          return d === safeDirection;
-        }
-        return false;
+  const lastPing = resolvePlaybackVehiclePing({ vehicleId, trailKey, reg, trackedGps });
+  const histAgeMs = datetime ? Date.now() - new Date(datetime).getTime() : NaN;
+  const isHistorical = Number.isFinite(histAgeMs) && histAgeMs > 12 * 60_000;
+  const clipPing = isHistorical ? null : lastPing;
+
+  showMessage(usingTracked ? "Matching GPS to roads…" : "Matching route to roads…");
+  let drawPath = path;
+  const alignBreak = {
+    ...roadBreak,
+    continuous: !usingTracked,
+    coach: roadBreak.coach || (!usingTracked && tripStops.length >= 2),
+  };
+
+  // GPS trails: one stroke per trip/route leg — never glue outbound+inbound or other routes.
+  // Live current run: growing filtered tail. Historical Map: pin the clipped segment only.
+  if (usingTracked) {
+    const liveKey = String(trailKey || vehicleId || regTrailKey(reg) || "").trim();
+    const gapMs = coachOp
+      ? COACH_TRAIL_BREAK_GAP_MS
+      : isStaffsTrailOperator(operator) || isAltonLine(lineName)
+        ? STAFFS_TRAIL_BREAK_GAP_MS
+        : 18 * 60_000;
+
+    if (isHistorical || !liveKey) {
+      let segs = segmentTrailIntoTrips(trackedGps, { gapMs });
+      const clipped = clipPointsToSingleDirectionRun(trackedGps, {
+        direction: safeDirection,
+        aroundMs: aroundMs || Number(trackedGps[0]?.t) || 0,
       });
-      if (matched.length) segmentsToPin = matched;
+      if (clipped.length >= 2) segs = [clipped];
+      // Drop any leftover opposite-direction / other-route segments.
+      if (segs.length > 1 && (safeDirection || aroundMs)) {
+        const want = clipPointsToSingleDirectionRun(
+          segs.flat(),
+          { direction: safeDirection, aroundMs: aroundMs || 0 },
+        );
+        if (want.length >= 2) segs = [want];
+      }
+      pinSeparateTripTails(segs, {
+        baseKey: liveKey || resolvedTripId || tripId || safeJourneyId || "hist",
+        line: lineName,
+        operator,
+      });
+      multiTailActiveGroup = {
+        id: `hist:${playKey}`,
+        label:
+          lineName +
+          (headsign ? ` → ${headsign}` : "") +
+          (segs.length > 1 ? ` · ${segs.length} trips` : ""),
+      };
+      for (const key of pinnedTrailKeys) {
+        const pinned = pinnedTrailLines.get(key);
+        if (!pinned?.line) continue;
+        try {
+          pinned.line.setStyle({
+            color: PLAYBACK_LINE_COLOR,
+            weight: 4,
+            opacity: 0.96,
+            lineJoin: "round",
+            lineCap: "round",
+          });
+        } catch {
+          /* ignore */
+        }
+      }
+    } else if (liveKey) {
+      pinVehicleTrail({
+        vehicleId,
+        trailKey: liveKey,
+        reg,
+        // Keep direction so the opposite leg is never drawn on the same stroke.
+        // Journey ids from Ticketer/BODS can flap — rely on direction + line + time.
+        journeyId: "",
+        tripId: "",
+        line: lineName,
+        operator,
+        direction: safeDirection,
+        datetime,
+        live: true,
+        liveFocus: false,
+      });
+      const pinned = pinnedTrailLines.get(liveKey) || pinnedTrailLines.get(String(vehicleId || ""));
+      if (pinned?.line) {
+        try {
+          pinned.line.setStyle({
+            color: PLAYBACK_LINE_COLOR,
+            weight: 4,
+            opacity: 0.96,
+            lineJoin: "round",
+            lineCap: "round",
+          });
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }
-  const pinnedSegs =
-    segmentsToPin.length >= 1
-      ? pinSeparateTripTails(segmentsToPin, { baseKey, line, operator })
-      : [];
-  if (!pinnedSegs.length && (showTail || usingTracked)) {
-    // Fallback: single filtered pin if segmentation found nothing usable.
-    pinVehicleTrail({
-      vehicleId,
-      trailKey,
-      reg,
-      journeyId: safeJourneyId,
-      tripId: resolvedTripId || tripId,
-      line,
-      operator,
-      direction: safeDirection,
-      datetime,
-    });
-  } else if (pinnedSegs.length) {
-    multiTailActiveGroup = {
-      id: `play:${baseKey}`,
-      label:
-        pinnedSegs.length > 1
-          ? `${line || "Bus"}${dest ? ` → ${dest}` : ""} · ${pinnedSegs.length} trips`
-          : `${line || "Bus"}${dest ? ` → ${dest}` : ""}`,
-    };
-  } else {
-    clearPinnedTrails();
-    setLiveTrailFocus("");
-  }
 
-  // Keep a live-growing tail + arrows for this bus (including AT1–AT3 staff keys).
-  const liveKey = String(trailKey || vehicleId || "").trim();
-  if (liveKey && (showTail || usingTracked)) {
-    rememberTrailVehicle(liveKey);
-    const liveFilter = {
-      line: String(line || "").trim(),
-      direction: safeDirection,
-      operator: String(operator || "").trim().toUpperCase(),
-      fromMs: fromMs || Date.now() - (isCoachTrailOperator(operator) ? COACH_TRAIL_LIVE_MS : 4 * 60 * 60 * 1000),
-      toMs: 0,
-      live: true,
-      follow: true,
-    };
-    pinnedTrailFilters.set(liveKey, liveFilter);
-    pinnedTrailKeys.add(liveKey);
-    setLiveTrailFocus(liveKey);
-    refreshPinnedTrailLine(liveKey);
-  }
-
-  const lineName = line || trip?.line || "Bus";
-  const hasTimetable = !usingTracked && tripPath.length >= 2;
-  const labelParts = [
-    `${lineName}${dest || trip?.headsign ? ` → ${dest || trip.headsign}` : ""}`,
-    usingTracked
-      ? pinnedSegs.length > 1
-        ? `tracked · ${pinnedSegs.length} trips`
-        : "tracked path · roads"
-      : hasTimetable
-        ? "timetable"
-        : "route",
-  ];
-  if ((showTail || usingTracked) && compactReg(reg)) labelParts.push(compactReg(reg));
-  const label = labelParts.join(" · ");
-
-  if (hasTimetable) {
-    L.polyline(tripPath, {
-      color: "#38bdf8",
-      weight: 4,
-      opacity: 0.85,
-      lineJoin: "round",
-    }).addTo(playbackLayer);
-  }
-
-  const coachBreak = { operator, coach: isCoachTrailOperator(operator) };
-  const drawPath = hasRoad ? roadPath : path;
-  const drawFlat = flattenTrailLatLngs(drawPath);
-  const tailPath = usingTracked
-    ? drawPath
-    : tracked.length >= 2
-      ? await prepareRoadTrail(tracked, undefined, coachBreak)
-      : [];
-  const tailHasRoad = flattenTrailLatLngs(tailPath).length >= 2;
-  if ((showTail || usingTracked) && flattenTrailLatLngs(tailPath).length >= 2) {
-    makeTrailPair(tailPath, playbackLayer, {
-      gpsPoints: trackedGps.length >= 2 ? trackedGps : path,
-      deferArrows: usingTracked && !hasRoad && !tailHasRoad,
-      ...coachBreak,
-    });
-  } else if (drawFlat.length >= 2 && !hasTimetable) {
-    L.polyline(asTrailLatLngs(drawPath, coachBreak), {
-      color: "#0f172a",
-      weight: 2.25,
-      opacity: 1,
-      lineJoin: "round",
-    }).addTo(playbackLayer);
-  }
-
-  if (drawFlat.length >= 2) {
-    L.circleMarker(drawFlat[0], {
-      radius: 6,
-      color: "#ffffff",
-      weight: 2,
-      fillColor: "#22c55e",
-      fillOpacity: 1,
-    })
-      .addTo(playbackLayer)
-      .bindTooltip("Start", { direction: "top", opacity: 0.9 });
-    L.circleMarker(drawFlat[drawFlat.length - 1], {
-      radius: 6,
-      color: "#ffffff",
-      weight: 2,
-      fillColor: "#ef4444",
-      fillOpacity: 1,
-    })
-      .addTo(playbackLayer)
-      .bindTooltip("End", { direction: "top", opacity: 0.9 });
-  }
-
-  const boundsPath = [
-    ...(hasTimetable ? tripPath : []),
-    ...drawFlat,
-    ...flattenTrailLatLngs(tracked),
-  ];
-  if (boundsPath.length >= 2) {
-    map.fitBounds(L.latLngBounds(boundsPath).pad(0.12), { maxZoom: 16, animate: true });
-  }
-
+  // Bustimes-style instant tail: locally road-snapped path, clipped at the bus's current
+  // position — no OSRM wait, so the route paints immediately.
+  const fastBase = preferRoadMatchedTrail(path, [], alignBreak);
+  const fastPath = clipTrailPathAtPing(
+    flattenTrailLatLngs(fastBase).length >= 2 ? fastBase : path,
+    clipPing,
+  );
+  const scene = {
+    trackedGps,
+    lastPing,
+    isHistorical,
+    usingTracked,
+    alignBreak,
+    datetime,
+    tripStops,
+  };
+  drawPlaybackScene(fastPath, scene, { fit: true });
+  const label =
+    lineName +
+    (headsign ? " → " + headsign : "") +
+    (usingTracked ? " · GPS path" : " · timetable");
   playback = {
     playKey,
     tripId: resolvedTripId || tripId,
@@ -3458,17 +5089,57 @@ async function startRoutePlayback({
     vehicleId,
     trailKey,
     reg: compactReg(reg),
-    path: drawPath,
+    path: fastPath,
     label,
     line: lineName,
-    tracked: Boolean(usingTracked || tracked.length >= 2),
-    showTail: Boolean(showTail || usingTracked),
+    tracked: Boolean(usingTracked),
+    showTail: Boolean(usingTracked),
+    stops: tripStops,
+    operator: opName,
+    headsign,
+    date: journeyDate,
+    lastPing,
   };
+  // Offer a true GPS replay when we recorded pings for this journey.
+  gpsReplaySetup(trackedGps.length >= 2 ? trackedGps : allGps);
+  showJourneyPanel({
+    operator: opName,
+    line: lineName,
+    headsign,
+    date: journeyDate,
+    stops: tripStops,
+    lat: lastPing?.lat,
+    lng: lastPing?.lng,
+  });
   applyHistoryLineFilterToMarkers({ vehicleId, trailKey, reg, line });
+  applyHistoryMapFocusToLiveMarkers();
   messageEl.hidden = true;
   updatePlaybackChrome();
+  loadBuses({ replace: false }).catch(() => {});
   const open = openJourneyMarker();
   if (open) refreshPopup(open, { force: true });
+
+  // Quality upgrade in the background: once OSRM road-matching finishes, redraw the
+  // timetable path onto real roads (still clipped at the bus). Never blocks first paint.
+  if (!usingTracked) {
+    prepareRoadTrail(path, undefined, alignBreak)
+      .then((aligned) => {
+        if (!playback || playback.playKey !== playKey) return;
+        let upgraded = aligned;
+        if (flattenTrailLatLngs(upgraded).length < 2 && tripStops.length >= 2) {
+          const stopPath = tripStops
+            .filter((stop) => Number.isFinite(stop.lat) && Number.isFinite(stop.lng))
+            .map((stop) => [stop.lat, stop.lng]);
+          if (stopPath.length >= 2) upgraded = stopPath;
+        }
+        const upPath = clipTrailPathAtPing(upgraded, clipPing);
+        if (flattenTrailLatLngs(upPath).length >= 2) {
+          drawPlaybackScene(upPath, scene, { fit: false });
+          playback.path = upPath;
+        }
+      })
+      .catch(() => {});
+  }
 }
 
 function followKindFor(marker) {
@@ -3652,6 +5323,9 @@ async function openFleetVehiclePage({
   }
   setAppTab("fleet");
   let id = String(vehicleId || "").trim();
+  // BODS ids (bods-FPOT-FPOT-BN72TTX) are not bustimes ids — but they carry the plate.
+  const bodsRegMatch = String(id).match(/^bods-[A-Z]+-(?:[A-Z]+-)?([A-Z]{2}\d{2}[_]?[A-Z]{3})$/i);
+  if (id && bodsRegMatch && !reg) reg = bodsRegMatch[1].replace(/_/g, "");
   if (id && /^(dg-|bods-|staff-|at-)/i.test(id)) id = "";
   const slug = String(operatorSlug || "").trim();
   const noc = String(operatorNoc || "").trim().toUpperCase();
@@ -3722,12 +5396,17 @@ async function openFleetVehiclePage({
 
 function playRouteButtonHtml(bus, extra = {}) {
   const tripId = bus?.trip_id || extra.tripId || "";
-  const vehicleId = historyVehicleId(bus, extra) || (!String(bus?.id || "").startsWith("dg-") ? bus?.id : "") || "";
-  const trailKey = extra.trailKey || "";
-  const reg = extra.vehicle?.reg || bus?.vehicle?.reg || "";
-  if (!tripId && !vehicleId && !trailKey && !compactReg(reg)) return "";
-  if (String(bus?.id || "").startsWith("dg-") && !trailKey && !vehicleId && !compactReg(reg)) return "";
-  const playKey = tripId || trailKey || vehicleId || regTrailKey(reg);
+  const vehicleId = historyVehicleId(bus, extra) || "";
+  const trailKey = extra.trailKey || String(bus?.id || "").trim();
+  const reg =
+    extra.vehicle?.reg ||
+    extra.btVehicle?.reg ||
+    extra.coachReg ||
+    bus?.vehicle?.reg ||
+    busRegistration(bus, extra) ||
+    "";
+  if (!tripId && !vehicleId && !trailKey && !compactReg(reg) && !bus?.journey_id) return "";
+  const playKey = tripId || trailKey || vehicleId || regTrailKey(reg) || bus?.journey_id || "";
   const on = routeOverlayActive(playKey, { vehicleId, trailKey });
   const direction = normalizeTrailDirection(
     extra.direction ||
@@ -3765,24 +5444,6 @@ function followedMarker() {
   return markers.get(followTarget.id) || markers.get(Number(followTarget.id)) || null;
 }
 
-/** Same live seat wording as the First Potteries bus card, for the top follow chip. */
-function followSeatsChipText(marker) {
-  if (!marker?.bus && !marker?.extra) return "";
-  const bus = marker.bus || {};
-  const extra = marker.extra || {};
-  if (!(isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))) return "";
-  const info = extra.seatsInfo || occupancyFromSources(bus, extra);
-  if (!info) return "";
-  if (info.remaining != null) {
-    if (info.remaining <= 0) return "full · none left";
-    return `${info.remaining} seats left`;
-  }
-  if (info.band === "standing") return "standing room only";
-  if (info.band === "few") return "few seats left";
-  if (info.band === "seats") return "seats available";
-  return "";
-}
-
 /** Same early / late wording as the bus card delay line. */
 function followDelayChipText(marker) {
   if (!marker?.bus) return "";
@@ -3790,8 +5451,7 @@ function followDelayChipText(marker) {
   if (isNotInService(bus)) return "";
   const extra = marker.extra || {};
   const [lng, lat] = bus.coordinates || [];
-  const delaySec =
-    extra.delaySec ?? bus.delay ?? inferDelaySeconds(extra.stops, lat, lng, bus.datetime);
+  const delaySec = resolveLiveDelaySec(bus, extra, lat, lng, { live: true });
   if (delaySec == null || Number.isNaN(Number(delaySec))) return "";
   return formatDelay(delaySec);
 }
@@ -3814,69 +5474,18 @@ function updateFollowChip() {
       })
     : "";
   const marker = followedMarker();
-  const seats = followSeatsChipText(marker);
   const delay = followDelayChipText(marker);
   const parts = [`Following ${followTarget.label}`];
   if (delay) parts.push(delay);
-  if (seats) parts.push(seats);
   if (since) parts.push(`since ${since}`);
   parts.push("Stop");
   followChipEl.textContent = parts.join(" · ");
 }
 
-let followSeatsTimer = null;
-
-function stopFollowSeatsPolling() {
-  if (followSeatsTimer) {
-    clearInterval(followSeatsTimer);
-    followSeatsTimer = null;
-  }
-}
-
-/** Keep First Potteries seat counts fresh on the follow chip (even if the card is closed). */
-function ensureFollowSeatsPolling(marker) {
-  stopFollowSeatsPolling();
-  if (!marker?.bus) return;
-  const bus = marker.bus;
-  const extra = marker.extra || {};
-  if (!(isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))) return;
-
-  const refreshSeats = async ({ force = false } = {}) => {
-    if (!isFollowingMarker(marker)) {
-      stopFollowSeatsPolling();
-      return;
-    }
-    const here = marker.getLatLng?.();
-    if (!here) return;
-    const next = await firstOccupancyFor(marker.bus || bus, marker.extra || extra, here.lat, here.lng, {
-      force,
-    });
-    if (!isFollowingMarker(marker)) return;
-    if (next) {
-      const prev = marker.extra?.firstOccupancy;
-      marker.extra = marker.extra || {};
-      marker.extra.firstOccupancy = next;
-      marker.extra.seatsInfo = occupancyFromSources(marker.bus || bus, marker.extra);
-      if (
-        !prev ||
-        prev.remaining !== next.remaining ||
-        prev.occupied !== next.occupied ||
-        prev.seats !== next.seats
-      ) {
-        refreshPopup(marker, { force: true });
-      }
-    }
-    updateFollowChip();
-  };
-
-  refreshSeats({ force: true });
-  followSeatsTimer = setInterval(() => refreshSeats({ force: true }), 10000);
-}
-
 function stopFollowBus(message = "") {
   const marker = followedMarker();
   const trailKey = liveTrailKeyForMarker(marker);
-  stopFollowSeatsPolling();
+  stopFollowDelayPolling();
   followTarget = null;
   updateFollowChip();
   // Keep the tail if Show route / pinned trails are still on the map.
@@ -3922,16 +5531,15 @@ function startFollowBus(marker) {
     startedAt: Date.now(),
   };
   showMessage("");
-  // Keep a live tail + arrows growing with the bus (including AT1–AT3).
+  // Live follow: keep recording GPS, but do not auto-draw a growing day trail.
+  // Map · trail / Map · tails pin each journey separately.
   const trailKey = liveTrailKeyForMarker(marker);
-  if (trailKey) {
-    rememberTrailVehicle(trailKey);
-    setLiveTrailFocus(trailKey);
-  }
+  if (trailKey) rememberTrailVehicle(trailKey);
+  if (SHOW_LIVE_TAIL_WHILE_FOLLOWING && trailKey) setLiveTrailFocus(trailKey);
   keepFollowedInView(marker, { force: true });
   if (announceOn) followJourney(marker, true);
   updateFollowChip();
-  ensureFollowSeatsPolling(marker);
+  ensureFollowDelayPolling(marker);
 }
 
 function toggleFollowBus(marker) {
@@ -3972,6 +5580,14 @@ document.addEventListener(
     if (playBtn) {
       event.preventDefault();
       event.stopPropagation();
+      if (playBtn.dataset.live === "1") {
+        const marker = openJourneyMarker();
+        if (marker?.bus) {
+          setAppTab("map");
+          startFollowBus(marker);
+        }
+        return;
+      }
       startRoutePlayback({
         tripId: playBtn.dataset.tripId,
         journeyId: playBtn.dataset.journeyId || "",
@@ -3984,6 +5600,7 @@ document.addEventListener(
         dest: playBtn.dataset.dest || "",
         datetime: playBtn.dataset.datetime || "",
         showTail: true,
+        diverted: playBtn.dataset.diverted === "1",
       });
       return;
     }
@@ -4014,7 +5631,32 @@ document.addEventListener(
   true,
 );
 
+document.addEventListener(
+  "toggle",
+  (event) => {
+    const history = event.target.closest?.(".popup-history");
+    if (!history || !history.open) return;
+    const marker = openJourneyMarker();
+    if (!marker) return;
+    if (marker.extra?.historyStatus === "ready" && marker.extra.history?.length) return;
+    loadHistoryIntoMarker(marker, { force: true });
+  },
+  true,
+);
+
 function openJourneyMarker() {
+  if (selectedMapMarker) {
+    const id = selectedMapMarker.bus?.id ?? selectedMapMarker.staff?.vehicle?.ref;
+    if (selectedMapMarker.bus && markers.get(selectedMapMarker.bus.id) === selectedMapMarker) {
+      return selectedMapMarker;
+    }
+    if (selectedMapMarker.staff) {
+      const sid = String(selectedMapMarker.staff.vehicle?.ref || selectedMapMarker.staff.vehicle?.vehicleUniqueId || "");
+      if (sid && staffMarkers.get(sid) === selectedMapMarker) return selectedMapMarker;
+    }
+    // Marker gone — clear stale selection.
+    if (!id) selectedMapMarker = null;
+  }
   for (const marker of [...markers.values(), ...staffMarkers.values()]) {
     if (marker.isPopupOpen()) return marker;
   }
@@ -4048,42 +5690,260 @@ function staffLineName(item) {
 }
 
 const STAFF_COLOURS = {
-  AT1: "#6b21a8",
-  AT2: "#0f766e",
-  AT3: "#1f6b2d",
+  AT1: "#ff6700",
+  AT2: "#cc181a",
+  AT3: "#cc181a",
 };
 
 const liveryCache = new Map();
 const liveryById = new Map();
 const btRegCache = new Map();
 
-async function ensureLiveries(ids) {
-  const unique = [
-    ...new Set(
-      ids
-        .map((id) => {
-          if (id == null || id === "") return "";
-          if (typeof id === "object") return String(id.id ?? "");
-          return String(id);
-        })
-        .filter(Boolean),
-    ),
-  ];
-  await Promise.all(
-    unique.map(async (id) => {
-      if (liveryById.has(id)) return;
-      if (!liveryCache.has(id)) {
-        liveryCache.set(
-          id,
-          fetch(`/api/bt-liveries/${encodeURIComponent(id)}/`)
-            .then((res) => (res.ok ? res.json() : null))
-            .catch(() => null),
-        );
+/** Resolve paint: bustimes.org livery CSS first, then photo/fleet, then local brand. */
+function resolveBusLivery(bus) {
+  if (!bus) return null;
+  const id = liveryIdOf(bus);
+  const numeric = /^\d+$/.test(String(id || ""));
+  // Matched bustimes.org livery id — never substitute local brand/fleet stripes.
+  if (numeric) {
+    const hit = liveryById.get(String(id));
+    if (liveryCss(hit)) return hit;
+    return null;
+  }
+  const raw = bus.vehicle?.livery;
+  if (raw && typeof raw === "object") {
+    const rawId = String(raw.id || "");
+    if (/^\d+$/.test(rawId) && liveryCss(liveryById.get(rawId))) {
+      return liveryById.get(rawId);
+    }
+    const css = liveryCss(raw);
+    // Ignore synthetic op:/reg:/fleet: placeholders once paint may supply a real id.
+    if (css && !/^(op|reg|fleet|line):/.test(rawId)) return raw;
+  }
+  const fleet = fleetLiveryForBus(bus);
+  if (fleet && liveryCss(fleet)) return fleet;
+  const brand = brandLiveryForBus(bus);
+  if (brand && liveryCss(brand)) return brand;
+  return fleet || brand || null;
+}
+
+async function ensureLiveries(idsOrBuses) {
+  const list = Array.isArray(idsOrBuses) ? idsOrBuses : [];
+  const bustimesIds = new Set();
+  for (const item of list) {
+    if (item && typeof item === "object" && (item.vehicle || item.service || item._bods)) {
+      const id = liveryIdOf(item);
+      if (id && /^\d+$/.test(String(id))) bustimesIds.add(String(id));
+      continue;
+    }
+    const id = item == null || item === "" ? "" : String(typeof item === "object" ? item.id ?? "" : item);
+    if (id && /^\d+$/.test(id)) bustimesIds.add(id);
+  }
+
+  const ids = [...bustimesIds].filter((id) => !liveryCss(liveryById.get(id)));
+  if (!ids.length) return;
+  // Bustimes flakes under a flood — few at a time; drop misses so the next poll retries.
+  const concurrency = 8;
+  for (let i = 0; i < ids.length; i += concurrency) {
+    const chunk = ids.slice(i, i + concurrency);
+    await Promise.all(
+      chunk.map(async (id) => {
+        if (liveryCss(liveryById.get(id))) return;
+        if (!liveryCache.has(id)) {
+          liveryCache.set(
+            id,
+            fetch(`/api/bt-liveries/${encodeURIComponent(id)}/`)
+              .then(async (res) => {
+                if (!res.ok) {
+                  liveryCache.delete(id);
+                  return null;
+                }
+                try {
+                  return await res.json();
+                } catch {
+                  liveryCache.delete(id);
+                  return null;
+                }
+              })
+              .catch(() => {
+                liveryCache.delete(id);
+                return null;
+              }),
+          );
+        }
+        const row = await liveryCache.get(id);
+        if (row?.left_css || row?.left) liveryById.set(id, row);
+        else liveryCache.delete(id);
+      }),
+    );
+  }
+}
+
+/** True when bustimes supplied a numeric livery id (not local op:/reg:/fleet: tags). */
+function hasNumericBustimesLivery(busOrLivery) {
+  return /^\d+$/.test(String(liveryIdOf(busOrLivery) || ""));
+}
+
+/**
+ * Paint needs a strong match — line-only (score 10) used to steal NATX/Flix white
+ * coach paint onto Staffordshire locals sharing a route number.
+ */
+function paintScoreStrongEnough(score) {
+  return Number(score) >= 18;
+}
+
+/** Copy bustimes colour/livery onto BODS buses — keep BODS position/id. */
+function paintBodsWithBustimesLiveries(bodsBuses, btBuses) {
+  const bodsList = Array.isArray(bodsBuses) ? bodsBuses : [];
+  const btList = Array.isArray(btBuses) ? btBuses : [];
+  if (!btList.length) return bodsList;
+
+  return bodsList.map((bods) => {
+    const bodsIsCoach = isNationalExpress(bods) || isFlixBus(bods);
+    let best = null;
+    let bestScore = 0;
+    for (const bt of btList) {
+      if (isFlixBus(bt)) continue;
+      // Never let coach paint (white NATX etc.) land on local Staffs buses.
+      if (!bodsIsCoach && isNationalExpress(bt)) continue;
+      const score = liveBusMatchScore(bods, bt);
+      if (score > bestScore) {
+        best = bt;
+        bestScore = score;
       }
-      const row = await liveryCache.get(id);
-      liveryById.set(id, row);
-    }),
-  );
+    }
+    // Synthetic op:FPOT / op:DAGC tags must not block proximity paint fallback.
+    if ((!best || !paintScoreStrongEnough(bestScore)) && !hasNumericBustimesLivery(bods)) {
+      const [bLng, bLat] = bods.coordinates || [];
+      const lineB = compactQuery(bods.service?.line_name);
+      const nearLimit = bodsIsCoach ? 12_000 : 500;
+      let near = null;
+      let nearD = Infinity;
+      if (Number.isFinite(bLat) && Number.isFinite(bLng)) {
+        for (const bt of btList) {
+          if (isFlixBus(bt) || !liveryIdOf(bt)) continue;
+          if (!bodsIsCoach && isNationalExpress(bt)) continue;
+          const opNear = compactQuery(btOperatorNoc(bt));
+          const opBods = compactQuery(bods._bods?.operator || bods.operator?.noc || bods.operator);
+          if (opBods && opNear && opBods !== opNear) continue;
+          if (
+            bodsIsCoach &&
+            isNationalExpress(bods) &&
+            !isNationalExpress(bt) &&
+            !/natx|national\s*express/i.test(String(bt.operator?.name || btOperatorNoc(bt) || ""))
+          ) {
+            const op = btOperatorNoc(bt);
+            if (op && op !== "NATX") continue;
+          }
+          const lineT = compactQuery(bt.service?.line_name);
+          if (lineB && lineT && lineB !== lineT) continue;
+          const [tLng, tLat] = bt.coordinates || [];
+          if (!Number.isFinite(tLat) || !Number.isFinite(tLng)) continue;
+          const d = haversineMeters(bLat, bLng, tLat, tLng);
+          if (d < nearD && d < nearLimit) {
+            nearD = d;
+            near = bt;
+          }
+        }
+      }
+      if (near) {
+        best = near;
+        bestScore = Math.max(bestScore, 18);
+      }
+    }
+    // NATX BODS refs rarely include plates — if still unmatched, use the common
+    // National Express white coach livery (bustimes id 643) via brand CSS / id.
+    if ((!best || !paintScoreStrongEnough(bestScore)) && isNationalExpress(bods) && !hasNumericBustimesLivery(bods)) {
+      let tripFromNear = null;
+      let jnyFromNear = null;
+      let btFromNear = null;
+      const [bLng, bLat] = bods.coordinates || [];
+      const lineB = compactQuery(bods.service?.line_name);
+      if (Number.isFinite(bLat) && Number.isFinite(bLng)) {
+        let nearD = Infinity;
+        for (const bt of btList) {
+          if (!bt?.trip_id) continue;
+          if (
+            !isNationalExpress(bt) &&
+            !/natx|national\s*express/i.test(String(bt.operator?.name || bt.operator?.noc || ""))
+          ) {
+            continue;
+          }
+          const lineT = compactQuery(bt.service?.line_name);
+          if (lineB && lineT && lineB !== lineT) continue;
+          const [tLng, tLat] = bt.coordinates || [];
+          if (!Number.isFinite(tLat) || !Number.isFinite(tLng)) continue;
+          const d = haversineMeters(bLat, bLng, tLat, tLng);
+          if (d < nearD && d < 12_000) {
+            nearD = d;
+            tripFromNear = bt.trip_id;
+            jnyFromNear = bt.journey_id;
+            btFromNear = bt.id;
+          }
+        }
+      }
+      return {
+        ...bods,
+        trip_id: bods.trip_id || tripFromNear || null,
+        journey_id: bods.journey_id || jnyFromNear || null,
+        btId: bods.btId || btFromNear || null,
+        vehicle: {
+          ...(bods.vehicle || {}),
+          colour: bods.vehicle?.colour || "#ffffff",
+          livery: 643,
+        },
+        paintSource: "bustimes",
+      };
+    }
+    if (!best) return bods;
+    // Weak matches: keep trip ids for History · Map, but do not overwrite local liveries.
+    if (!paintScoreStrongEnough(bestScore)) {
+      return {
+        ...bods,
+        trip_id: bods.trip_id || best.trip_id || null,
+        journey_id: bods.journey_id || best.journey_id || null,
+        btId: best.id ?? bods.btId,
+      };
+    }
+    const liv = best.vehicle?.livery;
+    if (liv == null && !best.vehicle?.colour) {
+      return {
+        ...bods,
+        trip_id: bods.trip_id || best.trip_id || null,
+        journey_id: bods.journey_id || best.journey_id || null,
+        btId: best.id ?? bods.btId,
+        paintSource: bods.paintSource || "bustimes",
+      };
+    }
+    // White / silver AVL colours blank Staffs pins before livery CSS loads — keep the
+    // local brand colour and still take the numeric livery id for ensureLiveries.
+    const btColour = best.vehicle?.colour;
+    const keepColour =
+      !bodsIsCoach && isNearWhite(btColour) && !isNearWhite(bods.vehicle?.colour)
+        ? bods.vehicle?.colour
+        : btColour || bods.vehicle?.colour;
+    return {
+      ...bods,
+      trip_id: bods.trip_id || best.trip_id || null,
+      journey_id: bods.journey_id || best.journey_id || null,
+      destination: bods.destination || best.destination || "",
+      service: {
+        ...(best.service || {}),
+        ...(bods.service || {}),
+        line_name: bods.service?.line_name || best.service?.line_name,
+      },
+      vehicle: {
+        ...(bods.vehicle || {}),
+        colour: keepColour,
+        livery: liv ?? bods.vehicle?.livery,
+        name: bods.vehicle?.name || best.vehicle?.name,
+        reg: bods.vehicle?.reg || best.vehicle?.reg,
+        id: bods.vehicle?.id || best.vehicle?.id,
+      },
+      paintSource: "bustimes",
+      btId: best.id,
+    };
+  });
 }
 
 function liveryIdOf(busOrLivery) {
@@ -4097,8 +5957,11 @@ function liveryIdOf(busOrLivery) {
   return String(liv);
 }
 
-function getLivery(id) {
-  const key = liveryIdOf(id);
+function getLivery(idOrBus) {
+  if (idOrBus && typeof idOrBus === "object" && (idOrBus.vehicle || idOrBus.service || idOrBus._bods)) {
+    return resolveBusLivery(idOrBus);
+  }
+  const key = liveryIdOf(idOrBus);
   if (!key) return null;
   return liveryById.get(key) || null;
 }
@@ -4109,20 +5972,102 @@ const FLIX_LIVERY = {
   stroke_colour: "#1a1a1a",
 };
 
-function isNisDestination(dest) {
-  const t = String(dest || "").trim();
-  if (!t) return false;
-  return /^(not in service|nis|n\/?s|out of service|oos|positioning|dead running|empty to)$/i.test(t)
-    || /\b(not in service|out of service|dead running)\b/i.test(t);
+/** BODS/Ticketer AVL often uses underscores (Adderley_Green__First_Bus_Depot). */
+function normalizeAvlText(value) {
+  return String(value || "")
+    .replace(/_+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-/** Garage / depot destination text (First Potteries & D&G often keep a line number). */
+function avlToken(value) {
+  return normalizeAvlText(value)
+    .replace(/[-–—]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isDeadRunLine(line) {
+  const t = avlToken(line);
+  if (!t) return false;
+  if (/^(dead\s*run|deadrun|oos|nis|n\/?s|not\s*in\s*service|out\s*of\s*service|positioning)$/i.test(t)) {
+    return true;
+  }
+  return /\bdead\s*run\b/i.test(t);
+}
+
+function ticketMachineLooksOos(code) {
+  const t = avlToken(code);
+  if (!t) return false;
+  if (/^dr$/i.test(t)) return true;
+  return isDeadRunLine(t);
+}
+
+/** Ticketer dead run (line Dead_Run / TM code / dead-running destination). */
+function isTicketerDeadRun(bus) {
+  if (!bus) return false;
+  if (bus.deadRun) return true;
+  if (isDeadRunLine(bus.service?.line_name)) return true;
+  if (ticketMachineLooksOos(bus._bods?.ticketMachineServiceCode)) return true;
+  if (isDeadRunLine(bus._bods?.line) || isDeadRunLine(bus._bods?.lineRef)) return true;
+  const dest = avlToken(bus.destination);
+  return /\bdead\s*run(?:ning)?\b/i.test(dest);
+}
+
+/** Non-empty line that is not an explicit dead-run / OOS marker (e.g. 11B, 25, BS1). */
+function isPassengerServiceLine(line) {
+  const t = avlToken(line);
+  if (!t || t === "?") return false;
+  return !isDeadRunLine(t);
+}
+
+function isNisDestination(dest) {
+  const t = avlToken(dest);
+  if (!t) return false;
+  return /^(not in service|nis|n\/?s|out of service|oos|positioning|dead running|dead run|empty to|to garage|to depot)$/i.test(t)
+    || /\b(not in service|out of service|dead\s*run(?:ning)?|empty to)\b/i.test(t);
+}
+
+/**
+ * Garage / depot / yard destination (trip purpose = to depot).
+ * Does NOT match bare place names like "Adderley Green" on passenger routes.
+ */
 function isDepotRunDestination(dest) {
-  const t = String(dest || "").trim();
+  const t = normalizeAvlText(dest);
   if (!t) return false;
   if (isNisDestination(t)) return true;
   return /^(garage|depot|to\s+(?:the\s+)?(?:garage|depot)|out\s*of\s*service|oos)$/i.test(t)
-    || /\b(?:to\s+)?(?:the\s+)?(?:garage|depot)\b|\bout\s*of\s*service\b|\boos\b/i.test(t);
+    || /\b(?:to\s+)?(?:the\s+)?(?:garage|depot)\b|\bout\s*of\s*service\b|\boos\b/i.test(t)
+    || /\b(?:bus\s*)?(?:garage|depot|yard)\b/i.test(t)
+    || /\bfirst\s*bus\s*depot\b/i.test(t);
+}
+
+/**
+ * True depot OOS: dest says depot AND no active passenger service
+ * (empty/dead line, or aimed arrival already well past).
+ */
+function isDepotOosForService(bus, { finishedTrip = false } = {}) {
+  if (!isDepotRunDestination(bus?.destination)) return false;
+  if (finishedTrip || bus?.tripFinished) return true;
+  const line = bus?.service?.line_name || "";
+  return !isPassengerServiceLine(line);
+}
+
+/** Ticketer (FPOT / DAGC) trip finished: last GPS ping is >10 min past DestinationAimedArrivalTime. */
+function isTicketerFinishedTrip(bus, extra = {}) {
+  if (!bus) return false;
+  if (!(isFirstPotteriesBus(bus, extra) || isDgBus(bus, extra))) return false;
+  if (bus.tripFinished) return true;
+  const aimRaw = bus._bods?.destinationAimedArrival || bus.destinationAimedArrival || "";
+  const aimMs = Date.parse(aimRaw);
+  const recMs = Date.parse(bus.datetime || "");
+  if (!Number.isFinite(aimMs) || !Number.isFinite(recMs)) return false;
+  return recMs - aimMs > 10 * 60 * 1000;
+}
+
+/** @deprecated Prefer isTicketerFinishedTrip — kept as alias for FPOT call sites. */
+function isFpotFinishedTrip(bus, extra = {}) {
+  return isFirstPotteriesBus(bus, extra) && isTicketerFinishedTrip(bus, extra);
 }
 
 function operatorHaystack(bus, extra = {}) {
@@ -4202,14 +6147,24 @@ function isHeadingToOwnDepot(bus, extra = {}) {
 }
 
 /**
- * First / D&G / Stanton's / Scraggs deadhead to their yard:
- * destination says garage/depot/NIS, or no line while heading into the yard,
- * or pulling into the yard off a passenger destination.
+ * First / D&G / Stanton's / Scraggs deadhead to their yard.
+ * Passenger services with a real line are never OOS just for proximity to the depot
+ * (routes past Adderley Green / Mossfield / etc. stay in service).
  */
 function isStokeDepotBound(bus, extra = {}) {
   if (!bus || !ownStokeDepot(bus, extra)) return false;
-  if (isDepotRunDestination(bus.destination)) return true;
   const line = String(bus.service?.line_name || "").trim();
+  const passenger = isPassengerServiceLine(line);
+  const finished = isTicketerFinishedTrip(bus, extra);
+
+  // Explicit depot/garage destination — only OOS when not an active passenger trip.
+  if (isDepotRunDestination(bus.destination)) {
+    return isDepotOosForService(bus, { finishedTrip: finished });
+  }
+
+  // Active passenger service: never flip to NIS from GPS proximity alone.
+  if (passenger && !finished) return false;
+
   if (!line && isHeadingToOwnDepot(bus, extra)) return true;
   if (!isHeadingToOwnDepot(bus, extra)) return false;
   const depot = ownStokeDepot(bus, extra);
@@ -4220,17 +6175,126 @@ function isStokeDepotBound(bus, extra = {}) {
   const dest = String(bus.destination || "").trim();
   if (!bus.trip_id && dist <= 2500) return true;
   if (!dest && dist <= 2500) return true;
-  if (/adderley|mossfield|park\s*farm|endon|parkhall|scragg/i.test(dest) && dist <= 2500) return true;
+  if (
+    /adderley|mossfield|adelaide|park\s*farm|endon|parkhall|scragg/i.test(dest) &&
+    dist <= 2500
+  ) {
+    return true;
+  }
   return false;
 }
 
 function isNotInService(bus) {
   if (!bus) return false;
-  if (bus.nis || bus.depotOos) return true;
-  if (isStokeDepotBound(bus)) return true;
   const line = String(bus.service?.line_name || "").trim();
-  if (!line) return true;
-  return isNisDestination(bus.destination);
+  const finished = Boolean(bus.tripFinished) || isTicketerFinishedTrip(bus);
+  if (finished) return true;
+  if (isTicketerDeadRun(bus) || isDeadRunLine(line)) return true;
+  if (isNisDestination(bus.destination)) return true;
+  if (!line || line === "?") return true;
+  // Depot dest + passenger line only counts once finished (handled above) or if no line.
+  if (isDepotOosForService(bus, { finishedTrip: finished })) return true;
+  // Proximity to own yard — never for active passenger services past a depot.
+  if (isStokeDepotBound(bus)) return true;
+  // Do not trust a stale bus.nis / depotOos from BODS when the trip is still a
+  // passenger service (e.g. 11B past the depot with an old nis bit).
+  return false;
+}
+
+/** First Potteries / D&G dead runs / depot transfers / finished trips (Ticketer → BODS / bustimes). */
+function isOperatorOutOfServiceBus(bus, extra = {}) {
+  if (!bus) return false;
+  if (!(isFirstPotteriesBus(bus, extra) || isDgBus(bus, extra))) return false;
+  return isNotInService(bus);
+}
+
+function isFpotOutOfService(bus, extra = {}) {
+  if (!bus || !isFirstPotteriesBus(bus, extra)) return false;
+  return isNotInService(bus);
+}
+
+function isDgOutOfService(bus, extra = {}) {
+  if (!bus || !isDgBus(bus, extra)) return false;
+  return isNotInService(bus);
+}
+
+/**
+ * Inject FPOT / DAGC OOS from BODS SIRI-VM (Ticketer AVL).
+ * Bustimes often omits depot / DEAD_RUN pings that BODS still publishes.
+ */
+function mergeTicketerOosFromBods(byId, bodsVehicles) {
+  if (!(byId instanceof Map) || !Array.isArray(bodsVehicles)) return;
+  for (const bods of bodsVehicles) {
+    if (!isOperatorOutOfServiceBus(bods)) continue;
+    const finished = Boolean(bods.tripFinished || isTicketerFinishedTrip(bods));
+    const deadRun = Boolean(bods.deadRun) || isTicketerDeadRun(bods);
+    const tagged = {
+      ...bods,
+      nis: true,
+      deadRun: deadRun || undefined,
+      depotOos: Boolean(
+        bods.depotOos ||
+          isStokeDepotBound(bods) ||
+          isDepotOosForService(bods, { finishedTrip: finished }),
+      ),
+      tripFinished: finished,
+      nisSource: bods.nisSource || "bods-ticketer",
+      destination: normalizeAvlText(bods.destination) || bods.destination || "",
+      service: {
+        ...(bods.service || {}),
+        line_name: deadRun
+          ? "DEAD_RUN"
+          : bods.service?.line_name || "",
+      },
+    };
+    let matchedId = null;
+    for (const [id, existing] of byId) {
+      if (busesAreSameVehicle(existing, tagged)) {
+        matchedId = id;
+        break;
+      }
+    }
+    if (matchedId != null) {
+      const existing = byId.get(matchedId);
+      byId.set(matchedId, {
+        ...existing,
+        ...tagged,
+        id: existing.id,
+        vehicle: {
+          ...(existing.vehicle || {}),
+          ...(tagged.vehicle || {}),
+          name: existing.vehicle?.name || tagged.vehicle?.name,
+          reg: existing.vehicle?.reg || tagged.vehicle?.reg,
+          colour: existing.vehicle?.colour || tagged.vehicle?.colour,
+          livery: existing.vehicle?.livery ?? tagged.vehicle?.livery,
+        },
+        service: {
+          ...(existing.service || {}),
+          ...(tagged.service || {}),
+          line_name: tagged.service?.line_name || existing.service?.line_name || "",
+        },
+        operator: existing.operator || tagged.operator,
+        coordinates: tagged.coordinates || existing.coordinates,
+        heading: Number.isFinite(tagged.heading) ? tagged.heading : existing.heading,
+        datetime: tagged.datetime || existing.datetime,
+        destination: tagged.destination || existing.destination,
+        nis: true,
+        deadRun: tagged.deadRun || existing.deadRun,
+        depotOos: tagged.depotOos,
+        nisSource: tagged.nisSource,
+        trackSource: "bods",
+        source: "bods",
+        _bods: tagged._bods || existing._bods,
+      });
+    } else {
+      byId.set(tagged.id, tagged);
+    }
+  }
+}
+
+/** @deprecated Prefer mergeTicketerOosFromBods */
+function mergeFpotOosFromBods(byId, bodsVehicles) {
+  mergeTicketerOosFromBods(byId, bodsVehicles);
 }
 
 function dgIsNotInService(item) {
@@ -4248,12 +6312,22 @@ function dgIsNotInService(item) {
 function nisStatus(bus) {
   const dest = String(bus.destination || "").trim();
   const moving = Number.isFinite(bus.speedMph) && bus.speedMph >= 3;
-  const depotBound = bus.depotOos || isStokeDepotBound(bus);
-  if (depotBound || (/garage|depot/i.test(dest) && (isNisDestination(dest) || isDepotRunDestination(dest)))) {
+  const finished = Boolean(bus.tripFinished) || isTicketerFinishedTrip(bus);
+  const depotBound =
+    bus.depotOos ||
+    isStokeDepotBound(bus) ||
+    isDepotOosForService(bus, { finishedTrip: finished });
+  if (depotBound) {
     return moving ? "Out of service — heading to depot" : "Out of service at depot";
   }
-  if (/position|dead|empty to|to start/i.test(dest)) {
+  if (isTicketerDeadRun(bus)) {
+    return "Dead run";
+  }
+  if (/position|empty to|to start/i.test(dest)) {
     return "Heading to start the next trip";
+  }
+  if (finished) {
+    return moving ? "Finished — positioning" : "Finished / not in service";
   }
   if (moving) return "Off route — positioning / heading to start";
   return "Finished / not in service";
@@ -4265,14 +6339,43 @@ function isFlixBus(bus) {
   const colour = String(bus?.vehicle?.colour || "").toLowerCase();
   const url = String(bus?.vehicle?.url || bus?.service?.url || "");
   const op = String(bus?.operator?.id || bus?.operator?.noc || bus?.operator || "");
+  const source = String(bus?._source || bus?.source || "");
   return (
     bus?.vehicle?.livery === 1046 ||
     colour === FLIX_GREEN.toLowerCase() ||
     colour === "#73d700" ||
     /flixbus/i.test(name) ||
     /flixbus/i.test(url) ||
-    /^flix$/i.test(op)
+    /^flix$/i.test(op) ||
+    String(op).toUpperCase() === "FLIX" ||
+    source === "bustimes-flix"
   );
+}
+
+async function fetchFlixBuses(signal) {
+  try {
+    const res = await fetch("/api/vehicles?operator=FLIX", { signal });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const rows = Array.isArray(data) ? data : [];
+    // Tag so paint/history treat them as Flix even if upstream omits operator.noc.
+    return rows
+      .map((bus) => ({
+        ...bus,
+        _source: bus._source || "bustimes-flix",
+        operator: {
+          ...(bus.operator && typeof bus.operator === "object" ? bus.operator : {}),
+          noc: "FLIX",
+          id: bus.operator?.id || "FLIX",
+          name: bus.operator?.name || "FlixBus",
+          slug: bus.operator?.slug || "flixbus",
+        },
+      }))
+      .filter(isFlixBus);
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    return [];
+  }
 }
 
 function isNationalExpress(bus) {
@@ -4318,18 +6421,6 @@ function isInternationalFlix(bus) {
   );
 }
 
-async function fetchFlixBuses(signal) {
-  try {
-    const res = await fetch("/api/vehicles?operator=FLIX", { signal });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data) ? data.filter(isFlixBus) : [];
-  } catch (error) {
-    if (error?.name === "AbortError") throw error;
-    return [];
-  }
-}
-
 async function fetchNatxBuses(signal) {
   try {
     const res = await fetch("/api/vehicles?operator=NATX", { signal });
@@ -4348,16 +6439,35 @@ function formatSpeed(mph) {
   return `${Math.round(mph)} mph`;
 }
 
+/** UK-style circular speed-limit roundel (red ring, white face, black number). */
+function speedLimitBadgeHtml(limitMph) {
+  if (!Number.isFinite(limitMph)) return "";
+  const n = Math.round(limitMph);
+  return `<span class="speed-limit-badge" title="Speed limit ${n} mph" aria-label="Speed limit ${n} mph"><span class="speed-limit-badge-num">${esc(String(n))}</span></span>`;
+}
+
 function formatSpeedLine(speedMph, limitMph) {
   const speed = formatSpeed(speedMph);
   if (!Number.isFinite(limitMph)) return speed;
   return `${speed} · limit ${Math.round(limitMph)}`;
 }
 
+/** Live card line: speed text + roundel + age (HTML). */
+function formatSpeedLiveHtml(speedMph, limitMph, ageText = "") {
+  const over =
+    Number.isFinite(speedMph) && Number.isFinite(limitMph) && speedMph > limitMph + 2.5;
+  const badge = speedLimitBadgeHtml(limitMph);
+  const bits = [`<span class="popup-speed-text">${esc(formatSpeed(speedMph))}</span>`];
+  if (badge) bits.push(badge);
+  if (ageText) bits.push(`<span class="popup-speed-age">${esc(ageText)}</span>`);
+  return `<span class="popup-speed-live${over ? " is-over" : ""}">${bits.join('<span class="popup-speed-sep"> · </span>')}</span>`;
+}
+
 function speedBlock(speedMph, limitMph) {
   const over =
     Number.isFinite(speedMph) && Number.isFinite(limitMph) && speedMph > limitMph + 2.5;
-  return `<div class="popup-speed${over ? " is-over" : ""}">${esc(formatSpeedLine(speedMph, limitMph))}</div>`;
+  const badge = speedLimitBadgeHtml(limitMph);
+  return `<div class="popup-speed${over ? " is-over" : ""}"><span class="popup-speed-text">${esc(formatSpeed(speedMph))}</span>${badge ? `<span class="popup-speed-sep"> · </span>${badge}` : ""}</div>`;
 }
 
 function asCount(value, min, max) {
@@ -4465,8 +6575,26 @@ function occupancyFromSources(bus = {}, extra = {}) {
 }
 
 function seatsBlock(bus, extra = {}) {
+  return "";
+  /*
   const info = extra.seatsInfo || occupancyFromSources(bus, extra);
-  if (!info) return "";
+  if (!info) {
+    if (isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra)) {
+      if (extra.firstOccupancyLoaded) {
+        return `
+          <div class="popup-seats is-unknown" role="status">
+            <div class="popup-seats-main">Live seat count unavailable</div>
+          </div>
+        `;
+      }
+      return `
+        <div class="popup-seats is-loading" role="status" aria-live="polite">
+          <div class="popup-seats-main">Loading live seat count…</div>
+        </div>
+      `;
+    }
+    return "";
+  }
   if (!info?.seats && info?.remaining == null && !info?.band) return "";
   // Lead with seats left when we have a live First / counted reading.
   if (info.remaining != null && info.seats) {
@@ -4532,6 +6660,7 @@ function seatsBlock(bus, extra = {}) {
       ${extras.length ? `<div class="popup-seats-extra">${esc(extras.join(" · "))}</div>` : ""}
     </div>
   `;
+  */
 }
 
 function isFirstBus(bus, extra = {}) {
@@ -4613,6 +6742,49 @@ async function fetchFirstServiceVehicles(line, operator = "FPOT", { force = fals
   }
 }
 
+function firstServiceCodes(line) {
+  const code = String(line || "").trim().toUpperCase();
+  if (!code) return [];
+  const codes = [code];
+  const base = code.match(/^(\d+)[A-Z]$/)?.[1] || "";
+  if (base && base !== code) codes.push(base);
+  return codes;
+}
+
+const firstFeedPrefetching = new Set();
+
+async function prefetchFirstServiceFeeds(buses) {
+  const jobs = new Map();
+  for (const bus of buses || []) {
+    if (!(isFirstPotteriesBus(bus) || isFirstBus(bus))) continue;
+    const line = String(bus?.service?.line_name || "").trim();
+    const operator = String(bus?.operator?.noc || bus?.operator?.id || "FPOT").trim().toUpperCase();
+    if (!line || !operator) continue;
+    for (const code of firstServiceCodes(line)) jobs.set(`${operator}:${code}`, { code, operator });
+  }
+  const pending = [...jobs.values()].filter((job) => {
+    const key = `${job.operator}:${job.code}`;
+    if (firstFeedPrefetching.has(key)) return false;
+    firstFeedPrefetching.add(key);
+    return true;
+  });
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < pending.length) {
+      const job = pending[cursor++];
+      const key = `${job.operator}:${job.code}`;
+      try {
+        await fetchFirstServiceVehicles(job.code, job.operator);
+      } catch {
+        /* card selection can retry the feed */
+      } finally {
+        firstFeedPrefetching.delete(key);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, pending.length) }, () => worker()));
+}
+
 function fleetNumberFromBus(bus = {}, extra = {}) {
   const raws = [
     extra.vehicle?.fleet_code,
@@ -4666,10 +6838,10 @@ function matchFirstLiveVehicle(vehicles, bus, extra, lat, lng) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   const nearby = [];
   for (const row of list) {
-    if (line && row.line && String(row.line).toUpperCase() !== line) continue;
+    if (line && row.line && !sameServiceLine(row.line, line)) continue;
     if (!Number.isFinite(row.lat) || !Number.isFinite(row.lng)) continue;
     const d = haversineMeters(lat, lng, row.lat, row.lng);
-    if (d <= 120) nearby.push({ row, d });
+    if (d <= 500) nearby.push({ row, d });
   }
   nearby.sort((a, b) => a.d - b.d);
   if (!nearby.length) return null;
@@ -4729,7 +6901,7 @@ function matchFirstDeparture(data, bus) {
 }
 
 async function firstOccupancyFor(bus, extra, lat, lng, { force = false } = {}) {
-  if (!isFirstBus(bus, extra)) return null;
+  if (!(isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))) return null;
   const line = String(bus?.service?.line_name || extra?.line || "").trim();
   const nocRaw = String(
     bus?.operator?.noc ||
@@ -4753,8 +6925,13 @@ async function firstOccupancyFor(bus, extra, lat, lng, { force = false } = {}) {
 
   // Primary: live buses-on-a-map feed (same as First Bus app seat counts).
   if (line) {
-    const vehicles = await fetchFirstServiceVehicles(line, noc, { force });
-    const hit = matchFirstLiveVehicle(vehicles, bus, extra, lat, lng);
+    const codes = firstServiceCodes(line);
+    let hit = null;
+    for (const code of codes) {
+      const vehicles = await fetchFirstServiceVehicles(code, noc, { force });
+      hit = matchFirstLiveVehicle(vehicles, bus, extra, lat, lng);
+      if (parseFirstOccupancy(hit)) break;
+    }
     const fromLive = parseFirstOccupancy(hit);
     if (fromLive) {
       fromLive.fleet = hit?.fleet || fleetNumberFromBus(bus, extra) || "";
@@ -4813,8 +6990,21 @@ function identityTokens(...values) {
     if (/https?:|bustimes\.org|\/vehicles\//i.test(text)) continue;
     const plate = compactReg(text);
     if (/^[A-Z]{1,2}\d{1,2}[A-Z]{3}$/.test(plate)) tokens.add(plate);
+    // Bustimes often embeds plates in names like "67151 - YX66 WFJ".
+    for (const hit of text.toUpperCase().match(/[A-Z]{1,2}\s*\d{1,2}\s*[A-Z]{3}/g) || []) {
+      const p = compactReg(hit);
+      if (/^[A-Z]{1,2}\d{1,2}[A-Z]{3}$/.test(p)) tokens.add(p);
+    }
+    // Fleet codes: "DAGC-102", "102 - YJ13 HNB", bare "102".
+    const nocFleet = text.toUpperCase().match(/\b([A-Z]{2,5})[-_](\d{2,5})\b/);
+    if (nocFleet) {
+      tokens.add(nocFleet[2]);
+      tokens.add(`${nocFleet[1]}${nocFleet[2]}`);
+    }
+    const leadFleet = text.match(/^\s*(\d{2,5})\s*[-–—]/);
+    if (leadFleet) tokens.add(leadFleet[1]);
     const compact = compactQuery(text);
-    if (/^\d{4,7}$/.test(compact)) tokens.add(compact);
+    if (/^\d{2,7}$/.test(compact)) tokens.add(compact);
     for (const num of compact.match(/\d{4,7}/g) || []) tokens.add(num);
   }
   tokens.delete("");
@@ -4834,6 +7024,19 @@ function busIdentityTokens(bus = {}, extra = {}) {
   );
 }
 
+/** Bustimes vehicles.json often omits `operator` — recover NOC from /vehicles/{noc}-… URLs. */
+function btOperatorNoc(bt) {
+  const direct = String(
+    bt?.operator?.noc || bt?.operator?.id || bt?.service?.operator?.noc || bt?.operator || "",
+  )
+    .trim()
+    .toUpperCase();
+  if (direct && direct !== "[OBJECT OBJECT]") return direct;
+  const url = String(bt?.vehicle?.url || bt?.url || "");
+  const m = url.match(/\/vehicles\/([a-z0-9]+)-/i);
+  return m ? m[1].toUpperCase() : "";
+}
+
 function bodsIdentityTokens(item = {}) {
   return identityTokens(item.vehicleRef);
 }
@@ -4841,7 +7044,12 @@ function bodsIdentityTokens(item = {}) {
 function tokensOverlap(a, b) {
   if (!a?.size || !b?.size) return false;
   for (const token of a) {
+    // Plates / long fleet codes (YX66WFJ, 67151, DAGC102).
     if (token.length >= 4 && b.has(token)) return true;
+  }
+  // Short D&G-style fleet numbers (30, 102) shared on both sides.
+  for (const token of a) {
+    if (/^\d{2,3}$/.test(token) && b.has(token)) return true;
   }
   return false;
 }
@@ -4910,23 +7118,19 @@ function liveBusMatchScore(bods, bt) {
   const lineB = compactQuery(bods.service?.line_name);
   const lineT = compactQuery(bt.service?.line_name);
   const opB = compactQuery(bods._bods?.operator || bods.operator?.noc || bods.operator);
-  const opT = compactQuery(
-    bt.operator?.noc || bt.operator?.id || bt.service?.operator?.noc || bt.operator,
+  const opT = compactQuery(btOperatorNoc(bt));
+  const bodsTokens = identityTokens(
+    bods._bods?.vehicleRef,
+    bods.vehicle?.name,
+    bods.vehicle?.reg,
+    bods.vehicle?.fleet_code,
   );
-  const ref = compactQuery(bods._bods?.vehicleRef || bods.vehicle?.name);
-  const reg = compactReg(bods._bods?.vehicleRef || bods.vehicle?.name || "");
   const btTokens = busIdentityTokens(bt);
+  const sameVehicle = tokensOverlap(bodsTokens, btTokens);
+  // Different operators only when we are sure it is not the same plate/fleet.
+  if (opB && opT && opB !== opT && !sameVehicle) return 0;
   let score = 0;
-  if (ref && (btTokens.has(ref) || compactQuery(bt.vehicle?.name) === ref)) score += 45;
-  if (reg && btTokens.has(reg)) score += 45;
-  if (
-    tokensOverlap(
-      identityTokens(bods._bods?.vehicleRef, bods.vehicle?.name, bods.vehicle?.reg),
-      btTokens,
-    )
-  ) {
-    score += 40;
-  }
+  if (sameVehicle) score += 50;
   if (lineB && lineT && lineB === lineT) score += 10;
   if (opB && opT && opB === opT) score += 8;
   if (
@@ -4977,7 +7181,12 @@ function busesAreSameVehicle(a, b) {
  */
 function enrichBodsFromBustimes(bods, bt) {
   if (!bods || !bt) return bods;
-  const feedSpeed = Number(bods.speedMph ?? bods._bods?.velocityMph);
+  // Do not use Number(null) — that becomes 0 and falsely marks every bus Stopped.
+  const feedSpeed = readProvidedSpeedMph(
+    bods.feedSpeedMph,
+    bods.speedMph,
+    bods._bods?.velocityMph,
+  );
   return {
     ...bt,
     id: bt.id,
@@ -4987,8 +7196,8 @@ function enrichBodsFromBustimes(bods, bt) {
     delay: bods.delay ?? bt.delay,
     destination: bt.destination || bods.destination,
     origin: bt.origin || bods.origin,
-    speedMph: Number.isFinite(feedSpeed) ? feedSpeed : undefined,
-    feedSpeedMph: Number.isFinite(feedSpeed) ? feedSpeed : undefined,
+    speedMph: feedSpeed ?? undefined,
+    feedSpeedMph: feedSpeed ?? undefined,
     service: {
       ...(bt.service || {}),
       line_name: bt.service?.line_name || bods.service?.line_name,
@@ -5000,7 +7209,6 @@ function enrichBodsFromBustimes(bods, bt) {
       colour: bt.vehicle?.colour || bods.vehicle?.colour || "#2563eb",
       livery: bt.vehicle?.livery ?? bods.vehicle?.livery,
     },
-    bodsOccupancy: bods.bodsOccupancy || bt.bodsOccupancy,
     source: "bods",
     trackSource: "bods",
     metaSource: "bustimes",
@@ -5135,12 +7343,26 @@ function parseMaxspeedMph(tags = {}) {
 }
 
 function classLimitMph(cls) {
-  if (cls === "motorway") return 70;
-  if (cls === "trunk") return 60;
-  if (cls === "primary") return 40;
-  if (cls === "secondary" || cls === "tertiary" || cls === "unclassified") return 30;
-  if (cls === "residential" || cls === "busway" || cls === "service" || cls === "minor") return 30;
-  if (cls === "living_street") return 20;
+  const c = String(cls || "").toLowerCase();
+  if (!c) return null;
+  if (c === "motorway" || c === "motorway_link") return 70;
+  if (c === "trunk" || c === "trunk_link") return 60;
+  if (c === "primary" || c === "primary_link") return 40;
+  if (
+    c === "secondary" ||
+    c === "secondary_link" ||
+    c === "tertiary" ||
+    c === "tertiary_link" ||
+    c === "unclassified" ||
+    c === "residential" ||
+    c === "busway" ||
+    c === "service" ||
+    c === "minor" ||
+    c === "road"
+  ) {
+    return 30;
+  }
+  if (c === "living_street") return 20;
   return null;
 }
 
@@ -5175,11 +7397,24 @@ function nearestRoadLimit(lat, lng) {
   return bestD <= 180 && Number.isFinite(best) ? best : null;
 }
 
+/** Best available speed limit for the card (snap → cached extra → Overpass later). */
+function resolveLimitMph(bus, extra = {}, lat, lng) {
+  const fromExtra = Number(extra?.limitMph);
+  if (Number.isFinite(fromExtra) && fromExtra > 0) return fromExtra;
+  const fromBus = Number(bus?.limitMph);
+  if (Number.isFinite(fromBus) && fromBus > 0) return fromBus;
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    const near = nearestRoadLimit(lat, lng);
+    if (Number.isFinite(near) && near > 0) return near;
+  }
+  return null;
+}
+
 async function fetchLimitNear(lat, lng, fallback) {
   const key = limitCacheKey(lat, lng);
   if (speedLimitCache.has(key)) return speedLimitCache.get(key);
   const pending = (async () => {
-    const query = `[out:json][timeout:8];way(around:45,${lat.toFixed(5)},${lng.toFixed(5)})["highway"];out tags center;`;
+    const query = `[out:json][timeout:8];way(around:80,${lat.toFixed(5)},${lng.toFixed(5)})["highway"];out tags center;`;
     try {
       const json = await fetchOverpassJson(query, 8000);
       let best = null;
@@ -5188,7 +7423,11 @@ async function fetchLimitNear(lat, lng, fallback) {
         const elat = Number(el.center?.lat ?? el.lat);
         const elng = Number(el.center?.lon ?? el.lon);
         if (!Number.isFinite(elat) || !Number.isFinite(elng)) continue;
-        const limit = parseMaxspeedMph(el.tags) ?? classLimitMph(el.tags?.highway);
+        const hw = el.tags?.highway;
+        if (!hw || /^(footway|path|steps|pedestrian|cycleway|bridleway|track|corridor)$/i.test(hw)) {
+          continue;
+        }
+        const limit = parseMaxspeedMph(el.tags) ?? classLimitMph(hw) ?? 30;
         if (limit == null) continue;
         const d = haversineMeters(lat, lng, elat, elng);
         if (d < bestD) {
@@ -5196,18 +7435,49 @@ async function fetchLimitNear(lat, lng, fallback) {
           best = limit;
         }
       }
-      if (best != null) return best;
+      if (best != null && bestD <= 90) return best;
     } catch {
       // Fall back to the snapped road class.
     }
-    if (Number.isFinite(fallback)) return fallback;
+    if (Number.isFinite(fallback) && fallback > 0) return fallback;
     return nearestRoadLimit(lat, lng);
   })();
   speedLimitCache.set(key, pending);
   const result = await pending;
   if (!Number.isFinite(result)) speedLimitCache.delete(key);
+  else speedLimitCache.set(key, result);
   if (speedLimitCache.size > 400) speedLimitCache.delete(speedLimitCache.keys().next().value);
   return result;
+}
+
+/** Keep limit on the marker and refresh the card once Overpass/snap has a value. */
+function ensureMarkerSpeedLimit(marker) {
+  if (!marker?.bus) return;
+  const bus = marker.bus;
+  const extra = marker.extra || (marker.extra = {});
+  const [lng, lat] = bus.coordinates || [];
+  const ll = marker.getLatLng?.() || {};
+  const useLat = Number.isFinite(ll.lat) ? ll.lat : lat;
+  const useLng = Number.isFinite(ll.lng) ? ll.lng : lng;
+  const known = resolveLimitMph(bus, extra, useLat, useLng);
+  if (Number.isFinite(known)) {
+    extra.limitMph = known;
+    bus.limitMph = known;
+    return;
+  }
+  if (!Number.isFinite(useLat) || !Number.isFinite(useLng)) return;
+  if (marker._limitFetchAt && Date.now() - marker._limitFetchAt < 8000) return;
+  marker._limitFetchAt = Date.now();
+  const gen = marker._enrichGen || 0;
+  fetchLimitNear(useLat, useLng, extra.limitMph ?? bus.limitMph).then((limit) => {
+    if (marker._enrichGen && marker._enrichGen !== gen) return;
+    if (!Number.isFinite(limit) || limit <= 0) return;
+    marker.extra ||= {};
+    marker.extra.limitMph = limit;
+    if (marker.bus) marker.bus.limitMph = limit;
+    refreshPopup(marker);
+    if (isFollowingMarker(marker)) updateFollowChip();
+  });
 }
 
 function colourChannels(value) {
@@ -5335,12 +7605,13 @@ function vehicleIcon(line, heading, colour = "#2563eb", livery = null, speedMph 
 }
 
 function staffIcon(line, heading, livery = null, speedMph = null) {
-  return vehicleIcon(line, heading, STAFF_COLOURS[line] || "#1f6b2d", livery, speedMph);
+  const paint = livery || brandLiveryForLine(line);
+  return vehicleIcon(line, heading, paint?.colour || STAFF_COLOURS[line] || "#cc181a", paint, speedMph);
 }
 
 function busIconKey(bus, heading = null, speedMph = null) {
-  const livId = liveryIdOf(bus);
-  const liv = getLivery(livId);
+  const liv = resolveBusLivery(bus);
+  const livId = liv?.id || liveryIdOf(bus);
   const h = Number.isFinite(heading) ? heading : Number(bus?.heading) || 0;
   const speed = Number.isFinite(speedMph) ? speedMph : Number(bus?.speedMph) || 0;
   const zoomBand = map.getZoom() >= 15 ? "close" : "mid";
@@ -5351,30 +7622,68 @@ function busIconKey(bus, heading = null, speedMph = null) {
     livId,
     liveryCss(liv) || bus?.vehicle?.colour || "",
     bus?.service?.line_name || "",
+    isNotInService(bus) ? "nis" : "svc",
+    isTicketerDeadRun(bus) ? "dr" : "",
   ].join("|");
 }
 
 function busIcon(bus, headingOverride = null) {
   const nis = isNotInService(bus);
+  const dead = nis && isTicketerDeadRun(bus);
   const school = !nis && isSchoolBusLive(bus);
   const scfc = !nis && !school && isStokeFcShuttleLive(bus);
-  const line = bus.service?.line_name || (nis ? "NIS" : "?");
+  // Dead runs: distinct DR label; other OOS keeps grey NIS pin style.
+  const line = dead
+    ? "DR"
+    : nis && !isPassengerServiceLine(bus.service?.line_name)
+      ? "NIS"
+      : bus.service?.line_name || (nis ? "NIS" : "?");
   const heading = Number.isFinite(headingOverride)
     ? headingOverride
     : Number.isFinite(bus.heading)
       ? bus.heading
       : 0;
-  const livId = liveryIdOf(bus);
+  const livery = resolveBusLivery(bus);
   if (nis) {
-    const livery = getLivery(livId);
     return vehicleIcon(line, heading, "#64748b", livery, bus.speedMph, { nis: true });
   }
   if (isFlixBus(bus)) {
+    // Prefer bustimes.org Flix livery when paint matched; else local Flix green.
+    if (liveryCss(livery)) {
+      return vehicleIcon(line, heading, bus.vehicle?.colour || FLIX_GREEN, livery, bus.speedMph);
+    }
     return vehicleIcon(line, heading, FLIX_GREEN, FLIX_LIVERY, bus.speedMph);
   }
-  const colour = scfc ? bus.vehicle?.colour || "#e03c31" : bus.vehicle?.colour || "#2563eb";
-  const livery = getLivery(livId);
-  return vehicleIcon(line, heading, colour, livery, bus.speedMph, { school, scfc });
+  if (isNationalExpress(bus)) {
+    const natxLiv = liveryCss(livery) ? livery : brandLiveryForBus(bus);
+    const colour =
+      bus.vehicle?.colour && bus.vehicle.colour !== "#2563eb"
+        ? bus.vehicle.colour
+        : natxLiv?.colour || "#ffffff";
+    return vehicleIcon(line, heading, colour, natxLiv, bus.speedMph);
+  }
+  const brand = brandLiveryForBus(bus);
+  // bustimes.org colour when present; brand only while paint/CSS is still loading.
+  let colour = scfc
+    ? bus.vehicle?.colour || "#e03c31"
+    : bus.vehicle?.colour && bus.vehicle.colour !== "#2563eb"
+      ? bus.vehicle.colour
+      : brand?.colour || brandColourForBus(bus, "#2563eb");
+  if (
+    !scfc &&
+    isNearWhite(colour) &&
+    !liveryCss(livery) &&
+    brand?.colour &&
+    !isNearWhite(brand.colour)
+  ) {
+    colour = brand.colour;
+  }
+  // Bustimes CSS wins whenever loaded; brand is temporary fallback only.
+  let paintLiv = livery;
+  if (!liveryCss(paintLiv) && brand && liveryCss(brand)) {
+    paintLiv = brand;
+  }
+  return vehicleIcon(line, heading, colour, paintLiv, bus.speedMph, { school, scfc });
 }
 
 function parseFleetReg(ref) {
@@ -5403,6 +7712,29 @@ function busRegistration(bus = {}, extra = {}) {
     regFromVehicleName(extra.vehicle?.name || bus.vehicle?.name || "") ||
     ""
   );
+}
+
+/** Fleet number from BODS/Ticketer (D&G often has no plate on SIRI — only "119"). */
+function busFleetCode(bus = {}, extra = {}) {
+  const direct = String(
+    extra.btVehicle?.fleet_code ||
+      extra.btVehicle?.fleet_number ||
+      extra.vehicle?.fleet_code ||
+      extra.vehicle?.fleet_number ||
+      bus?.vehicle?.fleet_code ||
+      bus?.vehicle?.fleet_number ||
+      "",
+  ).trim();
+  if (direct) return direct;
+  const name = String(extra.vehicle?.name || bus?.vehicle?.name || "").trim();
+  if (/^\d{1,5}[A-Z]?$/i.test(name)) return name;
+  // bods-DAGC-DAGC-119 / bods-FPOT-FPOT-35939
+  const fromId = String(bus?.id || "").match(/-(\d{1,5}[A-Z]?)$/i);
+  if (fromId) return fromId[1];
+  const ref = String(bus?._bods?.vehicleRef || "").trim();
+  const fromRef = ref.match(/(?:^|-)(\d{1,5}[A-Z]?)$/i);
+  if (fromRef && !/[A-Z]{2}\d{2}/i.test(ref)) return fromRef[1];
+  return "";
 }
 
 function compactReg(reg) {
@@ -5737,29 +8069,106 @@ async function bustimesVehicleByReg(reg, extras = {}) {
   return btRegCache.get(key);
 }
 
+/**
+ * BODS live ids are `bods-FPOT-…` — bustimes journey history needs the numeric vehicle id.
+ * Resolve via plate (and optional NOC) when paint matching did not attach btId.
+ */
+async function resolveBustimesVehicleForBus(bus, extra = {}) {
+  if (!bus && !extra) return null;
+  const existingId = historyVehicleId(bus, extra);
+  if (existingId && (extra.btVehicle?.id || extra.vehicle?.id)) {
+    return extra.btVehicle || extra.vehicle || null;
+  }
+  if (existingId) {
+    try {
+      return await vehicleDetails(existingId);
+    } catch {
+      /* fall through to reg lookup */
+    }
+  }
+  const reg =
+    compactReg(
+      busRegistration(bus || {}, extra) ||
+        extra.btVehicle?.reg ||
+        extra.vehicle?.reg ||
+        bus?.vehicle?.reg ||
+        "",
+    ) || "";
+  const noc = String(
+    trailOperatorForBus(bus) ||
+      bus?._bods?.operator ||
+      bus?.operator?.noc ||
+      bus?.operator?.id ||
+      extra.operatorNoc ||
+      "",
+  )
+    .trim()
+    .toUpperCase();
+  const fleet = busFleetCode(bus, extra);
+  // D&G / Staffs Ticketer often publish fleet number only (no plate on BODS).
+  if (!reg && !fleet) return null;
+  if (!reg && fleet) {
+    return (
+      (noc ? await bustimesVehicleByReg("", { fleet, operator: noc }) : null) ||
+      (await bustimesVehicleByReg("", { fleet }))
+    );
+  }
+  return (
+    (noc ? await bustimesVehicleByReg(reg, { fleet, operator: noc }) : null) ||
+    (await bustimesVehicleByReg(reg, { fleet })) ||
+    (fleet ? await bustimesVehicleByReg("", { fleet, operator: noc || undefined }) : null)
+  );
+}
 function liveryFromBtVehicle(vehicle) {
   if (!vehicle) return null;
-  const id = vehicle.livery?.id;
+  const rawLiv = vehicle.livery;
+  const id =
+    rawLiv && typeof rawLiv === "object"
+      ? rawLiv.id
+      : rawLiv != null && rawLiv !== ""
+        ? rawLiv
+        : null;
   if (id != null) {
     const cached = getLivery(id);
     if (cached) return cached;
   }
-  const left = vehicle.livery?.left_css || vehicle.livery?.left;
+  const left = rawLiv?.left_css || rawLiv?.left;
   if (!left) return null;
   return {
+    id: id != null ? String(id) : undefined,
     left_css: left,
-    right_css: vehicle.livery?.right_css || vehicle.livery?.right || left,
+    right_css: rawLiv?.right_css || rawLiv?.right || left,
     white_text: true,
-    stroke_colour: vehicle.livery?.stroke_colour || "#111827",
+    stroke_colour: rawLiv?.stroke_colour || "#111827",
   };
 }
 
 async function staffLivery(item) {
+  const line = staffLineName(item);
   const parsed = parseFleetReg(item.vehicle?.ref);
-  const vehicle = await bustimesVehicleByReg(parsed.reg, { fleet: parsed.fleet, operator: "DAGC" });
-  const id = vehicle?.livery?.id;
-  if (id != null) await ensureLiveries([id]);
-  return liveryFromBtVehicle(vehicle);
+  let vehicle =
+    (await bustimesVehicleByReg(parsed.reg, { fleet: parsed.fleet, operator: "DAGC" })) ||
+    (parsed.reg || parsed.fleet
+      ? await bustimesVehicleByReg(parsed.reg, { fleet: parsed.fleet })
+      : null);
+  const id = vehicle?.livery?.id ?? vehicle?.livery;
+  if (id != null && id !== "") await ensureLiveries([id]);
+  const fromBt = liveryFromBtVehicle(vehicle);
+  if (fromBt?.left_css || fromBt?.left) return fromBt;
+  if (id != null && id !== "") {
+    const hit = getLivery(id);
+    if (hit?.left_css || hit?.left) return hit;
+  }
+  const fleet = fleetLiveryForBus({
+    vehicle: { reg: parsed.reg, name: parsed.fleet || parsed.reg },
+    operator: { noc: "DAGC" },
+    service: { line_name: line },
+  });
+  if (fleet) return fleet;
+  return (
+    brandLiveryForLine(line) ||
+    brandLiveryForBus({ service: { line_name: line }, operator: { noc: "DAGC" } })
+  );
 }
 
 function getStaffRoutes() {
@@ -5826,9 +8235,10 @@ function tripPathFromTimes(times) {
   return path;
 }
 
-async function tripEnds(tripId) {
+async function tripEnds(tripId, { force = false } = {}) {
   if (!tripId) return null;
-  const fresh = tripCache.has(tripId) && Date.now() - (tripCacheAt.get(tripId) || 0) < 25000;
+  const fresh =
+    !force && tripCache.has(tripId) && Date.now() - (tripCacheAt.get(tripId) || 0) < 25000;
   if (!fresh) {
     tripCacheAt.set(tripId, Date.now());
     tripCache.set(
@@ -5943,16 +8353,19 @@ function stokeFcShuttleTitle(bus) {
   return bus?.destination || "bet365 Stadium";
 }
 
-function popupHtml(bus, extra = {}) {
+function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {}) {
   const nis = isNotInService(bus);
+  const dead = nis && isTicketerDeadRun(bus);
   const school = !nis && isSchoolBusLive(bus);
   const scfc = !nis && !school && isStokeFcShuttleLive(bus);
   const line =
-    extractRouteFromVehicle(bus) ||
-    bus.service?.line_name ||
-    (nis ? "Not in service" : "Unknown line");
+    dead
+      ? "Dead run"
+      : extractRouteFromVehicle(bus) ||
+        bus.service?.line_name ||
+        (nis ? "Not in service" : "Unknown line");
   const from = extra.from || bus.origin || "";
-  const to = extra.to || bus.destination || "";
+  const to = extra.to || bus.destination || (dead ? "Dead run" : "");
   const diverted = isDivertedText(to, bus.destination);
   const liveName = bus.vehicle?.name || "Unknown vehicle";
   const detail = extra.vehicle || {};
@@ -5992,10 +8405,10 @@ function popupHtml(bus, extra = {}) {
   const typeLine = [type, deck, fuel].filter(Boolean).join(" · ");
   const operator = operatorName(bus, extra);
   const [lng, lat] = bus.coordinates || [];
-  const delaySec =
-    extra.delaySec ??
-    bus.delay ??
-    inferDelaySeconds(extra.stops, lat, lng, bus.datetime);
+  const delaySec = resolveLiveDelaySec(bus, extra, lat, lng, {
+    live: Boolean(sidePanel),
+  });
+  if (extra && delaySec != null) extra.delaySec = delaySec;
   const delayText = nis ? "" : formatDelay(delaySec);
   const metaBits = [idLine, esc(operator), esc(typeLine), esc(livery)].filter(Boolean);
   const stickyNext = Number.isInteger(extra._nextStopIdx) ? extra._nextStopIdx : null;
@@ -6009,7 +8422,7 @@ function popupHtml(bus, extra = {}) {
   };
 
   return `
-    <div class="popup-card">
+    <div class="popup-card${sidePanel ? " is-side-panel" : ""}">
       <div class="popup-top">
         <div class="popup-line">${esc(line)}${diverted ? ` <span class="history-divert-tag" title="Diverted">div</span>` : ""}</div>
         ${
@@ -6034,21 +8447,15 @@ function popupHtml(bus, extra = {}) {
           : ""
       }
       ${nis ? (to ? `<div class="popup-meta">Shown as ${esc(to)}</div>` : "") : routeBlock(from, to)}
-      ${
-        !nis && (isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))
-          ? seatsBlock(bus, extra)
-          : ""
-      }
       <div class="popup-actions">
         ${followButtonHtml({ bus })}
-        ${playRouteButtonHtml(bus, extra)}
       </div>
       ${photoBlock(extra, { reg: photoReg, fleet, operator })}
-      ${nis ? "" : stopsBlock(extra.stops, lat, lng, stickyNext)}
+      ${omitStops || nis ? "" : stopsBlock(extra.stops, lat, lng, stickyNext)}
       ${historyBlock(historyExtra)}
       <div class="popup-details">
         <div>${metaBits.join(" · ")}</div>
-        <div class="popup-details-live ${Number.isFinite(bus.speedMph) && Number.isFinite(extra.limitMph ?? bus.limitMph) && bus.speedMph > (extra.limitMph ?? bus.limitMph) + 2.5 ? "is-over" : ""}">${esc(formatSpeedLine(bus.speedMph, extra.limitMph ?? bus.limitMph))} · ${esc(timeAgo(bus.datetime))}</div>
+        <div class="popup-details-live">${formatSpeedLiveHtml(bus.speedMph, resolveLimitMph(bus, extra, lat, lng), timeAgo(bus.datetime))}</div>
       </div>
     </div>
   `;
@@ -6064,7 +8471,7 @@ function markerPopupHtml(marker) {
 function popupStructureKey(html) {
   return String(html || "")
     .replace(/class="popup-delay[^"]*"[^<]*/g, 'class="popup-delay"')
-    .replace(/class="popup-details-live[^"]*"[^<]*<\/div>/g, 'class="popup-details-live"></div>')
+    .replace(/class="popup-details-live[^"]*"[\s\S]*?<\/div>/g, 'class="popup-details-live"></div>')
     .replace(/class="popup-seats[^"]*"[\s\S]*?<\/div>\s*<\/div>/g, 'class="popup-seats"></div>')
     .replace(/class="follow-bus-btn[^"]*"[^<]*/g, 'class="follow-bus-btn"')
     .replace(/ class="popup-stop[^"]*"/g, ' class="popup-stop"')
@@ -6072,6 +8479,7 @@ function popupStructureKey(html) {
     .replace(/<p class="popup-photo-note">[^<]*<\/p>/g, "")
     .replace(/\d+s ago|just now|\d+m ago/g, "AGE")
     .replace(/Stopped|\d+ mph/g, "SPEED")
+    .replace(/speed-limit-badge-num">\d+/g, 'speed-limit-badge-num">N')
     .replace(/limit \d+/g, "LIMIT")
     .replace(/On time|\d+ min late|\d+ min early|Timing unknown/g, "DELAY")
     .replace(/\d{1,2}:\d{2}(?::\d{2})?/g, "TIME");
@@ -6087,7 +8495,9 @@ function rememberNextStop(marker) {
 
 /** Update speed / delay / follow label without rebuilding the popup DOM. */
 function patchPopupLive(marker) {
-  const root = marker.getPopup()?.getElement()?.querySelector(".popup-card");
+  const root =
+    (selectedMapMarker === marker && journeyPanelDetailEl?.querySelector(".popup-card")) ||
+    marker.getPopup()?.getElement()?.querySelector(".popup-card");
   if (!root) return false;
   rememberNextStop(marker);
 
@@ -6096,44 +8506,27 @@ function patchPopupLive(marker) {
     const extra = marker.extra || {};
     const nis = isNotInService(bus);
     const [lng, lat] = bus.coordinates || [];
-    const delaySec =
-      extra.delaySec ?? bus.delay ?? inferDelaySeconds(extra.stops, lat, lng, bus.datetime);
+    const delaySec = resolveLiveDelaySec(bus, extra, lat, lng, {
+      live: isFollowingMarker(marker) || selectedMapMarker === marker,
+    });
+    if (delaySec != null) extra.delaySec = delaySec;
     const delayEl = root.querySelector(".popup-delay");
     if (delayEl && !nis) {
       delayEl.textContent = formatDelay(delaySec);
       delayEl.className = `popup-delay ${delayClass(delaySec)}`.trim();
     }
+    scheduleTripDelayRefresh(marker);
     if (isFollowingMarker(marker)) updateFollowChip();
-    // Keep First Bus seat counts in sync without rebuilding the whole card.
-    if (!nis && (isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))) {
-      const seatsHtml = seatsBlock(bus, extra).trim();
-      let seatsEl = root.querySelector(".popup-seats");
-      if (seatsHtml) {
-        const wrap = document.createElement("div");
-        wrap.innerHTML = seatsHtml;
-        const next = wrap.firstElementChild;
-        if (seatsEl && next) {
-          seatsEl.className = next.className;
-          seatsEl.innerHTML = next.innerHTML;
-        } else if (next) {
-          const actions = root.querySelector(".popup-actions");
-          if (actions) actions.insertAdjacentElement("beforebegin", next);
-          else root.insertAdjacentElement("afterbegin", next);
-        }
-      } else if (seatsEl) {
-        seatsEl.remove();
-      }
-      if (isFollowingMarker(marker)) updateFollowChip();
-    }
     const liveEl = root.querySelector(".popup-details-live");
     if (liveEl) {
-      const limit = extra.limitMph ?? bus.limitMph;
-      const over =
-        Number.isFinite(bus.speedMph) &&
-        Number.isFinite(limit) &&
-        bus.speedMph > limit + 2.5;
-      liveEl.textContent = `${formatSpeedLine(bus.speedMph, limit)} · ${timeAgo(bus.datetime)}`;
-      liveEl.classList.toggle("is-over", over);
+      const limit = resolveLimitMph(bus, extra, lat, lng);
+      if (Number.isFinite(limit)) {
+        extra.limitMph = limit;
+        bus.limitMph = limit;
+      } else {
+        ensureMarkerSpeedLimit(marker);
+      }
+      liveEl.innerHTML = formatSpeedLiveHtml(bus.speedMph, limit, timeAgo(bus.datetime));
     }
     if (!nis && extra.stops?.length) {
       const rows = cardStops(extra.stops, lat, lng, extra._nextStopIdx);
@@ -6156,7 +8549,11 @@ function patchPopupLive(marker) {
       const recorded = item.recordedAtTime
         ? new Date(item.recordedAtTime).toLocaleTimeString("en-GB", { timeZone: UK_TZ })
         : "Unknown time";
-      liveEl.textContent = `${formatSpeedLine(item.speedMph, extra.limitMph ?? item.limitMph)} · ${recorded}`;
+      liveEl.innerHTML = formatSpeedLiveHtml(
+        item.speedMph,
+        extra.limitMph ?? item.limitMph,
+        recorded,
+      );
     }
   }
 
@@ -6169,8 +8566,34 @@ function patchPopupLive(marker) {
   return true;
 }
 
-/** Rebuild open popup only when HTML structure changed; keep scroll + fold state. */
+/** Rebuild open popup / left panel only when HTML structure changed; keep scroll + fold state. */
 function refreshPopup(marker, { force = false } = {}) {
+  if (!marker) return;
+  if (selectedMapMarker === marker && journeyPanelEl && !journeyPanelEl.hidden) {
+    rememberNextStop(marker);
+    const html = markerPopupHtml(marker);
+    const structure = popupStructureKey(html);
+    if (!force && structure === marker._lastPopupStructure) {
+      if (patchPopupLive(marker)) {
+        marker._lastPopupHtml = html;
+        renderJourneyPanelStops(marker.extra?.stops || [], {
+          lat: marker.getLatLng?.()?.lat,
+          lng: marker.getLatLng?.()?.lng,
+        });
+        return;
+      }
+    }
+    marker._lastPopupHtml = html;
+    marker._lastPopupStructure = structure;
+    const detailScroll = journeyPanelDetailEl?.scrollTop ?? 0;
+    const stopsScroll = journeyPanelStopsEl?.scrollTop ?? 0;
+    refreshBusSidePanel(marker);
+    requestAnimationFrame(() => {
+      if (journeyPanelDetailEl) journeyPanelDetailEl.scrollTop = detailScroll;
+      if (journeyPanelStopsEl) journeyPanelStopsEl.scrollTop = stopsScroll;
+    });
+    if (!marker?.isPopupOpen()) return;
+  }
   if (!marker?.isPopupOpen()) return;
   rememberNextStop(marker);
   const html = markerPopupHtml(marker);
@@ -6222,7 +8645,21 @@ async function loadHistoryIntoMarker(marker, { force = false } = {}) {
   const lineFilter = historyLineFilterFor(marker);
   if (lineFilter) marker.extra.historyLineFilter = lineFilter;
   if (marker.staff && !marker.extra.trailKey) marker.extra.trailKey = staffTrailKey(marker.staff);
-  const vehicleId = historyVehicleId(marker.bus, marker.extra);
+  let vehicleId = historyVehicleId(marker.bus, marker.extra);
+  // BODS Potteries / Staffs buses use bods-… ids — look up bustimes vehicle by plate for history.
+  if (!vehicleId && marker.bus && !isFlixBus(marker.bus)) {
+    try {
+      const resolved = await resolveBustimesVehicleForBus(marker.bus, marker.extra);
+      if (resolved?.id) {
+        marker.extra.btVehicle = resolved;
+        marker.extra.vehicle = marker.extra.vehicle || resolved;
+        marker.bus.btId = resolved.id;
+        vehicleId = String(resolved.id);
+      }
+    } catch {
+      /* optional */
+    }
+  }
   const trailKey =
     marker.extra.trailKey ||
     (marker.staff ? staffTrailKey(marker.staff) : "") ||
@@ -6238,18 +8675,76 @@ async function loadHistoryIntoMarker(marker, { force = false } = {}) {
       (marker.staff && isAltonLine(staffLine)) ||
       isDgBusContext(marker, marker.extra),
   );
-  if (!vehicleId && !wantAtTrails) {
+  // Flix / NATX: merge GPS trail segments (actual roads driven) with bustimes journeys.
+  const wantCoachTrails = Boolean(
+    marker.bus && (isFlixBus(marker.bus) || isNationalExpress(marker.bus)),
+  );
+  // First Potteries (and other Staffs locals): BODS often has no reg/fleet match on
+  // bustimes — merge GPS-trail run history so every tracked journey still shows + plays.
+  const isStaffsBusTrail =
+    !wantAtTrails &&
+    !wantCoachTrails &&
+    (isStaffsTrailOperator(String(marker.bus?.operator?.noc || marker.bus?.operator?.id || "")) ||
+      /^bods-(FPOT|DAGC|SOST|CRDR|SLBS)-/i.test(String(marker.bus?.id || "")));
+  if (!vehicleId && !wantAtTrails && !wantCoachTrails && !isStaffsBusTrail) {
     marker.extra.history = [];
     marker.extra.historyStatus = "unavailable";
     refreshPopup(marker);
     return;
   }
-  const cacheKey = `${vehicleId || trailKey || "at"}:${atLine || ""}:${days}`;
+  const coachNoc = isNationalExpress(marker.bus) ? "NATX" : isFlixBus(marker.bus) ? "FLIX" : "";
+  const busTrailNoc = isStaffsBusTrail
+    ? String(
+        marker.bus?.operator?.noc ||
+          marker.bus?.operator?.id ||
+          String(marker.bus?.id || "").match(/^bods-([A-Z]+)-/i)?.[1] ||
+          "FPOT",
+      ).toUpperCase()
+    : "";
+  const cacheKey = `${vehicleId || trailKey || "at"}:${atLine || ""}:${coachNoc || busTrailNoc}:${days}`;
   if (force) historyCache.delete(cacheKey);
   marker.extra.historyStatus = "loading";
   refreshPopup(marker);
-  let rowsRaw = vehicleId ? await fetchVehicleHistory(vehicleId, days) : [];
+
+  // Kick off every independent fetch in parallel (reg lookup, journeys, trail keys).
+  // Previously these ran as a serial waterfall — 3+ round trips before first paint.
+  const regForKeys =
+    compactReg(
+      marker.extra.btVehicle?.reg ||
+        marker.extra.vehicle?.reg ||
+        marker.extra.coachReg ||
+        marker.bus?.vehicle?.reg ||
+        busRegistration(marker.bus, marker.extra) ||
+        regFromVehicleName(marker.bus?.vehicle?.name || "") ||
+        String(marker.bus?.id || "").match(/^bods-[A-Z]+-([A-Z]{2}\d{2}[A-Z]{3})$/i)?.[1] ||
+        "",
+    ) || "";
+  const resolvePromise = vehicleId
+    ? Promise.resolve(marker.extra.btVehicle || marker.extra.vehicle || { id: vehicleId })
+    : marker.bus && !isFlixBus(marker.bus)
+      ? resolveBustimesVehicleForBus(marker.bus, marker.extra).catch(() => null)
+      : Promise.resolve(null);
+  const journeysPromise = vehicleId ? fetchVehicleHistory(vehicleId, days) : Promise.resolve([]);
+  const trailWindow = Math.min(7, Math.max(Number(days) || 1, 1));
+  const coachLine = String(lineFilter || marker.bus?.service?.line_name || "").trim();
+  const trailKeysGroupPromise = (wantCoachTrails || isStaffsBusTrail) && coachLine
+    ? fetchTrailKeysForGroup(
+        { operators: [coachNoc || busTrailNoc || "FLIX"], lines: [coachLine] },
+        { days: trailWindow },
+      ).catch(() => [])
+    : Promise.resolve([]);
+
+  const resolved = await resolvePromise;
   if ((Number(marker.extra.historyDays) || historyDays) !== days) return;
+  if (resolved?.id && !vehicleId) {
+    marker.extra.btVehicle = resolved;
+    marker.extra.vehicle = marker.extra.vehicle || resolved;
+    marker.bus.btId = resolved.id;
+    vehicleId = String(resolved.id);
+  }
+  let rowsRaw = await journeysPromise;
+  if ((Number(marker.extra.historyDays) || historyDays) !== days) return;
+  // AT1–AT3: merge GPS trail segments (employee journeys often missing on bustimes).
   if (wantAtTrails) {
     const reg =
       compactReg(
@@ -6266,7 +8761,54 @@ async function loadHistoryIntoMarker(marker, { force = false } = {}) {
     });
     rowsRaw = mergeAtHistoryRows(rowsRaw, atRows);
   }
+  if (wantCoachTrails || isStaffsBusTrail) {
+    const reg = regForKeys;
+    const jny = String(marker.bus?.journey_id || marker.bus?.id || "").trim();
+    const trailKeyList = [
+      trailKey,
+      jny,
+      jny ? `jny:${jny}` : "",
+      marker.bus?.id ? String(marker.bus.id) : "",
+      marker.bus?.btId ? String(marker.bus.btId) : "",
+      vehicleId,
+      reg ? `reg:${reg}` : "",
+    ].filter(Boolean);
+    // BODS NATX keys: bods-NATX-<ref>
+    const bodsRef = String(marker.bus?.id || "").match(/^bods-NATX-(.+)$/i)?.[1];
+    if (bodsRef) {
+      trailKeyList.push(`bods-NATX-${bodsRef}`, `bods-${bodsRef}`);
+    }
+    const trailNoc = coachNoc || busTrailNoc || "FLIX";
+    // Reuse the parallel trail-keys lookup (already in flight since "loading" painted).
+    const extra = await trailKeysGroupPromise;
+    for (const key of extra) {
+      const k = String(key || "").trim();
+      if (!k) continue;
+      if (k.startsWith("coach:") || k.startsWith("reg:") || k.startsWith("run:") || k.startsWith("bods-")) {
+        trailKeyList.push(k);
+      }
+    }
+    const coachRows = await fetchCoachHistoryFromTrails({
+      trailKeys: [...new Set(trailKeyList)].slice(0, 24),
+      line: coachLine,
+      days: trailWindow,
+      operator: trailNoc,
+      busMode: isStaffsBusTrail,
+    });
+    rowsRaw = mergeAtHistoryRows(coachRows, rowsRaw);
+  }
   if ((Number(marker.extra.historyDays) || historyDays) !== days) return;
+  // Fast first paint: show bustimes rows the moment they're ready — don't wait for
+  // the GPS merge. GPS rows are merged into the same card a moment later (below).
+  if (wantCoachTrails || isStaffsBusTrail) {
+    const liveBusEarly = marker.bus;
+    const earlyRows = rowsRaw.map((row) => enrichJourneyRow(row, liveBusEarly));
+    if (earlyRows.length) {
+      marker.extra.history = earlyRows;
+      marker.extra.historyStatus = "ready";
+      refreshPopup(marker);
+    }
+  }
   const liveBus = marker.bus;
   const liveRow = liveBus
     ? liveVehicleAsHistoryRow(liveBus, {
@@ -6300,29 +8842,69 @@ async function loadHistoryIntoMarker(marker, { force = false } = {}) {
   const keepStokeFc =
     isFirstPotteriesContext(marker, marker.extra) ||
     isStokeFcLine(marker.extra.historyLineFilter || lineFilter);
-  const visible = filterHistoryByLine(enriched, marker.extra.historyLineFilter || lineFilter, {
+  let visible = filterHistoryByLine(enriched, marker.extra.historyLineFilter || lineFilter, {
     keepStokeFc,
   });
-  marker.extra.historyStatus = enriched.length ? (visible.length ? "ready" : "ready") : "empty";
+  // If the current line has no rows yet (bus just changed route), show the full
+  // vehicle history rather than an empty "unavailable" card.
+  if (!visible.length && enriched.length && marker.extra.historyLineFilter) {
+    marker.extra.historyLineFilter = "";
+    visible = enriched;
+  }
+  marker.extra.historyStatus = enriched.length ? "ready" : "empty";
   refreshPopup(marker);
+  // Prefetch GPS so History · Map has the current overnight trail ready.
+  const hydrateKeys = trailKeysForVehicle({
+    vehicleId,
+    trailKey,
+    reg:
+      compactReg(
+        marker.extra.btVehicle?.reg ||
+          marker.extra.vehicle?.reg ||
+          marker.bus?.vehicle?.reg ||
+          busRegistration(marker.bus || {}, marker.extra) ||
+          "",
+      ) || "",
+    line: lineFilter || marker.bus?.service?.line_name || "",
+    datetime: marker.bus?.datetime || new Date().toISOString(),
+  });
+  fetchServerTrails(hydrateKeys, { force: false }).catch(() => {});
 }
 
-async function enrichBustimes(event) {
-  const marker = event.target;
-  const bus = marker.bus;
-  if (!bus) return;
+async function enrichBustimes(eventOrMarker) {
+  const marker = eventOrMarker?.target || eventOrMarker;
+  const bus = marker?.bus;
+  if (!bus || !marker) return;
   const gen = (marker._enrichGen = (marker._enrichGen || 0) + 1);
   marker.extra ||= {};
   marker.extra.historyDays ||= historyDays;
+  loadHistoryIntoMarker(marker).catch(() => {});
   rememberTrailVehicle(bus.id);
+  // Load saved GPS tail so History · Map / Follow arrows work for locals and coaches.
+  marker.extra.trailKey = marker.extra.trailKey || String(bus.id || "");
+  if (isFlixBus(bus)) marker.extra.operatorNoc = "FLIX";
+  if (isNationalExpress(bus)) marker.extra.operatorNoc = "NATX";
+  hydrateLiveTrailFromServer(String(bus.id)).catch(() => {});
   const ll = marker.getLatLng();
-  marker.extra.limitMph = bus.limitMph ?? nearestRoadLimit(ll.lat, ll.lng);
-  const [ends, vehicle] = await Promise.all([
-    tripEnds(bus.trip_id || bus.journey_id),
+  marker.extra.limitMph = resolveLimitMph(bus, marker.extra, ll.lat, ll.lng);
+  ensureMarkerSpeedLimit(marker);
+  const [ends, vehicleFromId] = await Promise.all([
+    // Only real trip ids — journey_id is not a trip (NATX BODS often has journey, not trip).
+    bus.trip_id ? tripEnds(bus.trip_id) : Promise.resolve(null),
     isLikelyBustimesVehicleId(bus, bus.btId || bus.id)
       ? vehicleDetails(bus.btId || bus.id)
       : null,
   ]);
+  if (gen !== marker._enrichGen) return;
+  let vehicle = vehicleFromId;
+  // BODS / NATX / locals: resolve bustimes vehicle by plate so history + Map work.
+  if (!vehicle && !isFlixBus(bus)) {
+    try {
+      vehicle = await resolveBustimesVehicleForBus(bus, marker.extra);
+    } catch {
+      vehicle = null;
+    }
+  }
   if (gen !== marker._enrichGen) return;
   if (ends) {
     marker.extra.from = ends.from;
@@ -6330,10 +8912,22 @@ async function enrichBustimes(event) {
     marker.extra.stops = ends.stops || [];
     marker.extra._nextStopIdx = undefined;
     if (ends.operator) marker.extra.operator = ends.operator;
-    marker.extra.delaySec =
-      ends.delaySec ?? inferDelaySeconds(ends.stops, ll.lat, ll.lng, bus.datetime);
+    marker.extra.tripId = bus.trip_id || marker.extra.tripId || "";
+    marker.extra.delaySec = resolveLiveDelaySec(
+      bus,
+      { ...marker.extra, stops: ends.stops, delaySec: ends.delaySec },
+      ll.lat,
+      ll.lng,
+      { live: isFollowingMarker(marker) || selectedMapMarker === marker },
+    );
+    marker.extra._tripDelayFreshAt = Date.now();
+    marker._tripDelayAt = Date.now();
   }
-  if (vehicle) marker.extra.vehicle = vehicle;
+  if (vehicle) {
+    marker.extra.vehicle = vehicle;
+    marker.extra.btVehicle = marker.extra.btVehicle || vehicle;
+    if (vehicle.id != null) bus.btId = vehicle.id;
+  }
   // Prefer plate from NATX-style vehicle.name when AVL omits .reg
   const plate = busRegistration(bus, marker.extra);
   if (plate && !marker.extra.vehicle?.reg) {
@@ -6357,71 +8951,17 @@ async function enrichBustimes(event) {
     }
   }
   refreshPopup(marker);
-  loadHistoryIntoMarker(marker);
   const dgVehicle = String(bus.id).startsWith("dg-")
     ? await dgVehicleDetails(bus.vehicle?.name)
     : await dgVehicleFromBt(vehicle);
   if (gen !== marker._enrichGen) return;
   if (dgVehicle) marker.extra.dgVehicle = dgVehicle;
-  marker.extra.seatsInfo = occupancyFromSources(bus, marker.extra);
-  if (isFirstBus(bus, marker.extra)) {
-    if (!marker._firstSeatsCloseBound) {
-      marker._firstSeatsCloseBound = true;
-      marker.on("popupclose", () => {
-        if (marker._firstSeatsTimer) {
-          clearInterval(marker._firstSeatsTimer);
-          marker._firstSeatsTimer = null;
-        }
-      });
-    }
-    const first = await firstOccupancyFor(bus, marker.extra, ll.lat, ll.lng, { force: true });
-    if (gen !== marker._enrichGen) return;
-    if (first) {
-      marker.extra.firstOccupancy = first;
-      marker.extra.seatsInfo = occupancyFromSources(bus, marker.extra);
-      if (isFollowingMarker(marker)) updateFollowChip();
-    }
-    // Keep seat counts fresh while the card is open (match First app ~live updates).
-    if (marker._firstSeatsTimer) clearInterval(marker._firstSeatsTimer);
-    marker._firstSeatsTimer = setInterval(async () => {
-      if (!marker.isPopupOpen?.()) {
-        clearInterval(marker._firstSeatsTimer);
-        marker._firstSeatsTimer = null;
-        return;
-      }
-      const here = marker.getLatLng?.() || ll;
-      const next = await firstOccupancyFor(marker.bus || bus, marker.extra, here.lat, here.lng, {
-        force: true,
-      });
-      if (!next) return;
-      const prev = marker.extra.firstOccupancy;
-      if (
-        prev &&
-        prev.remaining === next.remaining &&
-        prev.occupied === next.occupied &&
-        prev.seats === next.seats
-      ) {
-        return;
-      }
-      marker.extra.firstOccupancy = next;
-      marker.extra.seatsInfo = occupancyFromSources(marker.bus || bus, marker.extra);
-      refreshPopup(marker, { force: true });
-      if (isFollowingMarker(marker)) updateFollowChip();
-    }, 10000);
-  }
-  const bods = await bodsOccupancyFor(bus, marker.extra, ll.lat, ll.lng);
-  if (gen !== marker._enrichGen) return;
-  // Never let BODS band data replace a live First seat reading.
-  if (bods && !(marker.extra.firstOccupancy?.remaining != null || marker.extra.firstOccupancy?.occupied != null)) {
-    marker.extra.bodsOccupancy = bods;
-    marker.extra.seatsInfo = occupancyFromSources(bus, marker.extra);
-  } else if (bods) {
-    marker.extra.bodsOccupancy = bods;
-  }
   fetchLimitNear(ll.lat, ll.lng, marker.extra.limitMph).then((limit) => {
     if (gen !== marker._enrichGen) return;
-    if (!Number.isFinite(limit)) return;
+    if (!Number.isFinite(limit) || limit <= 0) return;
     marker.extra.limitMph = limit;
+    if (marker.bus) marker.bus.limitMph = limit;
+    if (marker.staff) marker.staff.limitMph = limit;
     refreshPopup(marker);
   });
   refreshPopup(marker);
@@ -6430,7 +8970,7 @@ async function enrichBustimes(event) {
   loadPhotoIntoMarker(marker);
 }
 
-function staffPopup(item, extra = {}) {
+function staffPopup(item, extra = {}, { omitStops = false, sidePanel = false } = {}) {
   const journey = item.currentJourney || {};
   const line = staffLineName(item) || "AT";
   const route = extra.route || {};
@@ -6449,9 +8989,10 @@ function staffPopup(item, extra = {}) {
     : "Unknown time";
   const trailKey = extra.trailKey || staffTrailKey(item);
   const popupExtra = { ...extra, trailKey, line };
+  void omitStops;
 
   return `
-    <div class="popup-card">
+    <div class="popup-card${sidePanel ? " is-side-panel" : ""}">
       <div class="popup-top">
         <div class="popup-line">${esc(line)}</div>
       </div>
@@ -6481,16 +9022,16 @@ function staffPopup(item, extra = {}) {
         ]
           .filter(Boolean)
           .join(" · ")}</div>
-        <div class="popup-details-live">${esc(formatSpeedLine(item.speedMph, extra.limitMph ?? item.limitMph))} · ${esc(recorded)}</div>
+        <div class="popup-details-live">${formatSpeedLiveHtml(item.speedMph, extra.limitMph ?? item.limitMph, recorded)}</div>
       </div>
     </div>
   `;
 }
 
-async function enrichStaff(event) {
-  const marker = event.target;
-  const item = marker.staff;
-  if (!item) return;
+async function enrichStaff(eventOrMarker) {
+  const marker = eventOrMarker?.target || eventOrMarker;
+  const item = marker?.staff;
+  if (!item || !marker) return;
   const gen = (marker._enrichGen = (marker._enrichGen || 0) + 1);
   marker.extra ||= {};
   marker.extra.historyDays ||= historyDays;
@@ -6513,20 +9054,8 @@ async function enrichStaff(event) {
   marker.extra.to = destStop?.name || (inbound ? origin : dest);
   marker.extra.vehicle = vehicle;
   marker.extra.dgVehicle = vehicle;
-  marker.extra.seatsInfo = occupancyFromSources({ vehicle }, marker.extra);
   refreshPopup(marker);
   const parsed = parseFleetReg(item.vehicle?.ref);
-  const bods = await bodsOccupancyFor(
-    { vehicle, service: { line_name: line } },
-    marker.extra,
-    ll.lat,
-    ll.lng,
-  );
-  if (gen !== marker._enrichGen) return;
-  if (bods) {
-    marker.extra.bodsOccupancy = bods;
-    marker.extra.seatsInfo = occupancyFromSources({ vehicle }, marker.extra);
-  }
   let btVehicle = await bustimesVehicleByReg(parsed.reg, { fleet: parsed.fleet, operator: "DAGC" });
   if (!btVehicle && (parsed.reg || parsed.fleet)) {
     btVehicle = await bustimesVehicleByReg(parsed.reg, { fleet: parsed.fleet });
@@ -6537,8 +9066,10 @@ async function enrichStaff(event) {
   loadHistoryIntoMarker(marker);
   fetchLimitNear(ll.lat, ll.lng, marker.extra.limitMph).then((limit) => {
     if (gen !== marker._enrichGen) return;
-    if (!Number.isFinite(limit)) return;
+    if (!Number.isFinite(limit) || limit <= 0) return;
     marker.extra.limitMph = limit;
+    if (marker.bus) marker.bus.limitMph = limit;
+    if (marker.staff) marker.staff.limitMph = limit;
     refreshPopup(marker);
   });
   refreshPopup(marker);
@@ -6547,6 +9078,10 @@ async function enrichStaff(event) {
 }
 
 async function loadAltonTowers() {
+  if (historyMapFocus()) {
+    applyHistoryMapFocusToLiveMarkers();
+    return;
+  }
   try {
     const response = await fetch(
       "/api/dg-vehicles?regionId=526&showBusesNotInService=true",
@@ -6575,10 +9110,20 @@ async function loadAltonTowers() {
       recordStaffTrail(existing || { staff: item, extra: {} }, snapped.lat, snapped.lng, snapped.heading, {
         t: item.recordedAtTime ? new Date(item.recordedAtTime).getTime() || Date.now() : Date.now(),
       });
-      const livery = existing?.staffLivery || null;
+      const livery = existing?.staffLivery || brandLiveryForLine(line);
       if (existing) {
         existing.staff = item;
         existing.line = line;
+        if (!existing._sideSelectBound) {
+          existing._sideSelectBound = true;
+          try {
+            existing.unbindPopup();
+          } catch {
+            /* ignore */
+          }
+          existing.off("popupopen");
+          existing.on("click", () => selectMapMarker(existing));
+        }
         moveMarkerTo(existing, snapped.lat, snapped.lng);
         const iconKey = `${line}|${Math.round(snapped.heading || 0)}|${Math.round(item.speedMph || 0)}|${liveryCss(livery) || ""}`;
         if (existing._iconKey !== iconKey) {
@@ -6595,15 +9140,16 @@ async function loadAltonTowers() {
         });
         marker.staff = item;
         marker.line = line;
+        marker.staffLivery = livery;
         marker.extra = { trailKey: staffTrailKey(item), historyDays };
-        marker.bindPopup(() => staffPopup(marker.staff, marker.extra), POPUP_OPTS);
-        marker.on("popupopen", enrichStaff);
+        marker._sideSelectBound = true;
+        marker.on("click", () => selectMapMarker(marker));
         staffLayer.addLayer(marker);
         staffMarkers.set(id, marker);
       }
       staffLivery(item).then((next) => {
         const marker = staffMarkers.get(id);
-        if (!marker) return;
+        if (!marker || !next) return;
         marker.staffLivery = next;
         const snap = staffWhere(marker.staff);
         marker.setIcon(staffIcon(marker.line, snap.heading, next, marker.staff?.speedMph));
@@ -6612,6 +9158,10 @@ async function loadAltonTowers() {
 
     for (const [id, marker] of staffMarkers) {
       if (!seen.has(id)) {
+        if (selectedMapMarker === marker) {
+          selectedMapMarker = null;
+          if (!playback) hideJourneyPanel();
+        }
         staffLayer.removeLayer(marker);
         staffMarkers.delete(id);
         if (announceFollow === marker) announceFollow = null;
@@ -6628,6 +9178,10 @@ async function loadAltonTowers() {
 function dropServiceBus(id) {
   const marker = markers.get(id);
   if (!marker) return;
+  if (selectedMapMarker === marker) {
+    selectedMapMarker = null;
+    if (!playback) hideJourneyPanel();
+  }
   if (announceFollow === marker) announceFollow = null;
   if (isFollowingMarker(marker)) stopFollowBus("Lost live position for that bus");
   cluster.removeLayer(marker);
@@ -6641,19 +9195,32 @@ function upsertLiveBus(bus, snapped) {
     existing?.extra?.vehicle?.reg ||
     bus.vehicle?.reg ||
     "";
-  recordVehicleTrail(bus.id, snapped.lat, snapped.lng, snapped.heading, {
+  const trailMeta = {
     journeyId: bus.journey_id,
     tripId: bus.trip_id,
     line: bus.service?.line_name || "",
     operator: trailOperatorForBus(bus),
+    direction: bus.direction || bus.directionRef || "",
+    destination: bus.destination || "",
     t: bus.datetime ? new Date(bus.datetime).getTime() || Date.now() : Date.now(),
     reg,
-  });
+  };
+  recordVehicleTrail(bus.id, snapped.lat, snapped.lng, snapped.heading, trailMeta);
+  const btId = bus.btId ?? bus.vehicle?.id;
+  if (btId != null && String(btId) !== String(bus.id) && /^\d+$/.test(String(btId))) {
+    recordVehicleTrail(String(btId), snapped.lat, snapped.lng, snapped.heading, trailMeta);
+  }
   if (existing) {
     existing.bus = bus;
-    if (bus.bodsOccupancy) {
-      existing.extra ||= {};
-      existing.extra.bodsOccupancy = bus.bodsOccupancy;
+    if (!existing._sideSelectBound) {
+      existing._sideSelectBound = true;
+      try {
+        existing.unbindPopup();
+      } catch {
+        /* ignore */
+      }
+      existing.off("popupopen");
+      existing.on("click", () => selectMapMarker(existing));
     }
     moveMarkerTo(existing, snapped.lat, snapped.lng);
     const iconKey = busIconKey(bus, snapped.heading, bus.speedMph);
@@ -6661,16 +9228,40 @@ function upsertLiveBus(bus, snapped) {
       existing._iconKey = iconKey;
       existing.setIcon(busIcon(bus, snapped.heading));
     }
+    // Keep early/late moving while the card is open (trip predictions refresh ~15–25s).
+    scheduleTripDelayRefresh(existing);
+    const [blng, blat] = bus.coordinates || [];
+    if (existing.extra) {
+      existing.extra.delaySec = resolveLiveDelaySec(bus, existing.extra, blat, blng, {
+        live: isFollowingMarker(existing) || selectedMapMarker === existing,
+      });
+      const limit = resolveLimitMph(bus, existing.extra, blat, blng);
+      if (Number.isFinite(limit)) {
+        existing.extra.limitMph = limit;
+        bus.limitMph = limit;
+      } else {
+        ensureMarkerSpeedLimit(existing);
+      }
+    }
     refreshPopup(existing);
+    if (isFollowingMarker(existing)) updateFollowChip();
     if (existing === announceFollow) announceJourney(existing);
     keepFollowedInView(existing);
     return existing;
   }
   const marker = L.marker([snapped.lat, snapped.lng], { icon: busIcon(bus, snapped.heading) });
   marker.bus = bus;
-  marker.extra = bus.bodsOccupancy ? { bodsOccupancy: bus.bodsOccupancy } : {};
-  marker.bindPopup(() => popupHtml(marker.bus, marker.extra), POPUP_OPTS);
-  marker.on("popupopen", enrichBustimes);
+  marker.extra = {};
+  if (!marker._sideSelectBound) {
+    marker._sideSelectBound = true;
+    try {
+      marker.unbindPopup();
+    } catch {
+      /* ignore */
+    }
+    marker.off("popupopen");
+    marker.on("click", () => selectMapMarker(marker));
+  }
   cluster.addLayer(marker);
   markers.set(bus.id, marker);
   return marker;
@@ -6678,10 +9269,33 @@ function upsertLiveBus(bus, snapped) {
 
 async function loadBuses({ replace = false } = {}) {
   const zoom = map.getZoom();
-  const showLocal = zoom >= MIN_ZOOM;
+  const overStaffs = mapOverlapsStaffordshire();
+  const histFocus = historyMapFocus();
+  // Never skip fetching because of History · Map hideAll — that left Staffordshire
+  // empty after tails until a full refresh. Fetch always; only hide pins while focused.
+  const showLocal = zoom >= MIN_ZOOM || overStaffs;
   const showCoach = zoom >= FLIX_MIN_ZOOM;
+  // Small force-op set only — nationwide TBTN/DIAM feeds crush nginx + kill paint.
+  const staffsOpList = overStaffs
+    ? STAFFS_FORCE_OPS
+    : showLocal
+      ? ["FPOT", "DAGC"]
+      : [];
 
-  if (!showLocal && !showCoach) {
+  if (histFocus?.hideAll) {
+    hint.hidden = false;
+    hint.textContent = "History map · live buses hidden · pan or press ✕ to restore";
+  } else if (histFocus?.journeyOnly) {
+    hint.hidden = false;
+    hint.textContent = "Journey map · bustimes.org";
+  } else if (overStaffs && zoom < 9) {
+    hint.hidden = false;
+    hint.textContent = "Staffordshire locals loaded · zoom in for more detail";
+  } else {
+    hint.hidden = true;
+  }
+
+  if (!showLocal && !showCoach && !staffsOpList.length) {
     cluster.clearLayers();
     markers.clear();
     if (followTarget) stopFollowBus();
@@ -6690,12 +9304,6 @@ async function loadBuses({ replace = false } = {}) {
     return;
   }
 
-  if (!showLocal && showCoach) {
-    hint.hidden = false;
-    hint.textContent = "FlixBus & National Express nationwide · zoom in further for local buses";
-  } else {
-    hint.hidden = true;
-  }
   pruneStaleMarkers();
 
   if (busesBusy && !replace) return;
@@ -6715,58 +9323,242 @@ async function loadBuses({ replace = false } = {}) {
 
   try {
     showMessage("");
-    const [localRes, flixBuses, natxBuses, bodsLive] = await Promise.all([
-      showLocal ? fetch(`/api/vehicles?${params}`, { signal }) : Promise.resolve(null),
-      showCoach ? fetchFlixBuses(signal) : Promise.resolve([]),
-      showCoach ? fetchNatxBuses(signal) : Promise.resolve([]),
-      showLocal ? fetchBodsVehicles(params, signal) : Promise.resolve({ vehicles: [], ok: false }),
-    ]);
-    let localBuses = [];
-    if (localRes) {
-      if (!localRes.ok) throw new Error(`Could not load vehicles (${localRes.status})`);
-      const data = await localRes.json();
-      localBuses = Array.isArray(data) ? data : [];
+    // Paint from bustimes.org for every UK viewport (bbox). Staffs operator
+    // extras only fill overnight / sparse AVL gaps — never replace bbox paint.
+    const staffsPaintOps = overStaffs ? ["FPOT", "DAGC", "CRDR", "SLBS"] : [];
+    const coachPaintOps = ["NATX", "FLIX"];
+    // Refresh paint on map move/replace, when cache is empty/stale, or when
+    // Staffs buses still lack bustimes numeric livery ids.
+    const paintAgeMs = lastPaintAt ? Date.now() - lastPaintAt : Infinity;
+    const staffsNeedPaint =
+      overStaffs &&
+      [...markers.values()].some(
+        (m) =>
+          m?.bus &&
+          STAFFS_LIVE_OPS.includes(
+            String(m.bus.operator?.noc || m.bus._bods?.operator || "").toUpperCase(),
+          ) &&
+          !hasNumericBustimesLivery(m.bus),
+      );
+    const wantPaint =
+      replace || !lastPaintBuses.length || paintAgeMs > 45_000 || staffsNeedPaint;
+    const safeJson = async (res) => {
+      if (!res || !res.ok) return [];
+      try {
+        const data = await res.json();
+        return Array.isArray(data) ? data : [];
+      } catch {
+        return [];
+      }
+    };
+    // Position polls abort each other every ~7s — paint must NOT share that signal
+    // or bustimes.org liveries never finish loading (Staffs stayed on brand stripes).
+    const safeFetch = (url) => fetch(url, { signal }).catch(() => null);
+    const paintFetch = (url) => fetch(url).catch(() => null);
+
+    const [localRes, flixBuses, natxBuses, bodsLive, staffsOpFeeds, paintRes, ...extraPaintRes] =
+      await Promise.all([
+        showLocal ? safeFetch(`/api/vehicles?${params}`) : Promise.resolve(null),
+        showCoach ? fetchFlixBuses(signal) : Promise.resolve([]),
+        showCoach ? fetchNatxBuses(signal) : Promise.resolve([]),
+        showLocal
+          ? fetchBodsVehicles(params, signal)
+          : Promise.resolve({ vehicles: [], ok: false }),
+        staffsOpList.length
+          ? Promise.all(
+              staffsOpList.map((op) =>
+                fetchBodsVehicles(`operator=${encodeURIComponent(op)}`, signal),
+              ),
+            )
+          : Promise.resolve([]),
+        wantPaint && showLocal
+          ? paintFetch(`/api/bt-paint?${params}`)
+          : Promise.resolve(null),
+        ...(wantPaint && overStaffs && staffsPaintOps.length
+          ? staffsPaintOps.map((op) =>
+              paintFetch(`/api/bt-paint?operator=${encodeURIComponent(op)}`),
+            )
+          : []),
+        // Coach paint fetched separately below — not mixed into local paintById.
+      ]);
+    // Coach paint in a second wave so it never blocks / contaminates local liveries.
+    let coachPaintRes = [];
+    if (wantPaint && showCoach) {
+      coachPaintRes = await Promise.all(
+        coachPaintOps.map((op) =>
+          paintFetch(`/api/bt-paint?operator=${encodeURIComponent(op)}`),
+        ),
+      );
     }
+    if (signal.aborted || gen !== busesGen) return;
+    if (showLocal && (!localRes || !localRes.ok)) return;
+    let localBuses = await safeJson(localRes);
     if (bodsLive?.ok) attachFeedSpeedFromBods(localBuses, bodsLive.vehicles);
+
+    let paintBuses = lastPaintBuses;
+    let coachPaintBuses = [];
+    if (wantPaint) {
+      const paintById = new Map();
+      // Keep prior paint on partial failure so liveries don't flash off.
+      for (const row of lastPaintBuses) {
+        if (row?.id != null) paintById.set(row.id, row);
+      }
+      for (const res of [paintRes, ...extraPaintRes]) {
+        if (!res?.ok) continue;
+        try {
+          const pdata = await res.json();
+          if (!Array.isArray(pdata)) continue;
+          for (const row of pdata) {
+            if (row?.id != null) paintById.set(row.id, row);
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      paintBuses = [...paintById.values()];
+      if (paintBuses.length) {
+        lastPaintBuses = paintBuses;
+        lastPaintAt = Date.now();
+      }
+
+      const coachById = new Map();
+      for (const res of coachPaintRes) {
+        if (!res?.ok) continue;
+        try {
+          const pdata = await res.json();
+          if (!Array.isArray(pdata)) continue;
+          for (const row of pdata) {
+            if (row?.id != null) coachById.set(row.id, row);
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      coachPaintBuses = [...coachById.values()];
+    }
 
     const byId = new Map();
     for (const bus of localBuses) {
       if (!showLocal && !isFlixBus(bus) && !isNationalExpress(bus)) continue;
       byId.set(bus.id, bus);
     }
-    for (const bus of flixBuses) {
-      byId.set(bus.id, bus);
+    for (const bus of flixBuses) byId.set(bus.id, bus);
+    for (const bus of natxBuses) byId.set(bus.id, bus);
+
+    if (staffsOpList.length) {
+      const oosPool = [];
+      const opFeeds = Array.isArray(staffsOpFeeds) ? staffsOpFeeds : [];
+      for (const pool of opFeeds) {
+        if (!pool?.ok) continue;
+        for (const bus of pool.vehicles || []) {
+          if (!bus?.id || !Array.isArray(bus.coordinates)) continue;
+          if (!byId.has(bus.id)) byId.set(bus.id, bus);
+        }
+        oosPool.push(...(pool.vehicles || []));
+      }
+      if (!oosPool.length && bodsLive?.ok) oosPool.push(...(bodsLive.vehicles || []));
+      mergeTicketerOosFromBods(byId, oosPool);
     }
-    for (const bus of natxBuses) {
-      byId.set(bus.id, bus);
+
+    if (paintBuses.length || coachPaintBuses.length) {
+      const locals = [];
+      const coaches = [];
+      for (const bus of byId.values()) {
+        if (isFlixBus(bus) || isNationalExpress(bus)) coaches.push(bus);
+        else locals.push(bus);
+      }
+      const paintedLocals = paintBuses.length
+        ? paintBodsWithBustimesLiveries(locals, paintBuses)
+        : locals;
+      const paintedCoaches = coachPaintBuses.length
+        ? paintBodsWithBustimesLiveries(coaches, coachPaintBuses)
+        : coaches;
+      byId.clear();
+      for (const bus of paintedLocals) byId.set(bus.id, bus);
+      for (const bus of paintedCoaches) byId.set(bus.id, bus);
     }
 
     const live = [];
     const seenService = new Set();
+    const viewPad = bounds.pad(overStaffs ? 0.55 : 0.35);
 
     for (const bus of byId.values()) {
       const [lng, lat] = bus.coordinates || [];
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
-      if (isStalePing(bus.datetime)) continue;
+      if (isStalePing(bus.datetime, stalePingLimitMs(bus))) continue;
       const coach = isFlixBus(bus) || isNationalExpress(bus);
       if (!showLocal && !coach) continue;
       if (!showCoach && coach) continue;
+      // Operator-wide feeds include whole fleets — keep pins near the viewport.
+      if (!coach && !viewPad.contains([lat, lng])) continue;
+      if (histFocus?.journeyOnly && !busMatchesHistoryFocus(bus, {}, histFocus)) continue;
+      if (histFocus?.hideAll) continue;
       if (isNotInService(bus)) {
-        dropServiceBus(bus.id);
-        continue;
+        if (!isOperatorOutOfServiceBus(bus)) {
+          dropServiceBus(bus.id);
+          continue;
+        }
+        bus.nis = true;
+        if (isTicketerDeadRun(bus)) {
+          bus.deadRun = true;
+          if (!isPassengerServiceLine(bus.service?.line_name)) {
+            bus.service = { ...(bus.service || {}), line_name: "DEAD_RUN" };
+          }
+        }
+        if (isStokeDepotBound(bus)) bus.depotOos = true;
       }
-      live.push(bus);
       bus.speedMph = resolveBusSpeedMph(`bus-${bus.id}`, bus, lat, lng, bus.datetime);
+      // Temporary brand colour only — never replace a bustimes numeric livery id.
+      // ensureLiveries loads left_css from bustimes.org for every matched id.
+      if (!hasNumericBustimesLivery(bus)) {
+        const resolvedLiv = resolveBusLivery(bus);
+        if (!liveryCss(resolvedLiv)) {
+          const brand = fleetLiveryForBus(bus) || brandLiveryForBus(bus);
+          if (brand?.left_css || brand?.left) {
+            bus.vehicle = {
+              ...(bus.vehicle || {}),
+              colour:
+                bus.vehicle?.colour &&
+                bus.vehicle.colour !== "#2563eb" &&
+                !isNearWhite(bus.vehicle.colour)
+                  ? bus.vehicle.colour
+                  : brand.colour,
+              livery: brand,
+            };
+          }
+        }
+      } else if (isNearWhite(bus.vehicle?.colour)) {
+        // Solid brand tint only until bustimes CSS arrives — do not attach brand left_css.
+        const brand = brandLiveryForBus(bus);
+        if (brand?.colour && !isNearWhite(brand.colour)) {
+          bus.vehicle = { ...(bus.vehicle || {}), colour: brand.colour };
+        }
+      }
       const snapped = liveWhere(bus);
       bus.limitMph = snapped.limitMph ?? nearestRoadLimit(snapped.lat, snapped.lng);
+      live.push({ bus, snapped });
+    }
+
+    // Bustimes CSS must be ready before pins are drawn, or Staffs sticks on brand stripes.
+    try {
+      await ensureLiveries(live.map((row) => row.bus));
+    } catch {
+      /* ignore */
+    }
+
+    for (const { bus, snapped } of live) {
       seenService.add(bus.id);
       upsertLiveBus(bus, snapped);
     }
-
     for (const [id, marker] of markers) {
       const coach = isFlixBus(marker.bus) || isNationalExpress(marker.bus);
-      const keep = seenService.has(id) && !isStalePing(marker.bus?.datetime);
-      const allowed = (showLocal || coach) && (showCoach || !coach);
+      const keep =
+        seenService.has(id) && !isStalePing(marker.bus?.datetime, stalePingLimitMs(marker.bus));
+      const allowed =
+        (showLocal || coach) &&
+        (showCoach || !coach) &&
+        !histFocus?.hideAll &&
+        !(histFocus?.journeyOnly && !markerMatchesHistoryFocus(marker, histFocus));
       if (!keep || !allowed) {
         dropServiceBus(id);
         motion.delete(`bus-${id}`);
@@ -6774,18 +9566,13 @@ async function loadBuses({ replace = false } = {}) {
     }
     revealPendingFocus();
 
-    ensureLiveries(live.map((bus) => liveryIdOf(bus)))
-      .then(() => {
-        for (const bus of live) {
-          const marker = markers.get(bus.id);
-          if (!marker) continue;
-          const heading = Number(marker.bus?.heading);
-          const iconKey = busIconKey(marker.bus, heading, marker.bus?.speedMph);
-          marker._iconKey = iconKey;
-          marker.setIcon(busIcon(marker.bus, heading));
-        }
-      })
-      .catch(() => {});
+    // If Staffs view came back empty after a replace, retry once shortly
+    // (common after leaving history tails or a blippy BODS poll).
+    if (overStaffs && !histFocus?.hideAll && live.length < 3 && replace) {
+      setTimeout(() => {
+        if (mapOverlapsStaffordshire()) loadBuses({ replace: true }).catch(() => {});
+      }, 2500);
+    }
 
     ensureSnapRoads(signal)
       .then(() => {
@@ -6797,12 +9584,14 @@ async function loadBuses({ replace = false } = {}) {
           if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
           const snapped = liveWhere(bus);
           bus.limitMph = snapped.limitMph ?? nearestRoadLimit(snapped.lat, snapped.lng);
+          if (Number.isFinite(bus.limitMph) && marker.extra) marker.extra.limitMph = bus.limitMph;
           moveMarkerTo(marker, snapped.lat, snapped.lng);
           const iconKey = busIconKey(bus, snapped.heading, bus.speedMph);
           if (marker._iconKey !== iconKey) {
             marker._iconKey = iconKey;
             marker.setIcon(busIcon(bus, snapped.heading));
           }
+          if (selectedMapMarker === marker || isFollowingMarker(marker)) refreshPopup(marker);
           keepFollowedInView(marker);
         }
         for (const marker of staffMarkers.values()) {
@@ -6824,7 +9613,8 @@ async function loadBuses({ replace = false } = {}) {
   } catch (error) {
     if (error.name === "AbortError") return;
     pruneStaleMarkers();
-    showMessage(error.message);
+    // Keep existing pins on transient errors — blanking Staffs on every blip is worse.
+    if (!markers.size) showMessage(error.message);
   } finally {
     if (gen === busesGen) busesBusy = false;
   }
@@ -6844,8 +9634,15 @@ function schedule() {
 }
 
 map.on("moveend", () => {
+  applyMapDayNight();
   // Follow pans must not thrash vehicle reloads — that rebuilds the open bus card.
   if (followPanning || followTarget) {
+    return;
+  }
+  // Panning out of History · Map / tails restores live buses (Staffs was stuck blank).
+  if (historyMapFocus()?.hideAll) {
+    exitHistoryMapMode({ reload: true });
+    scheduleMapStops();
     return;
   }
   clearTimeout(map._loadTimer);
@@ -7497,12 +10294,18 @@ function findOnMap(query) {
       continue;
     }
     const name = compactQuery(marker.bus?.vehicle?.name);
-    const busReg = extractRegFromText(marker.bus?.vehicle?.name);
+    const busReg =
+      extractRegFromText(marker.bus?.vehicle?.name) ||
+      compactQuery(marker.bus?.vehicle?.reg);
     const detailReg = compactQuery(marker.extra?.vehicle?.reg || marker.extra?.btVehicle?.reg);
     if (wantReg) {
       if (busReg === wantReg || detailReg === wantReg || (name && name.includes(wantReg))) {
         identity.push(marker);
       }
+      continue;
+    }
+    if (busReg && busReg === q) {
+      identity.push(marker);
       continue;
     }
     if (!name) continue;
@@ -7813,11 +10616,19 @@ function updateMotion(id, lat, lng, iso) {
   return speedMph;
 }
 
+/** Read a speed only when the feed actually provided a value (not Number(null)→0). */
+function readProvidedSpeedMph(...candidates) {
+  for (const raw of candidates) {
+    if (raw == null || raw === "") continue;
+    const v = Number(raw);
+    if (Number.isFinite(v) && v >= 0 && v <= 90) return v;
+  }
+  return null;
+}
+
 /** Prefer GPS velocity from BODS SIRI-VM when the operator sends it; else estimate from pings. */
 function feedSpeedMph(bus) {
-  const v = Number(bus?.feedSpeedMph ?? bus?._bods?.velocityMph);
-  if (!Number.isFinite(v) || v < 0 || v > 90) return null;
-  return v;
+  return readProvidedSpeedMph(bus?.feedSpeedMph, bus?._bods?.velocityMph);
 }
 
 function resolveBusSpeedMph(key, bus, lat, lng, iso) {
@@ -7837,20 +10648,20 @@ function attachFeedSpeedFromBods(btBuses, bodsBuses) {
     if (!bt || isFlixBus(bt)) continue;
     let best = null;
     let bestScore = 0;
+    let bestFeed = null;
     for (const bods of bodsList) {
-      const feed = Number(bods.speedMph ?? bods._bods?.velocityMph);
-      if (!Number.isFinite(feed)) continue;
+      const feed = readProvidedSpeedMph(bods.speedMph, bods._bods?.velocityMph);
+      if (feed == null) continue;
       const score = liveBusMatchScore(bods, bt);
       if (score > bestScore) {
         best = bods;
         bestScore = score;
+        bestFeed = feed;
       }
     }
-    if (!best || bestScore < 18) continue;
-    const feed = Number(best.speedMph ?? best._bods?.velocityMph);
-    if (!Number.isFinite(feed) || feed < 0 || feed > 90) continue;
-    bt.feedSpeedMph = feed;
-    bt._bods = { ...(bt._bods || {}), ...(best._bods || {}), velocityMph: feed };
+    if (!best || bestScore < 18 || bestFeed == null) continue;
+    bt.feedSpeedMph = bestFeed;
+    bt._bods = { ...(bt._bods || {}), ...(best._bods || {}), velocityMph: bestFeed };
   }
   return btBuses;
 }
@@ -7986,6 +10797,8 @@ function placeOnRoad(marker, snapped) {
       tripId: marker.bus.trip_id,
       line: marker.bus.service?.line_name || marker.extra?.line || "",
       operator: trailOperatorForBus(marker.bus),
+      direction: marker.bus.direction || marker.bus.directionRef || "",
+      destination: marker.bus.destination || marker.extra?.to || "",
       reg: busRegistration(marker.bus, marker.extra || {}),
     });
   }
@@ -8249,6 +11062,13 @@ function bridgeTrailRoads(hitA, hitB) {
 function alignTrailToRoadsLocal(latlngs, breakOpts = {}) {
   if (!Array.isArray(latlngs) || latlngs.length < 2) return latlngs || [];
   const limits = trailBreakLimits(breakOpts);
+  const staffs =
+    !!breakOpts.staffs ||
+    isStaffsTrailOperator(breakOpts.operator) ||
+    isAltonLine(breakOpts.line);
+  // Rural AVL often sits further from the carriageway centreline than urban BODS.
+  const snapNear = staffs ? 380 : 280;
+  const snapFar = staffs ? 560 : 420;
   const inputSegs = splitLatLngsByGaps(latlngs, limits.gapM, breakOpts);
   const sourceSegs = inputSegs.length ? inputSegs : [latlngs];
   const alignedSegs = [];
@@ -8261,7 +11081,7 @@ function alignTrailToRoadsLocal(latlngs, breakOpts = {}) {
       const next = seg[i + 1];
       const heading = next ? segmentBearing(cur, next) : Number.isFinite(prevHeading) ? prevHeading : null;
       // Prefer the nearest road — never keep raw GPS in fields (that draws chords across country).
-      const hit = snapHit(cur[0], cur[1], heading, 280) || snapHit(cur[0], cur[1], heading, 420);
+      const hit = snapHit(cur[0], cur[1], heading, snapNear) || snapHit(cur[0], cur[1], heading, snapFar);
       if (!hit) {
         if (out.length >= 2) {
           alignedSegs.push(out.slice());
@@ -8372,12 +11192,17 @@ async function osrmRoadBridge(a, b, signal) {
 async function stitchTrailViaOsrmRoutes(latlngs, signal, breakOpts = {}) {
   const limits = trailBreakLimits(breakOpts);
   const coach = isCoachTrailOperator(breakOpts.operator) || !!breakOpts.coach;
+  const staffs =
+    !!breakOpts.staffs ||
+    isStaffsTrailOperator(breakOpts.operator) ||
+    isAltonLine(breakOpts.line);
   const inputSegs = splitLatLngsByGaps(latlngs, limits.gapM, breakOpts);
   const sourceSegs = inputSegs.length ? inputSegs : [latlngs];
   const alignedSegs = [];
   // Coaches: wider sample spacing so long motorway legs stay fast + on-road.
-  const thinGap = coach ? 180 : 28;
-  const bridgeBatch = coach ? 8 : 4;
+  // Staffs rural: slightly wider than urban so sparse AVL still gets a road bridge.
+  const thinGap = coach ? 180 : staffs ? 70 : 28;
+  const bridgeBatch = coach ? 8 : staffs ? 6 : 4;
   for (const source of sourceSegs) {
     const thinned = thinTrailPoints(source, thinGap);
     if (thinned.length < 2) continue;
@@ -8591,7 +11416,11 @@ function trailSegmentsOf(path, breakOpts = {}) {
 async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
   if (!Array.isArray(latlngs) || latlngs.length < 2) return latlngs || [];
   const coach = isCoachTrailOperator(breakOpts.operator) || !!breakOpts.coach;
-  const key = `${trailPathHash(latlngs)}|${coach ? "coach" : "bus"}|v5`;
+  const staffs =
+    !!breakOpts.staffs ||
+    isStaffsTrailOperator(breakOpts.operator) ||
+    isAltonLine(breakOpts.line);
+  const key = `${trailPathHash(latlngs)}|${coach ? "coach" : staffs ? "staffs" : "bus"}|v6`;
   if (trailAlignCache.has(key)) return trailAlignCache.get(key);
   if (trailAlignPending.has(key)) return trailAlignPending.get(key);
   const pending = (async () => {
@@ -8600,6 +11429,7 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
       const flat = Array.isArray(latlngs?.[0]?.[0]) ? latlngs.flat() : latlngs;
       let aligned = null;
       let segs = [];
+      const alignOpts = { ...breakOpts, coach, staffs };
       try {
         if (coach) {
           // Flix / NATX: route-stitch first so sparse motorway AVL stays on roads.
@@ -8607,22 +11437,36 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
           aligned = await stitchTrailViaOsrmRoutes(
             thinned.length >= 2 ? thinned : flat,
             signal,
-            { ...breakOpts, coach: true },
+            { ...alignOpts, coach: true },
           );
-          segs = trailSegmentsOf(aligned, breakOpts);
+          segs = trailSegmentsOf(aligned, alignOpts);
           if (!segs.length) {
             aligned = await matchTrailViaOsrm(thinned.length >= 2 ? thinned : flat, signal, {
-              ...breakOpts,
+              ...alignOpts,
               coach: true,
             });
-            segs = trailSegmentsOf(aligned, breakOpts);
+            segs = trailSegmentsOf(aligned, alignOpts);
+          }
+        } else if (staffs) {
+          // Rural Staffs / AT / FPOT / D&G: sparse AVL often fails tight map-match —
+          // stitch driving routes first so the trail sticks to roads, then match.
+          const thinned = thinTrailPoints(flat, 55);
+          aligned = await stitchTrailViaOsrmRoutes(
+            thinned.length >= 2 ? thinned : flat,
+            signal,
+            alignOpts,
+          );
+          segs = trailSegmentsOf(aligned, alignOpts);
+          if (!segs.length) {
+            aligned = await matchTrailViaOsrm(thinned.length >= 2 ? thinned : flat, signal, alignOpts);
+            segs = trailSegmentsOf(aligned, alignOpts);
           }
         } else {
-          aligned = await matchTrailViaOsrm(latlngs, signal, breakOpts);
-          segs = trailSegmentsOf(aligned, breakOpts);
+          aligned = await matchTrailViaOsrm(latlngs, signal, alignOpts);
+          segs = trailSegmentsOf(aligned, alignOpts);
           if (!segs.length) {
-            aligned = await stitchTrailViaOsrmRoutes(latlngs, signal, breakOpts);
-            segs = trailSegmentsOf(aligned, breakOpts);
+            aligned = await stitchTrailViaOsrmRoutes(latlngs, signal, alignOpts);
+            segs = trailSegmentsOf(aligned, alignOpts);
           }
         }
       } catch {
@@ -8630,11 +11474,11 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
       }
       if (!segs.length) {
         // Local OFM snap — still roads, never raw GPS chords.
-        segs = trailSegmentsOf(alignTrailToRoadsLocal(latlngs, breakOpts), breakOpts);
+        segs = trailSegmentsOf(alignTrailToRoadsLocal(latlngs, alignOpts), alignOpts);
       } else {
         segs = segs.map((seg) => dedupeNearTrailPoints(seg, 2)).filter((seg) => seg.length >= 2);
       }
-      // Coaches: never paint raw GPS (cuts across fields/buildings). Prefer empty over off-road.
+      // Prefer empty over off-road chords (caller may keep GPS-immediate until this returns roads).
       if (!segs.length) return [];
       const result = segs.length === 1 ? segs[0] : segs;
       trailAlignCache.set(key, result);
@@ -8879,31 +11723,226 @@ document.addEventListener("click", (event) => {
 const fleetPanelEl = document.getElementById("fleet-panel");
 const fleetContentEl = document.getElementById("fleet-content");
 const searchFormEl = document.getElementById("search-form");
+const homeScreenEl = document.getElementById("home-screen");
+const aboutScreenEl = document.getElementById("about-screen");
+const moreBtnEl = document.getElementById("more-btn");
+const topbarEl = document.querySelector(".topbar");
+const topbarToolsEl = document.getElementById("topbar-tools");
+let appTab = "home";
+
+function closeTopMenu() {
+  if (!moreBtnEl || !topbarEl || !topbarToolsEl) return;
+  moreBtnEl.setAttribute("aria-expanded", "false");
+  topbarEl.classList.remove("is-more-open");
+  topbarToolsEl.hidden = true;
+}
+
+function openTopMenu() {
+  if (!moreBtnEl || !topbarEl || !topbarToolsEl) return;
+  moreBtnEl.setAttribute("aria-expanded", "true");
+  topbarEl.classList.add("is-more-open");
+  topbarToolsEl.hidden = false;
+}
 
 function setAppTab(tab) {
-  const next = tab === "fleet" ? "fleet" : "map";
-  document.querySelectorAll(".app-tab").forEach((btn) => {
+  const next = tab === "fleet" ? "fleet" : tab === "about" ? "about" : tab === "home" ? "home" : "map";
+  appTab = next;
+  document.querySelectorAll(".menu-nav-btn, .app-tab").forEach((btn) => {
     btn.classList.toggle("is-on", btn.dataset.tab === next);
   });
-  if (mapWrapEl) mapWrapEl.dataset.view = next;
+  if (homeScreenEl) homeScreenEl.hidden = next !== "home";
+  if (aboutScreenEl) aboutScreenEl.hidden = next !== "about";
+  if (mapWrapEl) {
+    mapWrapEl.hidden = next === "home" || next === "about";
+    mapWrapEl.dataset.view = next === "fleet" ? "fleet" : "map";
+  }
   if (fleetPanelEl) fleetPanelEl.hidden = next !== "fleet";
-  if (searchFormEl) searchFormEl.hidden = next === "fleet";
+  if (searchFormEl) searchFormEl.hidden = next !== "map";
   if (next === "fleet") closeStopBoard();
+  // Leaving History · Map via Home / Map / About tabs must restore live Staffs pins.
+  if (next === "home" || next === "map" || next === "about") {
+    exitHistoryMapMode({ reload: next === "map" });
+  }
   if (next === "map") {
-    requestAnimationFrame(() => map.invalidateSize());
+    requestAnimationFrame(() => {
+      try {
+        map.invalidateSize();
+      } catch {
+        /* ignore */
+      }
+    });
+  }
+  closeTopMenu();
+}
+
+moreBtnEl?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const open = moreBtnEl.getAttribute("aria-expanded") === "true";
+  if (open) closeTopMenu();
+  else openTopMenu();
+});
+
+document.addEventListener("click", (event) => {
+  if (!topbarEl?.classList.contains("is-more-open")) return;
+  if (event.target.closest?.("#topbar-tools, #more-btn")) return;
+  closeTopMenu();
+});
+
+document.querySelectorAll(".menu-nav-btn, .app-tab, .home-action[data-tab]").forEach((btn) => {
+  btn.addEventListener("click", () => setAppTab(btn.dataset.tab));
+});
+
+document.querySelectorAll("[data-nav='home']").forEach((el) => {
+  el.addEventListener("click", (event) => {
+    event.preventDefault();
+    setAppTab("home");
+  });
+});
+
+document.getElementById("home-search-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const q = document.getElementById("home-query")?.value.trim() || "";
+  const mainQuery = document.getElementById("query");
+  if (mainQuery) mainQuery.value = q;
+  setAppTab("map");
+  if (q) {
+    document.getElementById("search-form")?.requestSubmit?.();
+  }
+});
+
+const HOME_NATIONS = [
+  { id: "all", label: "All" },
+  { id: "england", label: "England" },
+  { id: "wales", label: "Wales" },
+  { id: "scotland", label: "Scotland" },
+  { id: "ni", label: "N. Ireland" },
+  { id: "ireland", label: "Ireland" },
+  { id: "iom", label: "Isle of Man" },
+];
+
+const HOME_AREAS = [
+  { id: "gb", nation: "all", label: "Great Britain", lat: 54.2, lng: -2.5, zoom: 6 },
+  { id: "england", nation: "england", label: "England", lat: 52.5, lng: -1.5, zoom: 7 },
+  { id: "east-anglia", nation: "england", label: "East Anglia", lat: 52.45, lng: 0.9, zoom: 9 },
+  { id: "east-midlands", nation: "england", label: "East Midlands", lat: 52.9, lng: -0.9, zoom: 9 },
+  { id: "london", nation: "england", label: "London", lat: 51.507, lng: -0.128, zoom: 11 },
+  { id: "north-east", nation: "england", label: "North East", lat: 54.9, lng: -1.6, zoom: 9 },
+  { id: "north-west", nation: "england", label: "North West", lat: 53.75, lng: -2.6, zoom: 9 },
+  { id: "south-east", nation: "england", label: "South East", lat: 51.25, lng: 0.2, zoom: 9 },
+  { id: "south-west", nation: "england", label: "South West", lat: 50.9, lng: -3.5, zoom: 8 },
+  { id: "west-midlands", nation: "england", label: "West Midlands", lat: 52.5, lng: -2.0, zoom: 9 },
+  { id: "staffordshire", nation: "england", label: "Staffordshire", lat: 52.95, lng: -2.15, zoom: 10 },
+  { id: "stoke", nation: "england", label: "Stoke-on-Trent", lat: 53.02, lng: -2.18, zoom: 12 },
+  { id: "yorkshire", nation: "england", label: "Yorkshire", lat: 53.8, lng: -1.3, zoom: 9 },
+  { id: "wales", nation: "wales", label: "Wales", lat: 52.4, lng: -3.8, zoom: 8 },
+  { id: "scotland", nation: "scotland", label: "Scotland", lat: 56.5, lng: -4.2, zoom: 7 },
+  { id: "ni", nation: "ni", label: "Northern Ireland", lat: 54.6, lng: -6.5, zoom: 9 },
+  { id: "ireland", nation: "ireland", label: "Ireland", lat: 53.4, lng: -7.9, zoom: 7 },
+  { id: "connacht", nation: "ireland", label: "Connacht", lat: 53.8, lng: -9.0, zoom: 9 },
+  { id: "leinster", nation: "ireland", label: "Leinster", lat: 53.3, lng: -6.5, zoom: 9 },
+  { id: "munster", nation: "ireland", label: "Munster", lat: 52.3, lng: -8.5, zoom: 9 },
+  { id: "ulster", nation: "ireland", label: "Ulster", lat: 54.5, lng: -7.0, zoom: 9 },
+  { id: "iom", nation: "iom", label: "Isle of Man", lat: 54.2, lng: -4.55, zoom: 10 },
+];
+
+const NATION_LABEL = Object.fromEntries(HOME_NATIONS.map((n) => [n.id, n.label]));
+NATION_LABEL.england = "England";
+
+let homeNationFilter = "all";
+
+function openHomeArea(area) {
+  if (!area) return;
+  const lat = Number(area.lat);
+  const lng = Number(area.lng);
+  const zoom = Number(area.zoom) || 8;
+  // Clear History · Map / tails before jumping regions — otherwise Staffs stays empty.
+  exitHistoryMapMode({ reload: false });
+  setAppTab("map");
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    requestAnimationFrame(() => {
+      try {
+        map.setView([lat, lng], zoom, { animate: true });
+        map.invalidateSize();
+      } catch {
+        /* ignore */
+      }
+      loadBuses({ replace: true }).catch(() => {});
+    });
   }
 }
 
-document.querySelectorAll(".app-tab").forEach((btn) => {
-  btn.addEventListener("click", () => setAppTab(btn.dataset.tab));
-});
+function renderHomeAreas() {
+  const filtersEl = document.getElementById("home-nation-filters");
+  const gridEl = document.getElementById("home-region-grid");
+  if (!filtersEl || !gridEl) return;
+
+  filtersEl.replaceChildren(
+    ...HOME_NATIONS.map((nation) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `home-nation-chip${homeNationFilter === nation.id ? " is-on" : ""}`;
+      btn.setAttribute("role", "tab");
+      btn.setAttribute("aria-selected", homeNationFilter === nation.id ? "true" : "false");
+      btn.dataset.nation = nation.id;
+      btn.textContent = nation.label;
+      btn.addEventListener("click", () => {
+        homeNationFilter = nation.id;
+        renderHomeAreas();
+      });
+      return btn;
+    }),
+  );
+
+  const areas =
+    homeNationFilter === "all"
+      ? HOME_AREAS
+      : HOME_AREAS.filter((area) => area.nation === homeNationFilter);
+
+  gridEl.replaceChildren(
+    ...areas.map((area) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "home-region-tile";
+      btn.setAttribute("role", "listitem");
+      btn.dataset.area = area.id;
+      const nationName = NATION_LABEL[area.nation] || "";
+      const showNation =
+        homeNationFilter === "all" && nationName && nationName !== "All" && area.label !== nationName;
+      btn.innerHTML = `<span>${area.label}</span>${
+        showNation ? `<span class="home-region-tile-nation">${nationName}</span>` : ""
+      }`;
+      btn.addEventListener("click", () => openHomeArea(area));
+      return btn;
+    }),
+  );
+}
+
+renderHomeAreas();
+
+// Start on home.
+setAppTab("home");
 
 const fleetBrowser = fleetContentEl
   ? createFleetBrowser({
       root: fleetContentEl,
-      onTrackVehicle: async ({ reg, fleet }) => {
+      onTrackVehicle: async ({ reg, fleet, id, lat, lng }) => {
         setAppTab("map");
         const query = reg || fleet;
+        const focusLat = Number(lat);
+        const focusLng = Number(lng);
+        if (Number.isFinite(focusLat) && Number.isFinite(focusLng)) {
+          showMessage("");
+          map.setView([focusLat, focusLng], 16);
+          if (id) pendingFocus = { kind: "bus", id };
+          await loadBuses({ replace: true });
+          revealPendingFocus();
+          if (pendingFocus) {
+            pendingFocus = null;
+            const hit = query ? findOnMap(query) : null;
+            if (hit) focusMarker(hit);
+          }
+          return;
+        }
         if (!query) {
           showMessage("No registration to track");
           return;
@@ -8944,6 +11983,41 @@ document.getElementById("fleet-route-form")?.addEventListener("submit", (event) 
 
 followChipEl?.addEventListener("click", () => stopFollowBus());
 playbackStopEl?.addEventListener("click", () => stopRoutePlayback("", { clearTail: true }));
+playbackReplayEl?.addEventListener("click", () => {
+  if (!gpsReplay) return;
+  if (gpsReplay.playing) gpsReplayPause();
+  else if (gpsReplay.pos >= gpsReplay.t1 - gpsReplay.t0) {
+    gpsReplay.pos = 0;
+    gpsReplayStart();
+  } else gpsReplayStart();
+});
+playbackSpeedEl?.addEventListener("click", () => {
+  if (!gpsReplay) return;
+  const i = GPS_REPLAY_SPEEDS.indexOf(gpsReplay.speed);
+  gpsReplay.speed = GPS_REPLAY_SPEEDS[(i + 1) % GPS_REPLAY_SPEEDS.length];
+  playbackSpeedEl.textContent = `×${gpsReplay.speed}`;
+});
+playbackScrubEl?.addEventListener("input", () => {
+  if (!gpsReplay) return;
+  const frac = Number(playbackScrubEl.value) / 1000;
+  gpsReplay.pos = (gpsReplay.t1 - gpsReplay.t0) * Math.min(1, Math.max(0, frac));
+  const t = gpsReplay.t0 + gpsReplay.pos;
+  const p = gpsReplayInterp(gpsReplay.pts, t);
+  if (p) {
+    gpsReplayMarkerAt(p.lat, p.lng, p.heading);
+    gpsReplaySetClock(t);
+    updateReplayBusMarkerAt(p);
+  }
+});
+journeyPanelCloseEl?.addEventListener("click", () => {
+  if (playback) stopRoutePlayback("", { clearTail: true });
+  else hideJourneyPanel();
+});
+journeyPanelTimetableToggleEl?.addEventListener("click", () => {
+  setJourneyTimetableMinimized(!isJourneyTimetableMinimized());
+});
+syncJourneyTimetableMinimized();
+document.getElementById("tail-close")?.addEventListener("click", () => stopRoutePlayback("", { clearTail: true }));
 window.speechSynthesis?.addEventListener?.("voiceschanged", () => {});
 
 document.getElementById("search-form").addEventListener("submit", async (event) => {
@@ -8999,10 +12073,6 @@ document.getElementById("search-form").addEventListener("submit", async (event) 
 
 updateUkClock();
 setInterval(updateUkClock, 1000);
-refreshUkLiveBusCount({ force: true }).then(() => updateLiveBusCount());
-setInterval(() => {
-  refreshUkLiveBusCount().then(() => updateLiveBusCount());
-}, 30_000);
 refreshUkLiveBusCount({ force: true }).then(() => updateLiveBusCount());
 setInterval(() => {
   refreshUkLiveBusCount().then(() => updateLiveBusCount());

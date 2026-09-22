@@ -10,6 +10,10 @@ const TOKEN_DAYS = 90;
 
 let pool = null;
 let ready = null;
+let keepAliveTimer = null;
+
+/** scrypt N≈2^14 ≈ bcrypt cost 10–11; keep explicit so verify stays ~30–50ms. */
+const SCRYPT_OPTS = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
 
 function authSecret() {
   return String(process.env.AUTH_SECRET || "dev-only-change-me").trim();
@@ -28,6 +32,24 @@ function dbSslOption() {
   return undefined;
 }
 
+function stopAuthKeepAlive() {
+  if (keepAliveTimer) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
+}
+
+/** Cheap ping so embedded Postgres + pool stay warm between logins. */
+function startAuthKeepAlive() {
+  stopAuthKeepAlive();
+  if (!pool) return;
+  keepAliveTimer = setInterval(() => {
+    pool?.query("SELECT 1").catch(() => {});
+  }, 25_000);
+  // Do not keep the process alive solely for this timer.
+  keepAliveTimer.unref?.();
+}
+
 export async function initAuthStore() {
   if (ready) return ready;
   ready = (async () => {
@@ -39,7 +61,14 @@ export async function initAuthStore() {
       connectionString: process.env.DATABASE_URL,
       ssl: dbSslOption(),
       max: 5,
+      // Keep one socket ready — cold connect to embedded PG adds hundreds of ms.
+      min: 1,
+      idleTimeoutMillis: 60_000,
+      connectionTimeoutMillis: 8_000,
+      allowExitOnIdle: false,
     });
+    // Warm immediately (also creates the min connection).
+    await pool.query("SELECT 1");
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -74,10 +103,12 @@ export async function initAuthStore() {
       );
       CREATE INDEX IF NOT EXISTS plus_purchases_user_idx ON plus_purchases (user_id, created_at DESC);
     `);
+    startAuthKeepAlive();
     console.log("[auth] users table ready");
     return true;
   })().catch((error) => {
     // Allow a later request to retry after disk / DB recovers.
+    stopAuthKeepAlive();
     ready = null;
     pool = null;
     throw error;
@@ -108,7 +139,7 @@ function validEmail(email) {
 
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16);
-  const derived = await scryptAsync(String(password), salt, 64);
+  const derived = await scryptAsync(String(password), salt, 64, SCRYPT_OPTS);
   return `scrypt$${salt.toString("base64")}$${Buffer.from(derived).toString("base64")}`;
 }
 
@@ -117,7 +148,7 @@ async function verifyPassword(password, stored) {
   if (parts.length !== 3 || parts[0] !== "scrypt") return false;
   const salt = Buffer.from(parts[1], "base64");
   const expected = Buffer.from(parts[2], "base64");
-  const derived = await scryptAsync(String(password), salt, 64);
+  const derived = await scryptAsync(String(password), salt, 64, SCRYPT_OPTS);
   const actual = Buffer.from(derived);
   if (actual.length !== expected.length) return false;
   return crypto.timingSafeEqual(actual, expected);
@@ -307,6 +338,20 @@ export async function listPlusUsers({ limit = 200 } = {}) {
      ORDER BY id ASC
      LIMIT $1`,
     [Math.min(500, Math.max(1, Number(limit) || 200))],
+  );
+  return result.rows.map(mapUserRow);
+}
+
+/** Every registered account (Plus and free). */
+export async function listAllUsers({ limit = 500 } = {}) {
+  await initAuthStore();
+  if (!pool) return [];
+  const result = await pool.query(
+    `SELECT id, email, plus, plus_until, plus_cancelled
+     FROM users
+     ORDER BY id ASC
+     LIMIT $1`,
+    [Math.min(2000, Math.max(1, Number(limit) || 500))],
   );
   return result.rows.map(mapUserRow);
 }

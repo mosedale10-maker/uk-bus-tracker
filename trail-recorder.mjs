@@ -2,21 +2,28 @@
 
 import { appendTrailPoints, trailsEnabled, initTrailStore } from "./trail-store.mjs";
 
-/** Staffordshire county bbox (matches fleet live map). */
+/** Staffordshire county bbox — xmax pushed east so Alton Towers (AT1–AT3) stays inside. */
 const DEFAULT_BBOX = {
   xmin: -2.35,
   ymin: 52.55,
-  xmax: -1.7,
+  xmax: -1.55,
   ymax: 53.15,
 };
 
 const AT_LINES = new Set(["AT1", "AT2", "AT3"]);
+/** Canonical AT headsigns when NextStop omits destination.name. */
+const AT_DEST_BY_LINE = {
+  AT1: { out: "Alton Towers", in: "Fenton" },
+  AT2: { out: "Alton Towers", in: "Fenton" },
+  AT3: { out: "Alton Towers", in: "Bentilee" },
+};
 const SCFC_LINES = new Set(["B1", "B2", "BS1", "BS2"]);
 /**
  * Nationwide coach operators — fetched by NOC (not limited to the Staffs bbox).
- * Local Staffs buses are covered by the bbox Bustimes/BODS poll instead.
+ * Local Staffs buses are also fetched by NOC so operator tags stay on trail points.
  */
 const COACH_OPERATOR_NOCS = ["FLIX", "NATX"];
+const STAFFS_OPERATOR_NOCS = ["FPOT", "DAGC", "SOST", "CRDR", "SLBS", "BANG", "HIPK", "TBTN", "DIAM", "MDCL"];
 const POLL_MS = 15_000;
 const COACH_POLL_MS = 45_000;
 const MIN_GAP_MS = 8_000;
@@ -43,9 +50,16 @@ let running = null;
 let timer = null;
 
 /** Same line with a gap longer than this starts a fresh run segment. */
-const LINE_GAP_NEW_RUN_MS = 20 * 60_000;
-/** Different non-empty journey id only counts as a new trip after this gap. */
-const JOURNEY_ID_SWITCH_MS = 90_000;
+const LINE_GAP_NEW_RUN_MS = 25 * 60_000;
+/** Coach intermediate stops (Hanley, airports, …) often sit 20–60+ minutes — keep A→B continuous. */
+const COACH_LINE_GAP_NEW_RUN_MS = 90 * 60_000;
+/** Different non-empty journey id only counts as a new trip after a real layover (not a stop dwell). */
+const JOURNEY_ID_SWITCH_MS = 8 * 60_000;
+/** Flix/NATX often mint a new journey id after an intermediate stop — do not split for that alone. */
+const COACH_JOURNEY_ID_SWITCH_MS = 90 * 60_000;
+/** Match the same anonymous coach across journey-id changes by last GPS (metres / ms). */
+const COACH_STICKY_MATCH_M = 12_000;
+const COACH_STICKY_MATCH_MS = 90 * 60_000;
 
 function haversineMeters(lat1, lng1, lat2, lng2) {
   const toRad = (d) => (d * Math.PI) / 180;
@@ -64,15 +78,16 @@ function compactReg(value) {
     .replace(/[^A-Z0-9]/g, "");
 }
 
-function shouldKeep(key, lat, lng, t, { coach = false } = {}) {
+function shouldKeep(key, lat, lng, t, { coach = false, at = false } = {}) {
   const prev = lastByKey.get(key);
   if (!prev) return true;
   const dt = t - prev.t;
-  const minGap = coach ? COACH_MIN_GAP_MS : MIN_GAP_MS;
-  const minMove = coach ? COACH_MIN_MOVE_M : MIN_MOVE_M;
+  const minGap = coach ? COACH_MIN_GAP_MS : at ? 5_000 : MIN_GAP_MS;
+  const minMove = coach ? COACH_MIN_MOVE_M : at ? 3 : MIN_MOVE_M;
   if (dt < minGap) return false;
   // Keep a sample at least every ~20s (local) / ~90s (coach) so stop-start still builds a trail.
-  if (dt >= (coach ? 90_000 : 20_000)) return true;
+  // AT employee AVL is sparse — force a keep every 15s even when barely moving.
+  if (dt >= (coach ? 90_000 : at ? 15_000 : 20_000)) return true;
   const moved = haversineMeters(prev.lat, prev.lng, lat, lng);
   if (moved < minMove) return false;
   return true;
@@ -96,6 +111,26 @@ function normalizeDirection(raw) {
   return "";
 }
 
+/** UK calendar day for segment keys (matches client ukDateKey / fleet replay). */
+function ukDateKey(ms = Date.now()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(ms));
+}
+
+function atDestinationFor(line, direction = "", fallback = "") {
+  const code = String(line || "").trim().toUpperCase();
+  const dir = normalizeDirection(direction);
+  const meta = AT_DEST_BY_LINE[code];
+  if (!meta) return String(fallback || "").trim();
+  if (dir === "in") return meta.in;
+  if (dir === "out") return meta.out;
+  return String(fallback || meta.out || "").trim();
+}
+
 function pointFromBus(bus) {
   const [lng, lat] = bus?.coordinates || [];
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
@@ -103,16 +138,32 @@ function pointFromBus(bus) {
   if (!Number.isFinite(t)) return null;
   const heading = Number(bus.heading);
   const line = String(bus.service?.line_name || bus._bods?.line || "").trim();
-  const journeyId = String(bus.journey_id || bus._bods?.journeyRef || "").trim();
   const tripId = String(bus.trip_id || "").trim();
   const operator = String(
     bus._trailOperator || bus.operator?.noc || bus.operator?.id || bus._bods?.operator || "",
   )
     .trim()
     .toUpperCase();
+  const isCoach = COACH_OPERATOR_NOCS.includes(operator);
+  // Flix AVL often uses the journey id as bus.id with a blank journey_id field.
+  let journeyId = String(bus.journey_id || bus._bods?.journeyRef || "").trim();
+  if (
+    !journeyId &&
+    isCoach &&
+    operator === "FLIX" &&
+    bus.id != null &&
+    bus.id !== "" &&
+    !bus.vehicle?.id
+  ) {
+    journeyId = String(bus.id).trim();
+  }
   const direction = normalizeDirection(
     bus._direction || bus.direction || bus.directionRef || bus._bods?.directionRef || "",
   );
+  let destination = String(bus.destination || "").trim();
+  if (!destination && AT_LINES.has(String(line || "").trim().toUpperCase())) {
+    destination = atDestinationFor(line, direction);
+  }
   return {
     t,
     lat,
@@ -123,11 +174,14 @@ function pointFromBus(bus) {
     line,
     operator,
     direction,
+    destination,
   };
 }
 
 function keysForBus(bus, point = null) {
   const keys = [];
+  const sticky = String(point?._stickyPrimary || "").trim();
+  if (sticky) keys.push(sticky);
   if (bus?.id != null && bus.id !== "") keys.push(String(bus.id));
   const namePlate = String(bus?.vehicle?.name || "")
     .toUpperCase()
@@ -149,21 +203,30 @@ function keysForBus(bus, point = null) {
   // Per-journey / per-route segment keys — one continuous key for the whole A→B stint.
   // Direction (in/out) keeps the return trip on a separate key from the outbound.
   const journeyId = String(point?.journeyId || bus?.journey_id || bus?._bods?.journeyRef || "").trim();
+  const latestJourney = String(point?._latestJourneyId || "").trim();
   const tripId = String(point?.tripId || bus?.trip_id || "").trim();
   const line = String(point?.line || bus?.service?.line_name || bus?._bods?.line || "")
     .trim()
     .toUpperCase();
   const direction = normalizeDirection(point?.direction || bus?._direction || "");
   const t = Number.isFinite(point?.t) ? point.t : Date.now();
-  const runDay =
-    String(point?._runDay || "").trim() || new Date(t).toISOString().slice(0, 10);
-  const primary = keys[0] || (reg ? `reg:${reg}` : "");
+  const runDay = String(point?._runDay || "").trim() || ukDateKey(t);
+  const primary = sticky || keys[0] || (reg ? `reg:${reg}` : "");
   if (journeyId) keys.push(`jny:${journeyId}`);
+  // Also index the latest Flix journey id after an intermediate stop so live markers still resolve.
+  if (latestJourney && latestJourney !== journeyId) keys.push(`jny:${latestJourney}`);
   if (tripId) keys.push(`trip:${tripId}`);
   if (line && primary) {
     if (direction) {
       keys.push(`run:${primary}:${line}:${direction}:${runDay}`);
       if (AT_LINES.has(line)) keys.push(`at:${line}:${direction}:${primary}:${runDay}`);
+    } else if (journeyId) {
+      // First Potteries / Staffs locals omit in/out — one run key per journey, not the whole day.
+      keys.push(`run:${primary}:${line}:jny:${journeyId}`);
+      // Coach continuous day key (survives journey-id changes at intermediate stops).
+      if (COACH_OPERATOR_NOCS.includes(String(point?.operator || op || "").toUpperCase())) {
+        keys.push(`run:${primary}:${line}:${runDay}`);
+      }
     } else {
       // Legacy undirected keys (older clients / unknown direction).
       keys.push(`run:${primary}:${line}:${runDay}`);
@@ -175,10 +238,12 @@ function keysForBus(bus, point = null) {
 }
 
 /**
- * Hold journey/line identity steady for the whole trip. Only open a new segment when
- * the line changes, direction flips (in↔out), a long gap passes, or a new journey id sticks.
+ * Hold journey/line identity steady for the whole trip (including dwells at intermediate stops).
+ * Only open a new segment when the line changes, direction flips (in↔out), a long gap passes,
+ * or a new journey id sticks after a real layover — not when the headsign/next-stop text flaps.
+ * Coaches (Flix/NATX): much longer dwell / journey-id tolerance so Hanley-style stops stay one run.
  */
-function stabilizeRoutePoint(primary, point) {
+function stabilizeRoutePoint(primary, point, { coach = false } = {}) {
   if (!primary || !point) return { point, isNewSegment: false };
   const line = String(point.line || "").trim().toUpperCase();
   const rawJourney = String(point.journeyId || "").trim();
@@ -190,13 +255,19 @@ function stabilizeRoutePoint(primary, point) {
   const directionChanged = Boolean(
     prev?.direction && direction && prev.direction !== direction,
   );
-  const longGap = Boolean(prev && Number.isFinite(gap) && gap > LINE_GAP_NEW_RUN_MS);
+  const rawDest = String(point.destination || "").trim();
+  // Dwells at intermediate stops often change "destination"/headsign for 1–3 minutes —
+  // never treat that alone as a new run while line + direction stay the same.
+  const gapLimit = coach ? COACH_LINE_GAP_NEW_RUN_MS : LINE_GAP_NEW_RUN_MS;
+  const journeySwitchMs = coach ? COACH_JOURNEY_ID_SWITCH_MS : JOURNEY_ID_SWITCH_MS;
+  const longGap = Boolean(prev && Number.isFinite(gap) && gap > gapLimit);
+  // Journey-id flap at a stop is common; coaches get a new id after many intermediate stops.
   const journeySwitched = Boolean(
     prev?.journeyId &&
       rawJourney &&
       rawJourney !== prev.journeyId &&
       Number.isFinite(gap) &&
-      gap > JOURNEY_ID_SWITCH_MS,
+      gap > journeySwitchMs,
   );
 
   if (!prev || lineChanged || directionChanged || longGap || journeySwitched) {
@@ -205,9 +276,14 @@ function stabilizeRoutePoint(primary, point) {
       journeyId: rawJourney,
       tripId: rawTrip,
       direction: direction || (directionChanged ? direction : prev?.direction) || "",
-      runDay: new Date(point.t).toISOString().slice(0, 10),
+      destination: rawDest || prev?.destination || "",
+      runDay: ukDateKey(point.t),
       since: point.t,
       lastT: point.t,
+      lastLat: point.lat,
+      lastLng: point.lng,
+      operator: String(point.operator || "").trim().toUpperCase(),
+      coach: Boolean(coach),
     };
     // Fresh run when direction flips — always stamp the new direction.
     if (directionChanged) next.direction = direction;
@@ -223,30 +299,81 @@ function stabilizeRoutePoint(primary, point) {
         journeyId: next.journeyId,
         tripId: next.tripId,
         direction: next.direction,
+        destination: next.destination || point.destination || "",
         _runDay: next.runDay,
+        _stickyPrimary: primary,
       },
       isNewSegment: Boolean(prev),
+      stickyPrimary: primary,
     };
   }
 
   // Same stint — fill blanks, ignore flapping / empty journey ids.
+  // Keep the first final destination for the run; still adopt a clearer headsign if we had none.
+  // Coaches: keep the original journey id for the continuous A→B key; still note the latest id.
   if (rawJourney && !prev.journeyId) prev.journeyId = rawJourney;
   if (rawTrip && !prev.tripId) prev.tripId = rawTrip;
   if (line && !prev.line) prev.line = line;
   if (direction && !prev.direction) prev.direction = direction;
+  if (rawDest && !prev.destination) prev.destination = rawDest;
+  if (coach && rawJourney) prev.latestJourneyId = rawJourney;
   prev.lastT = point.t;
+  prev.lastLat = point.lat;
+  prev.lastLng = point.lng;
   stickyRouteByVehicle.set(primary, prev);
   return {
     point: {
       ...point,
       line: prev.line || line,
+      // Prefer the sticky journey id so jny:/run: keys stay continuous through intermediate stops.
       journeyId: prev.journeyId || rawJourney,
       tripId: prev.tripId || rawTrip,
       direction: prev.direction || direction,
+      destination: prev.destination || rawDest || point.destination || "",
       _runDay: prev.runDay,
+      _stickyPrimary: primary,
+      _latestJourneyId: prev.latestJourneyId || rawJourney || "",
     },
     isNewSegment: false,
+    stickyPrimary: primary,
   };
+}
+
+/** Stable trail primary for coaches — survive Flix journey-id changes after Hanley-style stops. */
+function coachStickyPrimary(bus, point) {
+  const namePlate =
+    String(bus?.vehicle?.name || "")
+      .toUpperCase()
+      .match(/\b([A-Z]{2}\d{2}\s*[A-Z]{3})\b/) ||
+    String(bus?.vehicle?.name || "")
+      .toUpperCase()
+      .match(/\b([A-Z]\d{1,3}\s*[A-Z]{3})\b/);
+  const reg = compactReg(
+    bus?.vehicle?.reg || (namePlate ? namePlate[1] : "") || bus?.vehicle?.name || bus?._bods?.vehicleRef || "",
+  );
+  if (/^[A-Z]{1,2}\d{1,2}[A-Z]{3}$/.test(reg) || /^[A-Z]{2}\d{2}[A-Z]{3}$/.test(reg)) {
+    return `reg:${reg}`;
+  }
+  const line = String(point?.line || "").trim().toUpperCase();
+  const op = String(point?.operator || "").trim().toUpperCase();
+  let best = null;
+  for (const [key, prev] of stickyRouteByVehicle.entries()) {
+    if (!prev?.coach) continue;
+    if (!String(key).startsWith("coach:")) continue;
+    if (prev.line && line && prev.line !== line) continue;
+    if (prev.operator && op && prev.operator !== op) continue;
+    const gap = Number(point.t) - Number(prev.lastT || 0);
+    if (!Number.isFinite(gap) || gap < 0 || gap > COACH_STICKY_MATCH_MS) continue;
+    if (!Number.isFinite(prev.lastLat) || !Number.isFinite(prev.lastLng)) continue;
+    const dist = haversineMeters(prev.lastLat, prev.lastLng, point.lat, point.lng);
+    if (dist > COACH_STICKY_MATCH_M) continue;
+    if (!best || dist < best.dist || (dist === best.dist && gap < best.gap)) {
+      best = { key, dist, gap };
+    }
+  }
+  if (best) return best.key;
+  const seed = String(point?.journeyId || bus?.journey_id || bus?.id || "").trim() || `${point.lat},${point.lng}`;
+  return `coach:${seed}`;
 }
 
 function normalizeScfcLine(line) {
@@ -280,25 +407,37 @@ function pickScfcBuses(buses) {
   return (buses || []).filter(isScfcBus).map(withCanonicalScfcLine);
 }
 
-async function fetchBustimesVehicles(bbox) {
-  const url = new URL("https://bustimes.org/vehicles.json");
-  url.searchParams.set("xmin", String(bbox.xmin));
-  url.searchParams.set("ymin", String(bbox.ymin));
-  url.searchParams.set("xmax", String(bbox.xmax));
-  url.searchParams.set("ymax", String(bbox.ymax));
-  const res = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" } });
-  if (!res.ok) throw new Error(`bustimes ${res.status}`);
+async function bustimesVehiclesUrl(searchParams) {
+  // Bustimes.org live AVL — used only to record tails / journey history GPS.
+  const upstream = new URL("https://bustimes.org/vehicles.json");
+  for (const [k, v] of Object.entries(searchParams)) {
+    if (v == null || v === "") continue;
+    upstream.searchParams.set(k, String(v));
+  }
+  const res = await fetch(upstream, {
+    headers: {
+      "User-Agent": "uk-bus-tracker/1.0 (trail recorder)",
+      Accept: "application/json",
+    },
+  });
+  if (!res.ok) throw new Error(`bustimes vehicles ${res.status}`);
   const data = await res.json();
   return Array.isArray(data) ? data : [];
 }
 
+async function fetchBustimesVehicles(bbox) {
+  return bustimesVehiclesUrl({
+    xmin: bbox.xmin,
+    ymin: bbox.ymin,
+    xmax: bbox.xmax,
+    ymax: bbox.ymax,
+  });
+}
+
 async function fetchOperatorVehicles(noc) {
-  const url = new URL("https://bustimes.org/vehicles.json");
-  url.searchParams.set("operator", String(noc || "").trim().toUpperCase());
-  const res = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" } });
-  if (!res.ok) throw new Error(`${noc} ${res.status}`);
-  const data = await res.json();
-  return Array.isArray(data) ? data : [];
+  return bustimesVehiclesUrl({
+    operator: String(noc || "").trim().toUpperCase(),
+  });
 }
 
 function tagOperator(buses, noc) {
@@ -310,14 +449,20 @@ function tagOperator(buses, noc) {
   }));
 }
 
-async function fetchBodsVehicles(bbox, apiKey) {
+async function fetchBodsVehicles(bbox, apiKey, { operatorRef = "" } = {}) {
   if (!apiKey) return [];
   const { parseSiriVehicles, siriItemToBus } = await import("./bods-occupancy.js");
-  const box = `${bbox.xmin},${bbox.ymin},${bbox.xmax},${bbox.ymax}`;
   const url = new URL("https://data.bus-data.dft.gov.uk/api/v1/datafeed/");
-  url.searchParams.set("boundingBox", box);
+  if (bbox && Number.isFinite(bbox.xmin)) {
+    url.searchParams.set(
+      "boundingBox",
+      `${bbox.xmin},${bbox.ymin},${bbox.xmax},${bbox.ymax}`,
+    );
+  }
+  if (operatorRef) url.searchParams.set("operatorRef", String(operatorRef).toUpperCase());
+  url.searchParams.set("api_key", apiKey);
   const res = await fetch(url, {
-    headers: { "User-Agent": UA, Accept: "application/xml", "x-api-key": apiKey },
+    headers: { "User-Agent": UA, Accept: "*/*" },
   });
   if (!res.ok) throw new Error(`bods ${res.status}`);
   const xml = await res.text();
@@ -348,6 +493,7 @@ async function fetchDgAtVehicles() {
     const reg = compactReg(ref);
     const journeyId = String(item?.currentJourney?.id || item?.currentJourney?.journeyId || "").trim();
     const direction = String(item?.currentJourney?.directionRef || "").trim();
+    const destName = String(item?.currentJourney?.destination?.name || "").trim();
     const bus = {
       id: `staff-${ref}`,
       coordinates: [lng, lat],
@@ -355,7 +501,7 @@ async function fetchDgAtVehicles() {
       heading: Number.isFinite(heading) ? heading : null,
       journey_id: journeyId,
       trip_id: "",
-      destination: String(item?.currentJourney?.destination?.name || "").trim(),
+      destination: destName || atDestinationFor(line, direction),
       service: { line_name: line },
       vehicle: { reg: /^[A-Z]{1,2}\d{1,2}[A-Z]{3}$/.test(reg) ? reg : "", name: ref },
       _trailOperator: "DAGC",
@@ -401,27 +547,37 @@ async function recordBuses(buses, { coach = false } = {}) {
         !String(key).startsWith("jny:") &&
         !String(key).startsWith("trip:") &&
         !String(key).startsWith("run:") &&
-        !String(key).startsWith("at:"),
+        !String(key).startsWith("at:") &&
+        !String(key).startsWith("coach:"),
     );
-    const primary = baseKeysPreview[0] || "";
-    const { point, isNewSegment } = stabilizeRoutePoint(primary, rawPoint);
+    let primary = baseKeysPreview[0] || "";
+    if (coach) {
+      primary = coachStickyPrimary(bus, rawPoint) || primary;
+    }
+    if (!primary) primary = String(bus?.id || rawPoint.journeyId || "").trim();
+    const { point, isNewSegment } = stabilizeRoutePoint(primary, rawPoint, { coach });
     const allKeys = keysForBus(bus, point);
+    const isAt = AT_LINES.has(String(point.line || "").trim().toUpperCase());
     if (isNewSegment) {
       // New A→B stint only — clear throttle so the first point of the new run is kept.
       // Do not clear on journey_id blankouts mid-trip.
       for (const key of allKeys) lastByKey.delete(key);
     }
     for (const key of allKeys) {
-      if (!shouldKeep(key, point.lat, point.lng, point.t, { coach })) continue;
+      if (!shouldKeep(key, point.lat, point.lng, point.t, { coach, at: isAt })) continue;
       remember(key, point.lat, point.lng, point.t);
       const list = byKey.get(key) || [];
       list.push(point);
       byKey.set(key, list);
     }
   }
+  let n = 0;
   for (const [key, points] of byKey) {
     const result = await appendTrailPoints(key, points);
     if (result.ok) written += result.inserted || 0;
+    // Yield every few keys so map/API HTTP is not frozen during Staffs trail writes.
+    n += 1;
+    if (n % 4 === 0) await new Promise((r) => setImmediate(r));
   }
   return written;
 }
@@ -449,6 +605,34 @@ async function recordCoachOperators() {
       }
       counts[row.noc] = row.buses.length;
       if (row.buses.length) written += await recordBuses(row.buses, { coach: true });
+    }
+  }
+  return { written, counts, errors };
+}
+
+async function recordStaffsOperators() {
+  let written = 0;
+  const counts = {};
+  const errors = [];
+  for (let i = 0; i < STAFFS_OPERATOR_NOCS.length; i += 4) {
+    const chunk = STAFFS_OPERATOR_NOCS.slice(i, i + 4);
+    const rows = await Promise.all(
+      chunk.map(async (noc) => {
+        try {
+          const buses = tagOperator(await fetchOperatorVehicles(noc), noc);
+          return { noc, buses };
+        } catch (error) {
+          return { noc, error };
+        }
+      }),
+    );
+    for (const row of rows) {
+      if (row.error) {
+        errors.push(`${row.noc}: ${row.error.message || row.error}`);
+        continue;
+      }
+      counts[row.noc] = row.buses.length;
+      if (row.buses.length) written += await recordBuses(row.buses, { coach: false });
     }
   }
   return { written, counts, errors };
@@ -490,6 +674,27 @@ async function pollOnce({ bbox, bodsKey }) {
     } catch (error) {
       result.errors.push(`bods: ${error.message || error}`);
     }
+    // Operator-wide FPOT / DAGC (Ticketer) so OOS / finished trips outside the Staffs bbox still record.
+    try {
+      const fpot = await fetchBodsVehicles(null, bodsKey, { operatorRef: "FPOT" });
+      result.bodsFpot = fpot.length;
+      if (fpot.length) {
+        result.written += await recordBuses(fpot);
+        scfcPool.push(...fpot);
+      }
+    } catch (error) {
+      result.errors.push(`bods-fpot: ${error.message || error}`);
+    }
+    try {
+      const dagc = await fetchBodsVehicles(null, bodsKey, { operatorRef: "DAGC" });
+      result.bodsDagc = dagc.length;
+      if (dagc.length) {
+        result.written += await recordBuses(dagc);
+        atPool.push(...dagc);
+      }
+    } catch (error) {
+      result.errors.push(`bods-dagc: ${error.message || error}`);
+    }
   }
   try {
     const buses = await fetchDgAtVehicles();
@@ -507,6 +712,16 @@ async function pollOnce({ bbox, bodsKey }) {
     if (ops.errors.length) result.errors.push(...ops.errors);
   } catch (error) {
     result.errors.push(`operators: ${error.message || error}`);
+  }
+
+  // Tag Staffs locals by NOC so trails keep FPOT/DAGC/… even when bbox AVL omits operator.
+  try {
+    const staffs = await recordStaffsOperators();
+    result.operators = { ...(result.operators || {}), ...(staffs.counts || {}) };
+    result.written += staffs.written || 0;
+    if (staffs.errors?.length) result.errors.push(...staffs.errors);
+  } catch (error) {
+    result.errors.push(`staffs-ops: ${error.message || error}`);
   }
 
   // Dedicated AT1–AT3 pass — canonical line tags; sticky route keeps each A→B stint continuous.
@@ -546,7 +761,7 @@ export function startTrailRecorder({
             .map(([noc, n]) => `${noc}:${n}`)
             .join(",");
           console.log(
-            `[trails] record bt=${result.bustimes || 0} bods=${result.bods || 0} dg=${result.dg || 0} at=${result.at || 0} scfc=${result.scfc || 0}` +
+            `[trails] record bt=${result.bustimes || 0} bods=${result.bods || 0} fpot=${result.bodsFpot || 0} dg=${result.dg || 0} at=${result.at || 0} scfc=${result.scfc || 0}` +
               (opBits ? ` ops=${opBits}` : "") +
               ` wrote=${result.written || 0}` +
               (result.errors?.length ? ` errors=${result.errors.join("; ")}` : ""),
@@ -560,7 +775,8 @@ export function startTrailRecorder({
         running = null;
       });
   };
-  setTimeout(run, 12_000);
+  // First poll delayed so cold refresh paints before Staffs trail writes contend for the event loop.
+  setTimeout(run, 20_000);
   timer = setInterval(run, intervalMs);
   console.log(
     `[trails] recorder started every ${Math.round(intervalMs / 1000)}s bbox=${bbox.xmin},${bbox.ymin},${bbox.xmax},${bbox.ymax}`,

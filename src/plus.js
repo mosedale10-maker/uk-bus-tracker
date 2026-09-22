@@ -3,7 +3,7 @@
 import { getUser, openAuthModal, authStatusHtml, refreshSession } from "./auth.js";
 
 export const PLUS_STORAGE_KEY = "uk-bus-plus";
-export const PLUS_PRICE_LABEL = String(import.meta.env.VITE_PLUS_PRICE || "£4.99/month").trim();
+export const PLUS_PRICE_LABEL = String(import.meta.env.VITE_PLUS_PRICE || "£2.99/month").trim();
 
 const FEATURES = {
   announcements: {

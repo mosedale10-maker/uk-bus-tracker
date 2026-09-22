@@ -10,6 +10,7 @@ import {
   getTrailsForKeys,
   listTrailKeysForLines,
   listTrailKeysForOperators,
+  listDeadRunSegments,
   startTrailPrunePoller,
   pruneOldTrailPoints,
   TRAIL_KEEP_DAYS,
@@ -93,6 +94,26 @@ app.get("/api/trails/keys", async (req, res) => {
     res.json({ ok: true, days: TRAIL_KEEP_DAYS, keys });
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message || "trail_keys_failed" });
+  }
+});
+
+app.get("/api/trails/dead-runs", async (req, res) => {
+  try {
+    await initTrailStore();
+    if (!trailsEnabled()) {
+      res.json({ ok: false, days: TRAIL_KEEP_DAYS, segments: [], error: "no-store" });
+      return;
+    }
+    const days = Math.min(TRAIL_KEEP_DAYS, Math.max(1, Number(req.query.days) || TRAIL_KEEP_DAYS));
+    const limit = Number(req.query.limit) || 60;
+    const operators = String(req.query.operators || "FPOT,DAGC")
+      .split(",")
+      .map((o) => o.trim())
+      .filter(Boolean);
+    const segments = await listDeadRunSegments({ days, limit, operators });
+    res.json({ ok: true, days: TRAIL_KEEP_DAYS, segments });
+  } catch (error) {
+    res.status(500).json({ ok: false, segments: [], error: error.message || "dead_runs_failed" });
   }
 });
 

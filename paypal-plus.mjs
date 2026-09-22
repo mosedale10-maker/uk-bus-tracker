@@ -14,9 +14,9 @@ export function paypalConfigured() {
 }
 
 export function plusAmount() {
-  const raw = String(process.env.PLUS_AMOUNT || "4.99").trim();
+  const raw = String(process.env.PLUS_AMOUNT || "2.99").trim();
   const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n.toFixed(2) : "4.99";
+  return Number.isFinite(n) && n > 0 ? n.toFixed(2) : "2.99";
 }
 
 export function plusCurrency() {

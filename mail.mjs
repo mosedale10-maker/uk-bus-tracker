@@ -201,3 +201,69 @@ export async function sendPlusThankYouEmail(opts = {}) {
   console.log(`[mail] Plus thank-you sent to ${email} (${built.receipt})`);
   return { ok: true, receipt: built.receipt, id: result?.id || null };
 }
+
+/** Announce move from Railway → https://ukbustracker.co.uk */
+export async function sendSiteMovedEmail({ email, hasPlus = false } = {}) {
+  const to = String(email || "").trim();
+  if (!to) return { skipped: true, reason: "no_email" };
+  if (!mailConfigured()) {
+    throw Object.assign(new Error("Email is not configured (set RESEND_API_KEY)"), { status: 503 });
+  }
+  const newUrl = "https://ukbustracker.co.uk";
+  const plusLine = hasPlus
+    ? "Your Plus account moves with you — sign in on the new site with the same email and password."
+    : "Your account moves with you — sign in on the new site with the same email and password.";
+  const subject = "UK Bus Tracker has moved to ukbustracker.co.uk";
+  const text = [
+    "UK Bus Tracker has moved",
+    "",
+    "The live map is now at:",
+    newUrl,
+    "",
+    "Please update your bookmark / home screen shortcut.",
+    "The old Railway link (ukbustracker.up.railway.app) is being retired.",
+    "",
+    plusLine,
+    "",
+    "— Owen · UK Bus Tracker",
+  ].join("\n");
+  const html = `<!DOCTYPE html>
+<html lang="en-GB">
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:Segoe UI,system-ui,sans-serif;color:#0f172a;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f1f5f9;padding:24px 12px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" style="max-width:560px;background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;overflow:hidden;">
+        <tr>
+          <td style="padding:22px 24px 8px;background:#0f172a;color:#f8fafc;">
+            <div style="font-size:12px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.75;">UK Bus Tracker</div>
+            <div style="font-size:22px;font-weight:800;margin-top:6px;">We've moved</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:22px 24px;">
+            <p style="margin:0 0 14px;line-height:1.5;">The live map now runs at a new address. Please use:</p>
+            <p style="margin:0 0 16px;font-size:18px;font-weight:800;">
+              <a href="${newUrl}" style="color:#b45309;text-decoration:none;">${newUrl}</a>
+            </p>
+            <p style="margin:0 0 14px;line-height:1.5;color:#334155;font-size:14px;">
+              Update your bookmark or home-screen shortcut. The old Railway link
+              (<span style="font-family:ui-monospace,monospace;font-size:12px;">ukbustracker.up.railway.app</span>)
+              is being retired.
+            </p>
+            <p style="margin:0 0 18px;line-height:1.5;color:#334155;font-size:14px;">${escapeHtml(plusLine)}</p>
+            <p style="margin:0;">
+              <a href="${newUrl}" style="display:inline-block;background:#fbbf24;color:#111;text-decoration:none;font-weight:800;padding:10px 16px;border-radius:999px;">Open the new site</a>
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:0 24px 22px;color:#64748b;font-size:12px;line-height:1.45;">— Owen · UK Bus Tracker</td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+  const result = await sendEmail({ to, subject, text, html });
+  return { ok: true, id: result?.id };
+}

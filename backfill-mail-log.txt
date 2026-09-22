@@ -1,0 +1,3 @@
+mailConfigured=true
+hasDb=true
+ERR getaddrinfo ENOTFOUND postgres.railway.internal

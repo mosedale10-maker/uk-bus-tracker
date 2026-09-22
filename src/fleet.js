@@ -27,13 +27,13 @@ export const STAFFS_OPERATORS = [
     website: "https://www.copelandstours.co.uk/",
     note: "Copelands Tours · coach hire & holidays · Meir, Stoke-on-Trent",
   },
-  { name: "D & G Bus", slug: "d-g-coach-bus", noc: "DAGC" },
+  { name: "D & G Bus", slug: "d-g-coach-bus", noc: "DAGC", note: "Includes AT1–AT3 Alton Towers staff · Ticketer OOS / dead runs" },
   { name: "Diamond Bus", slug: "diamond-bus", noc: "DIAM" },
   { name: "Diamond Bus East Midlands", slug: "midland-classic", noc: "MDCL" },
   { name: "Evolve Bus & Coach", slug: "evolve-bus-coach", noc: "EVOL", kind: "private-hire" },
-  { name: "First Potteries", slug: "first-potteries", noc: "FPOT", note: "Includes BS1–BS2 Stoke City FC matchday shuttles" },
+  { name: "First Potteries", slug: "first-potteries", noc: "FPOT", note: "Includes BS1–BS2 matchday shuttles · Ticketer OOS / dead runs" },
   { name: "Flexibus", slug: "flexibus", noc: null },
-  { name: "FlixBus", slug: "flixbus", noc: "FLIX", note: "UK + Europe coaches · routes, timetables & live map" },
+  { name: "FlixBus", slug: "flixbus", noc: "FLIX", note: "UK + Europe coaches · live map + GPS history (not bustimes)" },
   { name: "High Peak", slug: "high-peak", noc: "HIPK" },
   { name: "Hotspur", slug: "hotspur", noc: "HOTS" },
   {
@@ -169,7 +169,188 @@ export const STOKE_FC_LINE_SET = new Set(
 
 const UK_TZ = "Europe/London";
 const AT_LINE_SET = new Set(AT_ROUTES.map((row) => row.line));
-const STAFFS_LIVE_BBOX = "xmin=-2.35&ymin=52.55&xmax=-1.7&ymax=53.15";
+const STAFFS_LIVE_BBOX = "xmin=-2.35&ymin=52.55&xmax=-1.55&ymax=53.15";
+
+/** BODS / Ticketer AVL text cleanup (Adderley_Green__First_Bus_Depot → spaces). */
+function normalizeAvlText(value) {
+  return String(value || "")
+    .replace(/_+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function avlToken(value) {
+  return normalizeAvlText(value)
+    .replace(/[-–—]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isDeadRunLine(line) {
+  const t = avlToken(line);
+  if (!t) return false;
+  if (/^(dead\s*run|deadrun|oos|nis|n\/?s|not\s*in\s*service|out\s*of\s*service|positioning)$/i.test(t)) {
+    return true;
+  }
+  return /\bdead\s*run\b/i.test(t);
+}
+
+function ticketMachineLooksOos(code) {
+  const t = avlToken(code);
+  if (!t) return false;
+  if (/^dr$/i.test(t)) return true;
+  return isDeadRunLine(t);
+}
+
+function isTicketerDeadRunBus(bus) {
+  if (!bus) return false;
+  if (bus.deadRun) return true;
+  if (isDeadRunLine(bus.service?.line_name)) return true;
+  if (ticketMachineLooksOos(bus._bods?.ticketMachineServiceCode)) return true;
+  if (isDeadRunLine(bus._bods?.line) || isDeadRunLine(bus._bods?.lineRef)) return true;
+  return /\bdead\s*run(?:ning)?\b/i.test(avlToken(bus.destination));
+}
+
+/** Non-empty line that is not an explicit dead-run / OOS marker (e.g. 11B, 25, BS1). */
+function isPassengerServiceLine(line) {
+  const t = avlToken(line);
+  if (!t || t === "?") return false;
+  return !isDeadRunLine(t);
+}
+
+function isNisDestinationText(dest) {
+  const t = avlToken(dest);
+  if (!t) return false;
+  return (
+    /^(not in service|nis|n\/?s|out of service|oos|positioning|dead running|dead run|empty to|to garage|to depot)$/i.test(t) ||
+    /\b(not in service|out of service|dead\s*run(?:ning)?|empty to)\b/i.test(t)
+  );
+}
+
+/**
+ * Garage / depot / yard destination (trip purpose = to depot).
+ * Does NOT match bare place names like "Adderley Green" on passenger routes.
+ */
+function isDepotRunDestinationText(dest) {
+  const t = normalizeAvlText(dest);
+  if (!t) return false;
+  if (isNisDestinationText(t)) return true;
+  return (
+    /^(garage|depot|to\s+(?:the\s+)?(?:garage|depot)|out\s*of\s*service|oos)$/i.test(t) ||
+    /\b(?:to\s+)?(?:the\s+)?(?:garage|depot)\b|\bout\s*of\s*service\b|\boos\b/i.test(t) ||
+    /\b(?:bus\s*)?(?:garage|depot|yard)\b/i.test(t) ||
+    /\bfirst\s*bus\s*depot\b/i.test(t)
+  );
+}
+
+/**
+ * True depot OOS: dest says depot AND no active passenger service
+ * (empty/dead line, or aimed arrival already well past).
+ */
+function isDepotOosForService(bus, { finishedTrip = false } = {}) {
+  if (!isDepotRunDestinationText(bus?.destination)) return false;
+  if (finishedTrip || bus?.tripFinished) return true;
+  return !isPassengerServiceLine(bus?.service?.line_name || "");
+}
+
+function isFpotFinishedTripBus(bus) {
+  if (!bus || !isFpotOperatorBus(bus)) return false;
+  if (bus.tripFinished) return true;
+  const aimRaw = bus._bods?.destinationAimedArrival || bus.destinationAimedArrival || "";
+  const aimMs = Date.parse(aimRaw);
+  const recMs = Date.parse(bus.datetime || "");
+  if (!Number.isFinite(aimMs) || !Number.isFinite(recMs)) return false;
+  return recMs - aimMs > 10 * 60 * 1000;
+}
+
+function isDgFinishedTripBus(bus) {
+  if (!bus || !isDgOperatorBus(bus)) return false;
+  if (bus.tripFinished) return true;
+  const aimRaw = bus._bods?.destinationAimedArrival || bus.destinationAimedArrival || "";
+  const aimMs = Date.parse(aimRaw);
+  const recMs = Date.parse(bus.datetime || "");
+  if (!Number.isFinite(aimMs) || !Number.isFinite(recMs)) return false;
+  return recMs - aimMs > 10 * 60 * 1000;
+}
+
+function isTicketerFinishedTripBus(bus) {
+  return isFpotFinishedTripBus(bus) || isDgFinishedTripBus(bus);
+}
+
+function isFpotOperatorBus(bus) {
+  const hay = [
+    bus?.operator?.noc,
+    bus?.operator?.id,
+    bus?.operator?.name,
+    bus?.service?.operator?.noc,
+    bus?.service?.operator?.name,
+    bus?.vehicle?.operator?.noc,
+    bus?._bods?.operator,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return /FPOT|First Potteries|first-potteries/i.test(hay);
+}
+
+function isDgOperatorBus(bus) {
+  if (bus?.nisSource === "dg") return true;
+  const hay = [
+    bus?.operator?.noc,
+    bus?.operator?.id,
+    bus?.operator?.name,
+    bus?.service?.operator?.noc,
+    bus?.service?.operator?.name,
+    bus?.vehicle?.operator?.noc,
+    bus?._bods?.operator,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return /DAGC|D\s*&\s*G|D and G|d-g-coach|dgbus/i.test(hay);
+}
+
+/** First Potteries / D&G out-of-service / dead run / depot / finished trip from Ticketer→BODS / bustimes. */
+function isOperatorOutOfServiceBus(bus) {
+  if (!bus) return false;
+  if (!(isFpotOperatorBus(bus) || isDgOperatorBus(bus))) return false;
+  const line = String(bus.service?.line_name || "").trim();
+  const finished = Boolean(bus.tripFinished) || isTicketerFinishedTripBus(bus);
+  if (finished) return true;
+  if (isTicketerDeadRunBus(bus) || !line || line === "?" || isDeadRunLine(line)) return true;
+  if (isNisDestinationText(bus.destination)) return true;
+  if (isDepotOosForService(bus, { finishedTrip: finished })) return true;
+  // Ignore stale bus.nis / depotOos on an active passenger service past the depot.
+  return false;
+}
+
+function isFpotOutOfServiceBus(bus) {
+  return isFpotOperatorBus(bus) && isOperatorOutOfServiceBus(bus);
+}
+
+function isDgOutOfServiceBus(bus) {
+  return isDgOperatorBus(bus) && isOperatorOutOfServiceBus(bus);
+}
+
+function ticketerOosStatusLabel(bus) {
+  const dest = normalizeAvlText(bus?.destination || "");
+  const moving = Number.isFinite(bus?.speedMph) && bus.speedMph >= 3;
+  const finished = Boolean(bus?.tripFinished) || isTicketerFinishedTripBus(bus);
+  if (
+    isDepotOosForService(bus, { finishedTrip: finished }) ||
+    (/depot|garage|yard/i.test(dest) && !isPassengerServiceLine(bus?.service?.line_name))
+  ) {
+    return moving ? "Out of service — heading to depot" : "Out of service at depot";
+  }
+  if (isTicketerDeadRunBus(bus)) return "Dead run";
+  if (finished) {
+    return moving ? "Finished — positioning" : "Finished / not in service";
+  }
+  if (moving) return "Out of service — positioning";
+  return "Out of service";
+}
+
+function fpotOosStatusLabel(bus) {
+  return ticketerOosStatusLabel(bus);
+}
 
 function esc(value) {
   return String(value ?? "")
@@ -193,6 +374,23 @@ function ukDateKey(value = new Date()) {
     month: "2-digit",
     day: "2-digit",
   }).format(value instanceof Date ? value : new Date(value));
+}
+
+/** Fleet day picker keys. "Today" also keeps yesterday so overnight services (e.g. 25) still list after midnight. */
+function fleetDayKeys(date = ukDateKey()) {
+  const want = String(date || ukDateKey()).trim();
+  const today = ukDateKey();
+  if (!want || want !== today) return want ? [want] : [today];
+  const [y, m, d] = today.split("-").map(Number);
+  const utc = new Date(Date.UTC(y, m - 1, d));
+  utc.setUTCDate(utc.getUTCDate() - 1);
+  return [today, utc.toISOString().slice(0, 10)];
+}
+
+function rowMatchesFleetDay(rowDate, date) {
+  if (!date) return true;
+  if (!rowDate) return true;
+  return fleetDayKeys(date).includes(String(rowDate));
 }
 
 function formatLongDate(dateStr) {
@@ -350,9 +548,22 @@ function vehicleMainHtml(v) {
 
 const lastRouteCache = new Map();
 let atLiveCache = { at: 0, byReg: new Map(), byFleet: new Map(), byLine: new Map(), meta: new Map() };
+let atLiveInflight = null;
+/** Live AVL rows from the Staffs bbox poll, keyed by bustimes vehicle id. */
+let staffsLiveById = new Map();
+const operatorLiveCache = new Map();
+const operatorVehiclesCache = new Map();
 
 async function ensureAtLive(maxAgeMs = 20000) {
   if (Date.now() - atLiveCache.at < maxAgeMs && atLiveCache.meta.size) return atLiveCache;
+  if (atLiveInflight) return atLiveInflight;
+  atLiveInflight = refreshAtLive().finally(() => {
+    atLiveInflight = null;
+  });
+  return atLiveInflight;
+}
+
+async function refreshAtLive() {
   const byReg = new Map();
   const byFleet = new Map();
   const byLine = new Map(AT_ROUTES.map((row) => [row.line, []]));
@@ -416,6 +627,15 @@ async function ensureAtLive(maxAgeMs = 20000) {
 
 let schoolLiveCache = { at: 0, byLine: new Map(), meta: new Map(), vehicles: [] };
 let matchdayLiveCache = { at: 0, byLine: new Map(), meta: new Map(), vehicles: [] };
+/** First Potteries Ticketer/BODS out-of-service / depot transfers. */
+let fpotOosLiveCache = { at: 0, vehicles: [] };
+let fpotOosLiveInflight = null;
+/** D&G Ticketer/BODS / NextStop out-of-service / depot transfers. */
+let dgOosLiveCache = { at: 0, vehicles: [] };
+let dgOosLiveInflight = null;
+/** Historical Ticketer dead runs from /api/trails/dead-runs (keep window). */
+let deadRunsHistoryCache = { at: 0, segments: [], loading: false };
+let deadRunsHistoryInflight = null;
 
 function schoolRouteMeta(line) {
   const code = String(line || "").toUpperCase();
@@ -479,6 +699,8 @@ export function sameServiceLine(a, b) {
     .replace(/[^A-Z0-9]/g, "");
   if (!left || !right) return false;
   if (left === right) return true;
+  // National Express style codes: "007" and "7" are the same route.
+  if (/^\d+$/.test(left) && /^\d+$/.test(right) && Number(left) === Number(right)) return true;
   const leftKeys = new Set(stokeFcLineKeys(left));
   if (leftKeys.size > 1 && leftKeys.has(right)) return true;
   const rightKeys = new Set(stokeFcLineKeys(right));
@@ -593,7 +815,7 @@ export function mergeLiveHistoryRow(journeys, liveRow) {
     if (
       Number.isFinite(liveMs) &&
       Number.isFinite(rowMs) &&
-      Math.abs(rowMs - liveMs) < 20 * 60_000 &&
+      Math.abs(rowMs - liveMs) < 45 * 60_000 &&
       (sameServiceLine(row.route_name, liveRow.route_name) ||
         sameServiceLine(row.extracted_route, liveRow.route_name) ||
         row.diverted ||
@@ -689,11 +911,20 @@ function parseLiveVehicleName(name) {
   return { fleet: "", reg: plate ? plate[1].replace(/\s+/g, " ").trim() : text };
 }
 
+let schoolLiveInflight = null;
+
 async function ensureSchoolLive(maxAgeMs = 15000) {
   const schoolFresh = Date.now() - schoolLiveCache.at < maxAgeMs && schoolLiveCache.meta.size;
   const matchFresh = Date.now() - matchdayLiveCache.at < maxAgeMs && matchdayLiveCache.meta.size;
   if (schoolFresh && matchFresh) return schoolLiveCache;
+  if (schoolLiveInflight) return schoolLiveInflight;
+  schoolLiveInflight = refreshSchoolLive().finally(() => {
+    schoolLiveInflight = null;
+  });
+  return schoolLiveInflight;
+}
 
+async function refreshSchoolLive() {
   const byLine = new Map(STAFFS_SCHOOL_ROUTES.map((row) => [row.line, []]));
   const meta = new Map(STAFFS_SCHOOL_ROUTES.map((row) => [row.line, { ...row, live: 0 }]));
   const vehicles = [];
@@ -706,6 +937,7 @@ async function ensureSchoolLive(maxAgeMs = 15000) {
     if (!res.ok) throw new Error(`Staffs live feed ${res.status}`);
     const rows = await res.json();
     for (const bus of Array.isArray(rows) ? rows : []) {
+      if (bus?.id != null) staffsLiveById.set(String(bus.id), bus);
       const rawLine = String(bus.service?.line_name || "").toUpperCase();
       const parsed = parseLiveVehicleName(bus.vehicle?.name);
 
@@ -782,6 +1014,224 @@ async function ensureMatchdayLive(maxAgeMs = 15000) {
   return matchdayLiveCache;
 }
 
+async function ensureFpotOosLive(maxAgeMs = 15000) {
+  if (Date.now() - fpotOosLiveCache.at < maxAgeMs && fpotOosLiveCache.at) {
+    return fpotOosLiveCache;
+  }
+  if (fpotOosLiveInflight) return fpotOosLiveInflight;
+  fpotOosLiveInflight = refreshFpotOosLive().finally(() => {
+    fpotOosLiveInflight = null;
+  });
+  return fpotOosLiveInflight;
+}
+
+async function ensureDgOosLive(maxAgeMs = 15000) {
+  if (Date.now() - dgOosLiveCache.at < maxAgeMs && dgOosLiveCache.at) {
+    return dgOosLiveCache;
+  }
+  if (dgOosLiveInflight) return dgOosLiveInflight;
+  dgOosLiveInflight = refreshDgOosLive().finally(() => {
+    dgOosLiveInflight = null;
+  });
+  return dgOosLiveInflight;
+}
+
+async function ensureDeadRunsHistory(maxAgeMs = 60_000) {
+  if (Date.now() - deadRunsHistoryCache.at < maxAgeMs && deadRunsHistoryCache.at) {
+    return deadRunsHistoryCache;
+  }
+  if (deadRunsHistoryInflight) return deadRunsHistoryInflight;
+  deadRunsHistoryInflight = (async () => {
+    deadRunsHistoryCache = { ...deadRunsHistoryCache, loading: true };
+    try {
+      const res = await fetch("/api/trails/dead-runs?days=7&limit=60");
+      if (!res.ok) throw new Error(`dead-runs ${res.status}`);
+      const data = await res.json();
+      const segments = Array.isArray(data?.segments) ? data.segments : [];
+      deadRunsHistoryCache = { at: Date.now(), segments, loading: false };
+    } catch {
+      deadRunsHistoryCache = {
+        at: deadRunsHistoryCache.at || Date.now(),
+        segments: deadRunsHistoryCache.segments || [],
+        loading: false,
+      };
+    }
+    return deadRunsHistoryCache;
+  })().finally(() => {
+    deadRunsHistoryInflight = null;
+  });
+  return deadRunsHistoryInflight;
+}
+
+function pushTicketerOosRow(byKey, bus, source, { opLabel, opPrefix }) {
+  if (!isOperatorOutOfServiceBus(bus)) return;
+  const [lng, lat] = bus.coordinates || [];
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+  // Match map: drop when GPS has not progressed for 5 minutes.
+  const STALE_MS = 5 * 60 * 1000;
+  const at = Date.parse(bus.datetime || "");
+  if (Number.isFinite(at) && Date.now() - at > STALE_MS) return;
+  const parsed = parseLiveVehicleName(bus.vehicle?.name);
+  const prefixRe = new RegExp(`^${opPrefix}-`, "i");
+  const reg =
+    compactQuery(bus.vehicle?.reg || parsed.reg) ||
+    compactQuery(String(bus._bods?.vehicleRef || "").replace(prefixRe, "").replace(/_/g, ""));
+  const fleet = parsed.fleet || "";
+  const key = reg || fleet || String(bus.id || `${lat},${lng}`);
+  const prev = byKey.get(key);
+  const preferBods = source === "bods" || !prev;
+  if (prev && !preferBods) return;
+  byKey.set(key, {
+    id: bus.id != null ? String(bus.id) : key,
+    btId: bus.source === "bustimes" || Number.isFinite(Number(bus.id)) ? String(bus.id) : "",
+    line: String(bus.service?.line_name || "").trim(),
+    dest: normalizeAvlText(bus.destination) || (isTicketerDeadRunBus(bus) ? "Dead run" : "Out of service"),
+    status: ticketerOosStatusLabel(bus),
+    deadRun: isTicketerDeadRunBus(bus),
+    fleet,
+    reg,
+    regLabel: bus.vehicle?.reg || parsed.reg || reg,
+    recordedAtTime: bus.datetime || "",
+    lat,
+    lng,
+    bus,
+    source: source || bus.trackSource || bus.source || "",
+    operator: opLabel,
+  });
+}
+
+async function refreshFpotOosLive() {
+  const byKey = new Map();
+  const pushBus = (bus, source) => {
+    if (!isFpotOutOfServiceBus(bus)) return;
+    pushTicketerOosRow(byKey, bus, source, { opLabel: "First Potteries", opPrefix: "FPOT" });
+  };
+
+  try {
+    const [btRes, bodsRes] = await Promise.all([
+      fetch("/api/vehicles?operator=FPOT"),
+      // Operator-wide Ticketer feed (no Staffs bbox) so Crewe / Stafford / etc. OOS appear.
+      fetch("/api/bods-vehicles?operator=FPOT"),
+    ]);
+    if (btRes.ok) {
+      const rows = await btRes.json();
+      for (const bus of Array.isArray(rows) ? rows : []) {
+        if (bus?.id != null) staffsLiveById.set(String(bus.id), bus);
+        pushBus(bus, "bustimes");
+      }
+    }
+    if (bodsRes.ok) {
+      const data = await bodsRes.json();
+      for (const bus of Array.isArray(data?.vehicles) ? data.vehicles : []) {
+        pushBus(bus, "bods");
+      }
+    }
+  } catch {
+    if (fpotOosLiveCache.vehicles.length) return fpotOosLiveCache;
+  }
+
+  const vehicles = [...byKey.values()].sort((a, b) =>
+    String(a.regLabel || a.fleet || "").localeCompare(String(b.regLabel || b.fleet || ""), "en-GB"),
+  );
+  fpotOosLiveCache = { at: Date.now(), vehicles };
+  return fpotOosLiveCache;
+}
+
+/** Convert NextStop realtime item → bustimes-like bus for OOS detection. */
+function dgNextStopItemToBus(item) {
+  if (!item) return null;
+  const lat = Number(item.positioning?.latitude);
+  const lng = Number(item.positioning?.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const ref = String(item.vehicle?.ref || item.vehicle?.vehicleUniqueId || "").trim();
+  if (!ref) return null;
+  const line = String(item.currentJourney?.publishedLineName || "").trim();
+  const tm = String(item.currentJourney?.ticketMachineServiceCode || "").trim();
+  const dest =
+    item.currentJourney?.destination?.name ||
+    item.currentJourney?.destinationRef ||
+    "";
+  const deadRun =
+    isDeadRunLine(line) ||
+    ticketMachineLooksOos(tm) ||
+    /\bdead\s*run(?:ning)?\b/i.test(avlToken(dest));
+  const inService = item.inService !== false && Boolean(item.currentJourney) && Boolean(line) && !deadRun;
+  const parsed = typeof parseDgRef === "function" ? parseDgRef(ref) : parseLiveVehicleName(ref);
+  const nis =
+    deadRun ||
+    !inService ||
+    isNisDestinationText(dest) ||
+    isDepotRunDestinationText(dest) ||
+    !line;
+  if (!nis) return null;
+  return {
+    id: `dg-oos-${ref}`,
+    source: "dg",
+    coordinates: [lng, lat],
+    heading: Number(item.positioning?.bearing),
+    datetime: item.recordedAtTime || new Date().toISOString(),
+    destination: normalizeAvlText(dest) || (deadRun ? "Dead run" : "Out of service"),
+    nis: true,
+    deadRun: deadRun || undefined,
+    nisSource: "dg",
+    service: { line_name: deadRun ? "DEAD_RUN" : line },
+    operator: { noc: "DAGC", id: "DAGC", name: "D & G Bus" },
+    vehicle: {
+      name: ref,
+      reg: parsed?.reg || "",
+      colour: "#e85d04",
+    },
+    _bods: tm
+      ? { operator: "DAGC", ticketMachineServiceCode: tm, line }
+      : { operator: "DAGC", line },
+  };
+}
+
+async function refreshDgOosLive() {
+  const byKey = new Map();
+  const pushBus = (bus, source) => {
+    if (!isDgOutOfServiceBus(bus)) return;
+    pushTicketerOosRow(byKey, bus, source, { opLabel: "D & G Bus", opPrefix: "DAGC" });
+  };
+
+  try {
+    const [btRes, bodsRes, dgRes] = await Promise.all([
+      fetch("/api/vehicles?operator=DAGC"),
+      // Operator-wide Ticketer feed (no Staffs bbox) so Crewe / Mid-Cheshire OOS appear.
+      fetch("/api/bods-vehicles?operator=DAGC"),
+      fetch("/api/dg-vehicles?regionId=526&showBusesNotInService=true"),
+    ]);
+    if (btRes.ok) {
+      const rows = await btRes.json();
+      for (const bus of Array.isArray(rows) ? rows : []) {
+        if (bus?.id != null) staffsLiveById.set(String(bus.id), bus);
+        pushBus(bus, "bustimes");
+      }
+    }
+    if (bodsRes.ok) {
+      const data = await bodsRes.json();
+      for (const bus of Array.isArray(data?.vehicles) ? data.vehicles : []) {
+        pushBus(bus, "bods");
+      }
+    }
+    if (dgRes.ok) {
+      const data = await dgRes.json();
+      for (const item of Array.isArray(data?.items) ? data.items : []) {
+        const bus = dgNextStopItemToBus(item);
+        if (bus) pushBus(bus, "dg");
+      }
+    }
+  } catch {
+    if (dgOosLiveCache.vehicles.length) return dgOosLiveCache;
+  }
+
+  const vehicles = [...byKey.values()].sort((a, b) =>
+    String(a.regLabel || a.fleet || "").localeCompare(String(b.regLabel || b.fleet || ""), "en-GB"),
+  );
+  dgOosLiveCache = { at: Date.now(), vehicles };
+  return dgOosLiveCache;
+}
+
 function matchAtLive(vehicle) {
   if (!vehicle) return null;
   const reg = compactQuery(vehicle.reg);
@@ -789,16 +1239,58 @@ function matchAtLive(vehicle) {
   return (reg && atLiveCache.byReg.get(reg)) || (fleet && atLiveCache.byFleet.get(fleet)) || null;
 }
 
-async function fetchLastRoute(vehicleOrId) {
-  const vehicle = typeof vehicleOrId === "object" && vehicleOrId ? vehicleOrId : null;
-  const key = String(vehicle?.id ?? vehicleOrId ?? "");
-  if (!key) return null;
-  if (lastRouteCache.has(key)) return lastRouteCache.get(key);
-  const promise = (async () => {
-    await ensureAtLive();
+function lastRouteFromLiveBus(row, extra = {}) {
+  if (!row || !(row.service?.line_name || row.destination || row.datetime)) return null;
+  return {
+    route: extractRouteFromVehicle(row) || row.service?.line_name || "",
+    dest: row.destination || "",
+    live: true,
+    diverted: isDivertedText(row.destination, row.service?.line_name),
+    trackedAt: row.datetime || new Date().toISOString(),
+    direction: directionFromJourneyRow(row),
+    ...extra,
+  };
+}
+
+async function fetchOperatorLiveMap(noc) {
+  const code = String(noc || "").trim().toUpperCase();
+  if (!code) return new Map();
+  const hit = operatorLiveCache.get(code);
+  if (hit?.byId && Date.now() - hit.at < 20000) return hit.byId;
+  if (hit?.inflight) return hit.inflight;
+  const inflight = (async () => {
+    const byId = new Map();
+    try {
+      const res = await fetch(`/api/vehicles?operator=${encodeURIComponent(code)}`);
+      if (res.ok) {
+        const rows = await res.json();
+        for (const row of Array.isArray(rows) ? rows : []) {
+          if (row?.id != null) byId.set(String(row.id), row);
+        }
+      }
+    } catch {
+      /* empty map */
+    }
+    operatorLiveCache.set(code, { at: Date.now(), byId });
+    return byId;
+  })();
+  operatorLiveCache.set(code, { at: hit?.at || 0, byId: hit?.byId || new Map(), inflight });
+  try {
+    return await inflight;
+  } finally {
+    const cur = operatorLiveCache.get(code);
+    if (cur) delete cur.inflight;
+  }
+}
+
+function applyLiveLastRoutes(vehicles, liveById) {
+  let changed = false;
+  for (const vehicle of vehicles || []) {
+    const key = String(vehicle?.id || "");
+    if (!key) continue;
     const at = matchAtLive(vehicle);
     if (at) {
-      return {
+      vehicle.lastRoute = {
         route: at.line,
         dest: at.dest,
         live: true,
@@ -806,28 +1298,58 @@ async function fetchLastRoute(vehicleOrId) {
         trackedAt: at.recordedAtTime || new Date().toISOString(),
         direction: normalizeFleetDirection(at.direction || at.directionRef || ""),
       };
+      lastRouteCache.set(key, Promise.resolve(vehicle.lastRoute));
+      changed = true;
+      continue;
     }
-    try {
-      const liveRes = await fetch(`/api/vehicles?id=${encodeURIComponent(key)}`);
-      if (liveRes.ok) {
-        const live = await liveRes.json();
-        const rows = Array.isArray(live) ? live : [];
-        const row = rows.find((item) => String(item.id) === key) || rows[0];
-        if (row && (row.service?.line_name || row.destination || row.datetime)) {
-          const route = extractRouteFromVehicle(row) || row.service?.line_name || "";
-          return {
-            route,
-            dest: row.destination || "",
-            live: true,
-            diverted: isDivertedText(row.destination, row.service?.line_name),
-            trackedAt: row.datetime || new Date().toISOString(),
-            direction: directionFromJourneyRow(row),
-          };
-        }
+    if (vehicle.lastRoute?.live) continue;
+    const live = liveById?.get(key) || staffsLiveById.get(key);
+    const info = lastRouteFromLiveBus(live);
+    if (!info) continue;
+    vehicle.lastRoute = info;
+    lastRouteCache.set(key, Promise.resolve(info));
+    changed = true;
+  }
+  return changed;
+}
+
+async function fetchLastRoute(vehicleOrId, { skipLive = false, allowHistory = true } = {}) {
+  const vehicle = typeof vehicleOrId === "object" && vehicleOrId ? vehicleOrId : null;
+  const key = String(vehicle?.id ?? vehicleOrId ?? "");
+  if (!key) return null;
+  if (lastRouteCache.has(key)) return lastRouteCache.get(key);
+  const promise = (async () => {
+    if (atLiveCache.meta.size) {
+      const at = matchAtLive(vehicle);
+      if (at) {
+        return {
+          route: at.line,
+          dest: at.dest,
+          live: true,
+          at: true,
+          trackedAt: at.recordedAtTime || new Date().toISOString(),
+          direction: normalizeFleetDirection(at.direction || at.directionRef || ""),
+        };
       }
-    } catch {
-      // Fall through to journey history.
     }
+    const cachedLive = staffsLiveById.get(key);
+    const fromCache = lastRouteFromLiveBus(cachedLive);
+    if (fromCache) return fromCache;
+    if (!skipLive) {
+      try {
+        const liveRes = await fetch(`/api/vehicles?id=${encodeURIComponent(key)}`);
+        if (liveRes.ok) {
+          const live = await liveRes.json();
+          const rows = Array.isArray(live) ? live : [];
+          const row = rows.find((item) => String(item.id) === key) || rows[0];
+          const info = lastRouteFromLiveBus(row);
+          if (info) return info;
+        }
+      } catch {
+        // Fall through to journey history.
+      }
+    }
+    if (!allowHistory) return null;
     try {
       const data = await fetchJson(
         `/api/bt-vehiclejourneys/?vehicle=${encodeURIComponent(key)}&limit=1`,
@@ -854,18 +1376,21 @@ async function fetchLastRoute(vehicleOrId) {
   return promise;
 }
 
-async function attachLastRoutes(vehicles, onProgress) {
-  await ensureAtLive();
-  const list = (vehicles || []).filter((v) => v?.id && !v.lastRoute);
-  const chunk = 6;
-  for (let i = 0; i < list.length; i += chunk) {
+async function attachLastRoutes(vehicles, onProgress, { operatorNoc = "", fetchHistory = false, historyLimit = 8 } = {}) {
+  const list = vehicles || [];
+  const noc = String(operatorNoc || "").trim().toUpperCase();
+  const [liveById] = await Promise.all([
+    noc ? fetchOperatorLiveMap(noc).catch(() => new Map()) : Promise.resolve(staffsLiveById),
+    atLiveCache.meta.size ? Promise.resolve(atLiveCache) : ensureAtLive().catch(() => atLiveCache),
+  ]);
+  if (applyLiveLastRoutes(list, liveById)) onProgress?.();
+  if (!fetchHistory) return;
+  const missing = list.filter((v) => v?.id && !v.lastRoute).slice(0, historyLimit);
+  const chunk = 8;
+  for (let i = 0; i < missing.length; i += chunk) {
     await Promise.all(
-      list.slice(i, i + chunk).map(async (vehicle) => {
-        // Drop cache if AT assignment may apply (D&G).
-        if (vehicle.operator?.id === "DAGC" || vehicle.operator?.slug === "d-g-coach-bus") {
-          lastRouteCache.delete(String(vehicle.id));
-        }
-        vehicle.lastRoute = await fetchLastRoute(vehicle);
+      missing.slice(i, i + chunk).map(async (vehicle) => {
+        vehicle.lastRoute = await fetchLastRoute(vehicle, { skipLive: true, allowHistory: true });
       }),
     );
     onProgress?.();
@@ -1203,7 +1728,6 @@ async function fetchAtVehiclesForDay(line, date = ukDateKey()) {
 /**
  * Build AT1–AT3 journey history from the server GPS trail store.
  * Bustimes often has no AT employee journeys, so trail segments are the source of truth.
- * /api/trails accepts at most 12 keys — prefer primary staff/vehicle keys.
  */
 export async function fetchAtHistoryFromTrails({
   trailKeys = [],
@@ -1245,6 +1769,7 @@ export async function fetchAtHistoryFromTrails({
     const res = await fetch(`/api/trails?${params}`);
     if (!res.ok) return [];
     const data = await res.json();
+    if (data?.disabled) return [];
     const trails = data?.trails || {};
     const segments = [];
     for (const key of unique) {
@@ -1278,9 +1803,11 @@ export async function fetchAtHistoryFromTrails({
           .replace(/^outbound$/, "out");
         const gap = cur ? t - cur.lastT : Infinity;
         const lineChanged = Boolean(cur?.line && pl && cur.line !== pl);
-        const journeyChanged = Boolean(cur?.journeyId && jid && cur.journeyId !== jid);
+        const journeyChanged = Boolean(
+          cur?.journeyId && jid && cur.journeyId !== jid && gap > 8 * 60_000,
+        );
         const directionChanged = Boolean(cur?.direction && dir && cur.direction !== dir);
-        if (!cur || lineChanged || journeyChanged || directionChanged || gap > 20 * 60_000) {
+        if (!cur || lineChanged || journeyChanged || directionChanged || gap > 25 * 60_000) {
           if (cur && cur.n >= 2) segments.push(cur);
           cur = {
             journeyId: jid,
@@ -1362,6 +1889,196 @@ export function mergeAtHistoryRows(journeys, atRows) {
   return list.sort((a, b) => String(b.datetime || "").localeCompare(String(a.datetime || "")));
 }
 
+/**
+ * FlixBus / National Express history from GPS trail store.
+ * Live AVL often hides vehicle ids, so journey-segmented trails are the source of truth.
+ */
+export async function fetchCoachHistoryFromTrails({
+  trailKeys = [],
+  line = "",
+  days = 7,
+  operator = "",
+  busMode = false,
+} = {}) {
+  const wantLine = String(line || "").trim().toUpperCase();
+  const wantOp = String(operator || "").trim().toUpperCase();
+  const keepDays = Math.min(7, Math.max(1, Number(days) || 7));
+  const bases = [...new Set((trailKeys || []).map((k) => String(k || "").trim()).filter(Boolean))];
+  if (!bases.length) return [];
+  const keys = [];
+  for (const base of bases) {
+    keys.push(base);
+    if (/^\d+$/.test(base)) keys.push(`jny:${base}`);
+    else if (base.startsWith("jny:")) keys.push(base.slice(4));
+  }
+  const unique = [...new Set(keys.filter(Boolean))].slice(0, 24);
+  try {
+    const params = new URLSearchParams({
+      keys: unique.join(","),
+      days: String(keepDays),
+    });
+    const res = await fetch(`/api/trails?${params}`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (data?.disabled) return [];
+    const trails = data?.trails || {};
+    const segments = [];
+    // Coaches: intermediate stops (Hanley, airports, service areas) often sit 20–60+ minutes.
+    // Local buses (busMode): services stop every few minutes — a 20+ min gap means a new run.
+    const coachGapMs = busMode ? 22 * 60_000 : 90 * 60_000;
+    const journeyFlipMs = busMode ? 12 * 60_000 : 90 * 60_000;
+    for (const key of unique) {
+      const pts = Array.isArray(trails[key]) ? trails[key] : [];
+      let cur = null;
+      for (const p of pts) {
+        const t = Number(p.t);
+        if (!Number.isFinite(t)) continue;
+        const day = ukDateKey(t);
+        const pl = String(p.line || "").trim().toUpperCase();
+        const pop = String(p.operator || "").trim().toUpperCase();
+        if (wantOp && pop && pop !== wantOp) {
+          if (cur && cur.n >= 2) segments.push(cur);
+          cur = null;
+          continue;
+        }
+        if (wantLine && pl && !sameServiceLine(pl, wantLine)) {
+          if (cur && cur.n >= 2) segments.push(cur);
+          cur = null;
+          continue;
+        }
+        const jid = String(p.journeyId || p.journey_id || "").trim();
+        const tid = String(p.tripId || p.trip_id || "").trim();
+        const destRaw = String(p.destination || "").trim();
+        const dest = destRaw.toLowerCase().replace(/\s+/g, " ").slice(0, 80);
+        const dir = String(p.direction || "")
+          .trim()
+          .toLowerCase()
+          .replace(/^inbound$/, "in")
+          .replace(/^outbound$/, "out");
+        const gap = cur ? t - cur.lastT : Infinity;
+        const lineChanged = Boolean(cur?.line && pl && cur.line !== pl);
+        const journeyChanged = Boolean(cur?.journeyId && jid && cur.journeyId !== jid);
+        const tripChanged = Boolean(cur?.tripId && tid && cur.tripId !== tid);
+        const sameJourney = Boolean(cur?.journeyId && jid && cur.journeyId === jid);
+        const sameTrip = Boolean(cur?.tripId && tid && cur.tripId === tid);
+        const directionChanged = Boolean(cur?.direction && dir && cur.direction !== dir);
+        // Intermediate stop / next-stop headsign changes must not split a continuous A→B run.
+        // Flix often changes journey id after Hanley — only split after a long layover.
+        const destChanged = Boolean(
+          cur?.destination &&
+            dest &&
+            cur.destination !== dest &&
+            !sameJourney &&
+            !sameTrip &&
+            !directionChanged &&
+            gap >= journeyFlipMs,
+        );
+        const shouldSplit =
+          !cur ||
+          lineChanged ||
+          (journeyChanged && gap > journeyFlipMs) ||
+          (tripChanged && gap > journeyFlipMs) ||
+          (!(sameJourney || sameTrip) && (directionChanged || destChanged || gap > coachGapMs));
+        if (shouldSplit) {
+          if (cur && cur.n >= 2) segments.push(cur);
+          cur = {
+            journeyId: jid,
+            tripId: tid,
+            line: pl || wantLine || "",
+            direction: dir || "",
+            destination: dest || "",
+            destLabel: destRaw || "",
+            date: day,
+            startT: t,
+            lastT: t,
+            n: 1,
+            trailKey: key.startsWith("jny:")
+              ? key.slice(4)
+              : key.startsWith("coach:") || key.startsWith("reg:")
+                ? key
+                : key,
+            rawKey: key,
+            operator: pop || wantOp || "",
+          };
+        } else {
+          cur.lastT = t;
+          cur.n += 1;
+          if (jid && !cur.journeyId) cur.journeyId = jid;
+          if (tid && !cur.tripId) cur.tripId = tid;
+          if (pl && !cur.line) cur.line = pl;
+          if (dir && !cur.direction) cur.direction = dir;
+          // Prefer the later / final destination on a continuous coach run.
+          if (destRaw) {
+            cur.destination = dest;
+            cur.destLabel = destRaw;
+          }
+          if (pop && !cur.operator) cur.operator = pop;
+        }
+      }
+      if (cur && cur.n >= 2) segments.push(cur);
+    }
+    // Merge consecutive same-line coach segments split only by an intermediate stop / new journey id.
+    segments.sort((a, b) => a.startT - b.startT);
+    const merged = [];
+    for (const seg of segments) {
+      const prev = merged[merged.length - 1];
+      const gap = prev ? seg.startT - prev.lastT : Infinity;
+      const sameLine =
+        prev &&
+        prev.line &&
+        seg.line &&
+        sameServiceLine(prev.line, seg.line) &&
+        (!prev.operator || !seg.operator || prev.operator === seg.operator);
+      if (prev && sameLine && Number.isFinite(gap) && gap >= 0 && gap <= coachGapMs) {
+        prev.lastT = Math.max(prev.lastT, seg.lastT);
+        prev.n += seg.n;
+        if (seg.destLabel) {
+          prev.destination = seg.destination;
+          prev.destLabel = seg.destLabel;
+        }
+        if (seg.journeyId && !prev.journeyId) prev.journeyId = seg.journeyId;
+        if (seg.trailKey && String(seg.trailKey).startsWith("coach:")) prev.trailKey = seg.trailKey;
+        continue;
+      }
+      merged.push({ ...seg });
+    }
+    const seen = new Set();
+    const rows = [];
+    for (const seg of merged) {
+      const lineCode = seg.line || wantLine || "";
+      if (wantLine && lineCode && !sameServiceLine(lineCode, wantLine)) continue;
+      if (wantOp && seg.operator && seg.operator !== wantOp) continue;
+      const id = seg.journeyId
+        ? String(seg.journeyId)
+        : `coach-trail-${seg.trailKey || seg.rawKey}-${seg.startT}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      rows.push({
+        id,
+        datetime: new Date(seg.startT).toISOString(),
+        date: seg.date,
+        route_name: lineCode || "?",
+        destination: seg.destLabel || "",
+        trip_id: seg.tripId || "",
+        journey_id: seg.journeyId || "",
+        direction: seg.direction || "",
+        trailKey: String(seg.trailKey || "").startsWith("coach:") || String(seg.trailKey || "").startsWith("reg:")
+          ? seg.trailKey
+          : seg.journeyId
+            ? `jny:${seg.journeyId}`
+            : seg.trailKey || seg.rawKey,
+        coachTrail: !busMode,
+        trailRun: busMode,
+        operator: seg.operator ? { noc: seg.operator, id: seg.operator } : wantOp ? { noc: wantOp, id: wantOp } : null,
+      });
+    }
+    rows.sort((a, b) => String(b.datetime || "").localeCompare(String(a.datetime || "")));
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
 function liverySwatch(livery) {
   const colour = livery?.left || livery?.right || "#64748b";
   return `<span class="fleet-livery-swatch" style="background:${esc(colour)}" title="${esc(livery?.name || "")}"></span>`;
@@ -1403,25 +2120,65 @@ function compareLineNames(a, b) {
 }
 
 const operatorServicesCache = new Map();
+const timetableTripsCache = new Map();
+const timetableTripsInflight = new Map();
+const tripDetailCache = new Map();
+
+function rememberCache(map, key, value, max = 400) {
+  if (map.has(key)) map.delete(key);
+  map.set(key, value);
+  while (map.size > max) map.delete(map.keys().next().value);
+  return value;
+}
 
 async function fetchAllOperatorServices(noc) {
   const code = String(noc || "").trim().toUpperCase();
   if (!code) return [];
   if (operatorServicesCache.has(code)) return operatorServicesCache.get(code);
   const promise = (async () => {
-    const out = [];
-    let next = `/api/bt-services/?operator=${encodeURIComponent(code)}&limit=100`;
-    while (next && out.length < 400) {
-      const data = await fetchJson(next);
-      out.push(...(data.results || []));
-      next = data.next ? toLocalBtApiUrl(data.next) : null;
+    const pageSize = 100;
+    const first = await fetchJson(
+      `/api/bt-services/?operator=${encodeURIComponent(code)}&limit=${pageSize}`,
+    );
+    const out = [...(first.results || [])];
+    const total = Number(first.count);
+    const offsets = [];
+    if (Number.isFinite(total) && total > pageSize) {
+      for (let offset = pageSize; offset < Math.min(total, 400); offset += pageSize) {
+        offsets.push(offset);
+      }
+    } else if (first.next) {
+      let next = toLocalBtApiUrl(first.next);
+      while (next && out.length < 400) {
+        const data = await fetchJson(next);
+        out.push(...(data.results || []));
+        next = data.next ? toLocalBtApiUrl(data.next) : null;
+      }
     }
-    out.sort((a, b) => {
+    if (offsets.length) {
+      const pages = await Promise.all(
+        offsets.map((offset) =>
+          fetchJson(
+            `/api/bt-services/?operator=${encodeURIComponent(code)}&limit=${pageSize}&offset=${offset}`,
+          ).catch(() => ({ results: [] })),
+        ),
+      );
+      for (const data of pages) out.push(...(data.results || []));
+    }
+    const seen = new Set();
+    const unique = [];
+    for (const row of out) {
+      const id = String(row?.id ?? "");
+      if (id && seen.has(id)) continue;
+      if (id) seen.add(id);
+      unique.push(row);
+    }
+    unique.sort((a, b) => {
       const byLine = compareLineNames(a.line_name, b.line_name);
       if (byLine) return byLine;
       return String(a.description || "").localeCompare(String(b.description || ""), "en-GB");
     });
-    return out;
+    return unique;
   })();
   operatorServicesCache.set(code, promise);
   try {
@@ -1533,40 +2290,159 @@ function renderAtTimetableHtml(trips, { line = "", loading = false, error = "" }
   </section>`;
 }
 
-async function fetchServiceTimetableTrips(serviceId, date) {
+function sortTimetableTrips(trips) {
+  return [...(trips || [])].sort((a, b) => String(a.start || "").localeCompare(String(b.start || "")));
+}
+
+async function fetchServiceTimetableTrips(serviceId, date, { onPage } = {}) {
   const id = String(serviceId || "").trim();
   const day = String(date || ukDateKey()).trim();
   if (!id || !day) return [];
-  const out = [];
-  let next = `/api/bt-trips/?service=${encodeURIComponent(id)}&date=${encodeURIComponent(day)}&limit=50`;
-  while (next && out.length < 300) {
-    const data = await fetchJson(next);
-    out.push(...(data.results || []));
-    next = data.next ? toLocalBtApiUrl(data.next) : null;
+  const cacheKey = `${id}|${day}`;
+  const cached = timetableTripsCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 8 * 60_000) {
+    onPage?.(cached.trips);
+    return cached.trips;
   }
-  out.sort((a, b) => String(a.start || "").localeCompare(String(b.start || "")));
-  return out;
+  if (timetableTripsInflight.has(cacheKey)) {
+    const pending = timetableTripsInflight.get(cacheKey);
+    const trips = await pending;
+    onPage?.(trips);
+    return trips;
+  }
+  const promise = (async () => {
+    const pageSize = 100;
+    const first = await fetchJson(
+      `/api/bt-trips/?service=${encodeURIComponent(id)}&date=${encodeURIComponent(day)}&limit=${pageSize}`,
+    );
+    const seen = new Set();
+    const out = [];
+    const absorb = (batch) => {
+      for (const trip of batch || []) {
+        const key = String(trip?.id ?? `${trip?.start || ""}|${trip?.headsign || ""}`);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(trip);
+      }
+    };
+    absorb(first.results);
+    onPage?.(sortTimetableTrips(out));
+    const total = Number(first.count);
+    const offsets = [];
+    if (Number.isFinite(total) && total > pageSize) {
+      for (let offset = pageSize; offset < Math.min(total, 250); offset += pageSize) {
+        offsets.push(offset);
+      }
+    } else if (first.next) {
+      let next = toLocalBtApiUrl(first.next);
+      while (next && out.length < 250) {
+        const data = await fetchJson(next);
+        absorb(data.results);
+        onPage?.(sortTimetableTrips(out));
+        next = data.next ? toLocalBtApiUrl(data.next) : null;
+      }
+    }
+    if (offsets.length) {
+      const pages = await Promise.all(
+        offsets.map((offset) =>
+          fetchJson(
+            `/api/bt-trips/?service=${encodeURIComponent(id)}&date=${encodeURIComponent(day)}&limit=${pageSize}&offset=${offset}`,
+          ).catch(() => ({ results: [] })),
+        ),
+      );
+      for (const data of pages) absorb(data.results);
+    }
+    const sorted = sortTimetableTrips(out);
+    rememberCache(timetableTripsCache, cacheKey, { at: Date.now(), trips: sorted }, 80);
+    return sorted;
+  })();
+  timetableTripsInflight.set(cacheKey, promise);
+  try {
+    return await promise;
+  } catch (error) {
+    timetableTripsCache.delete(cacheKey);
+    throw error;
+  } finally {
+    timetableTripsInflight.delete(cacheKey);
+  }
 }
 
 async function fetchTripWithStops(tripId) {
   const id = String(tripId || "").trim();
   if (!id) return null;
-  return fetchJson(`/api/bt-trips/${encodeURIComponent(id)}/`);
+  if (tripDetailCache.has(id)) return tripDetailCache.get(id);
+  const pending = fetchJson(`/api/bt-trips/${encodeURIComponent(id)}/`)
+    .then((row) => {
+      rememberCache(tripDetailCache, id, Promise.resolve(row), 600);
+      return row;
+    })
+    .catch((error) => {
+      tripDetailCache.delete(id);
+      throw error;
+    });
+  tripDetailCache.set(id, pending);
+  return pending;
+}
+
+function tripStartMs(trip, dateKey) {
+  const clock = formatTripClock(trip?.start);
+  if (!clock) return NaN;
+  const t = Date.parse(`${dateKey || ukDateKey()}T${clock}:00`);
+  return Number.isFinite(t) ? t : NaN;
+}
+
+/** Prefer journeys around now, plus a few from the start of the day. */
+function selectTripIdsForStops(trips, { perDirection = 8, aroundMs = Date.now() } = {}) {
+  const wantIds = new Set();
+  for (const [, rows] of groupTimetableTrips(trips)) {
+    const sorted = [...rows].filter((trip) => trip?.id != null);
+    if (!sorted.length) continue;
+    const n = Math.min(perDirection, sorted.length);
+    let best = 0;
+    let gap = Infinity;
+    sorted.forEach((trip, index) => {
+      const ms = tripStartMs(trip);
+      if (!Number.isFinite(ms)) return;
+      const g = Math.abs(ms - aroundMs);
+      if (g < gap) {
+        gap = g;
+        best = index;
+      }
+    });
+    const start = Math.max(0, Math.min(best - Math.floor(n / 3), sorted.length - n));
+    for (const trip of sorted.slice(start, start + n)) wantIds.add(String(trip.id));
+    for (const trip of sorted.slice(0, Math.min(3, n))) wantIds.add(String(trip.id));
+  }
+  return [...wantIds];
+}
+
+function mergeTripDetails(list, detailById) {
+  return (list || []).map((trip) => {
+    const hit = detailById.get(String(trip.id));
+    if (!hit) return trip;
+    if (Array.isArray(trip.times) && trip.times.length && !Array.isArray(hit.times)) return trip;
+    return { ...trip, ...hit };
+  });
 }
 
 /** Load stop-by-stop times for timetable journeys (capped per direction). */
-async function enrichTripsWithStopTimes(trips, { perDirection = 32, concurrency = 5 } = {}) {
+async function enrichTripsWithStopTimes(
+  trips,
+  { perDirection = 10, concurrency = 10, onChunk } = {},
+) {
   const list = Array.isArray(trips) ? trips : [];
   if (!list.length) return list;
-  const groups = groupTimetableTrips(list);
-  const wantIds = new Set();
-  for (const [, rows] of groups) {
-    for (const trip of rows.slice(0, perDirection)) {
-      if (trip?.id != null) wantIds.add(String(trip.id));
+  const ids = selectTripIdsForStops(list, { perDirection }).filter((id) => {
+    const existing = list.find((trip) => String(trip.id) === id);
+    return !(Array.isArray(existing?.times) && existing.times.length);
+  });
+  if (!ids.length) return list;
+  const detailById = new Map();
+  for (const trip of list) {
+    if (trip?.id != null && Array.isArray(trip.times) && trip.times.length) {
+      detailById.set(String(trip.id), trip);
     }
   }
-  const ids = [...wantIds];
-  const detailById = new Map();
   for (let i = 0; i < ids.length; i += concurrency) {
     const chunk = ids.slice(i, i + concurrency);
     const rows = await Promise.all(
@@ -1581,8 +2457,9 @@ async function enrichTripsWithStopTimes(trips, { perDirection = 32, concurrency 
     for (const row of rows) {
       if (row?.id != null) detailById.set(String(row.id), row);
     }
+    onChunk?.(mergeTripDetails(list, detailById));
   }
-  return list.map((trip) => detailById.get(String(trip.id)) || trip);
+  return mergeTripDetails(list, detailById);
 }
 
 function groupTimetableTrips(trips) {
@@ -1724,62 +2601,241 @@ async function fetchOperatorVehicles(noc, { search = "", offset = 0, limit = 100
   return fetchJson(`/api/bt-vehicles/?${params}`);
 }
 
-/** Load the full active fleet for an operator, sorted by fleet number. */
-async function fetchAllOperatorVehicles(noc, { search = "" } = {}) {
+/** Load the active fleet for an operator, sorted by fleet number. */
+async function fetchAllOperatorVehicles(noc, { search = "", onPage } = {}) {
   if (!noc) return { count: 0, results: [] };
+  const cacheKey = `${String(noc).toUpperCase()}|${search}`;
+  const cached = operatorVehiclesCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 90_000) {
+    onPage?.(cached.data.results, cached.data.count, true);
+    return cached.data;
+  }
+
   const results = [];
   const seen = new Set();
-  let offset = 0;
-  let total = Infinity;
   const pageSize = 100;
-  for (let page = 0; page < 40 && offset < total; page += 1) {
-    const data = await fetchOperatorVehicles(noc, { search, offset, limit: pageSize });
-    total = Number(data.count);
-    if (!Number.isFinite(total)) total = results.length;
-    const batch = Array.isArray(data.results) ? data.results : [];
-    if (!batch.length) break;
-    for (const vehicle of batch) {
+  const absorb = (batch) => {
+    for (const vehicle of batch || []) {
       const id = String(vehicle?.id ?? "");
       if (id && seen.has(id)) continue;
       if (id) seen.add(id);
       results.push(vehicle);
     }
-    offset += batch.length;
-    if (!data.next || batch.length < pageSize) break;
+  };
+
+  const first = await fetchOperatorVehicles(noc, { search, offset: 0, limit: pageSize });
+  let total = Number(first.count);
+  absorb(first.results);
+  if (!Number.isFinite(total)) total = results.length;
+  const notify = (done) => {
+    onPage?.(
+      results.slice().sort(compareFleetNumbers),
+      Number.isFinite(total) ? total : results.length,
+      done,
+    );
+  };
+  notify(!first.next);
+
+  const offsets = [];
+  if (first.next && Number.isFinite(Number(first.count)) && Number(first.count) > pageSize) {
+    for (let offset = pageSize; offset < Math.min(Number(first.count), 2500); offset += pageSize) {
+      offsets.push(offset);
+    }
+  } else if (first.next) {
+    let offset = results.length;
+    for (let page = 1; page < 12 && first.next; page += 1) {
+      const data = await fetchOperatorVehicles(noc, { search, offset, limit: pageSize });
+      const batch = Array.isArray(data.results) ? data.results : [];
+      if (!batch.length) break;
+      absorb(batch);
+      offset += batch.length;
+      onPage?.(results.slice().sort(compareFleetNumbers), Number.isFinite(Number(data.count)) ? Number(data.count) : results.length, !data.next);
+      if (!data.next || batch.length < pageSize) break;
+    }
   }
+
+  const conc = 3;
+  for (let i = 0; i < offsets.length; i += conc) {
+    const pages = await Promise.all(
+      offsets.slice(i, i + conc).map((offset) => fetchOperatorVehicles(noc, { search, offset, limit: pageSize })),
+    );
+    for (const data of pages) absorb(data.results);
+    onPage?.(results.slice().sort(compareFleetNumbers), total, i + conc >= offsets.length);
+  }
+
   results.sort(compareFleetNumbers);
-  return { count: Number.isFinite(total) ? total : results.length, results };
+  const out = { count: Number.isFinite(total) ? total : results.length, results };
+  operatorVehiclesCache.set(cacheKey, { at: Date.now(), data: out });
+  return out;
 }
 
+const vehicleDetailCache = new Map();
+const vehicleJourneysCache = new Map();
+
 async function fetchVehicle(id) {
-  return fetchJson(`/api/bt-vehicles/${encodeURIComponent(id)}/`);
+  const key = String(id || "");
+  if (!key) throw new Error("Vehicle id missing");
+  if (!vehicleDetailCache.has(key)) {
+    vehicleDetailCache.set(
+      key,
+      fetchJson(`/api/bt-vehicles/${encodeURIComponent(key)}/`).catch((err) => {
+        vehicleDetailCache.delete(key);
+        throw err;
+      }),
+    );
+  }
+  return vehicleDetailCache.get(key);
+}
+
+async function fetchLiveVehicleById(id) {
+  const key = String(id || "");
+  if (!key) return null;
+  const cached = staffsLiveById.get(key);
+  if (cached) return cached;
+  for (const hit of operatorLiveCache.values()) {
+    const row = hit?.byId?.get(key);
+    if (row) return row;
+  }
+  try {
+    const liveRes = await fetch(`/api/vehicles?id=${encodeURIComponent(key)}`);
+    if (!liveRes.ok) return null;
+    const live = await liveRes.json();
+    const rows = Array.isArray(live) ? live : [];
+    return rows.find((item) => String(item.id) === key) || rows[0] || null;
+  } catch {
+    return null;
+  }
 }
 
 async function fetchVehicleJourneys(vehicleId, date) {
-  const params = new URLSearchParams({ vehicle: String(vehicleId) });
-  if (date) params.set("date", date);
-  const rows = [];
-  let url = `/api/bt-vehiclejourneys/?${params}`;
-  for (let page = 0; page < 20 && url; page += 1) {
-    const data = await fetchJson(url);
-    const batch = Array.isArray(data.results) ? data.results : [];
-    for (const row of batch) {
-      if (date && row.date && row.date !== date) {
-        if (row.date < date) {
-          url = null;
-          break;
+  const dayKeys = date ? fleetDayKeys(date) : [];
+  const cacheKey = `${vehicleId}|${dayKeys.join(",") || date || ""}`;
+  if (vehicleJourneysCache.has(cacheKey)) return vehicleJourneysCache.get(cacheKey);
+  const promise = (async () => {
+    const params = new URLSearchParams({ vehicle: String(vehicleId) });
+    // When "today" also includes yesterday, omit bustimes ?date= so overnight rows are returned.
+    if (date && dayKeys.length === 1) params.set("date", dayKeys[0]);
+    const rows = [];
+    const oldest = dayKeys.length ? dayKeys[dayKeys.length - 1] : "";
+    let url = `/api/bt-vehiclejourneys/?${params}`;
+    for (let page = 0; page < (date ? 6 : 6) && url; page += 1) {
+      const data = await fetchJson(url);
+      const batch = Array.isArray(data.results) ? data.results : [];
+      for (const row of batch) {
+        if (date && row.date && !rowMatchesFleetDay(row.date, date)) {
+          if (oldest && row.date < oldest) {
+            url = null;
+            break;
+          }
+          continue;
         }
-        continue;
+        rows.push(row);
       }
-      rows.push(row);
+      if (!url || !data.next) break;
+      url = String(data.next).replace(
+        /^https?:\/\/bustimes\.org\/api\/vehiclejourneys/,
+        "/api/bt-vehiclejourneys",
+      );
     }
-    if (!url || !data.next) break;
-    url = String(data.next).replace(
-      /^https?:\/\/bustimes\.org\/api\/vehiclejourneys/,
-      "/api/bt-vehiclejourneys",
-    );
+    return rows;
+  })().catch((err) => {
+    vehicleJourneysCache.delete(cacheKey);
+    throw err;
+  });
+  vehicleJourneysCache.set(cacheKey, promise);
+  return promise;
+}
+
+function journeyLineCode(row = {}) {
+  const enriched = row.extracted_route != null || row.diverted != null ? row : enrichJourneyRow(row);
+  const line = String(
+    (enriched.route_name && !/^div/i.test(String(enriched.route_name)) ? enriched.route_name : "") ||
+      enriched.extracted_route ||
+      enriched.route_name ||
+      "",
+  ).trim();
+  if (!line || /^div/i.test(line)) return "";
+  return line;
+}
+
+const vehicleRouteSummaryCache = new Map();
+
+function summarizeRoutesFromJourneys(rows) {
+  const byLine = new Map();
+  for (const raw of rows || []) {
+    const row = raw.extracted_route != null || raw.diverted != null ? raw : enrichJourneyRow(raw);
+    const line = journeyLineCode(row);
+    if (!line) continue;
+    const key = line.toUpperCase();
+    const cur = byLine.get(key) || { line, trips: 0, lastAt: "", dest: "" };
+    cur.trips += 1;
+    const when = String(row.datetime || row.date || "");
+    if (when && when > String(cur.lastAt || "")) {
+      cur.lastAt = when;
+      cur.dest = row.destination || cur.dest;
+    } else if (!cur.dest && row.destination) {
+      cur.dest = row.destination;
+    }
+    byLine.set(key, cur);
   }
-  return rows;
+  return [...byLine.values()].sort((a, b) => compareLineNames(a.line, b.line));
+}
+
+/** Unique route numbers a vehicle has run (recent bustimes history). */
+async function fetchVehicleRouteSummary(vehicleId) {
+  const key = String(vehicleId || "");
+  if (!key) return [];
+  if (vehicleRouteSummaryCache.has(key)) return vehicleRouteSummaryCache.get(key);
+  const promise = (async () => {
+    const rows = [];
+    let url = `/api/bt-vehiclejourneys/?vehicle=${encodeURIComponent(key)}&limit=100`;
+    for (let page = 0; page < 1 && url; page += 1) {
+      const data = await fetchJson(url);
+      const batch = Array.isArray(data.results) ? data.results : [];
+      rows.push(...batch);
+      if (!data.next) break;
+      url = String(data.next).replace(
+        /^https?:\/\/bustimes\.org\/api\/vehiclejourneys/,
+        "/api/bt-vehiclejourneys",
+      );
+    }
+    return summarizeRoutesFromJourneys(rows);
+  })().catch((err) => {
+    vehicleRouteSummaryCache.delete(key);
+    throw err;
+  });
+  vehicleRouteSummaryCache.set(key, promise);
+  return promise;
+}
+
+const SAVED_VEHICLES_KEY = "uk-bus-fleet-saved-vehicles";
+
+function loadSavedVehicles() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SAVED_VEHICLES_KEY) || "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((row) => ({
+        id: String(row?.id || ""),
+        reg: String(row?.reg || "").trim(),
+        fleet: String(row?.fleet || "").trim(),
+        operatorName: String(row?.operatorName || "").trim(),
+        routes: Array.isArray(row?.routes) ? row.routes : [],
+        routesAt: Number(row?.routesAt) || 0,
+      }))
+      .filter((row) => row.id || row.reg)
+      .slice(0, 40);
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedVehicles(list) {
+  try {
+    localStorage.setItem(SAVED_VEHICLES_KEY, JSON.stringify((list || []).slice(0, 40)));
+  } catch {
+    /* ignore quota */
+  }
 }
 
 function sameLineCode(a, b) {
@@ -1842,17 +2898,14 @@ async function searchServicesByLine(line, { preferOperatorNoc = "" } = {}) {
   );
 }
 
-async function fetchServiceJourneyVehicles(serviceId, date, { maxPages = 20, includeAnonymous = false } = {}) {
+async function fetchServiceJourneyVehicles(serviceId, date, { maxPages = 3, includeAnonymous = false } = {}) {
   // One row per trip (bustimes Vehicles tab) — do not collapse to latest per bus.
   const trips = [];
-  let url = `/api/bt-vehiclejourneys/?service=${encodeURIComponent(serviceId)}&date=${encodeURIComponent(date)}&limit=100`;
-  for (let page = 0; page < maxPages && url; page += 1) {
-    const data = await fetchJson(url);
+  const absorbPage = (data) => {
     for (const row of data.results || []) {
-      if (date && row.date && row.date !== date) continue;
+      if (date && row.date && !rowMatchesFleetDay(row.date, date)) continue;
       const vehicle = row.vehicle;
       if (!vehicle?.id) {
-        // FlixBus / NATX journeys often have no vehicle object — still list the trip.
         if (!includeAnonymous) continue;
         trips.push({
           id: "",
@@ -1888,11 +2941,45 @@ async function fetchServiceJourneyVehicles(serviceId, date, { maxPages = 20, inc
         operator: vehicle.operator || null,
       });
     }
-    if (!data.next) break;
-    url = String(data.next).replace(
-      /^https?:\/\/bustimes\.org\/api\/vehiclejourneys/,
-      "/api/bt-vehiclejourneys",
-    );
+  };
+  const pageSize = 100;
+  const dayKeys = date ? fleetDayKeys(date) : [""];
+  for (const day of dayKeys) {
+    const dateParam = day ? `&date=${encodeURIComponent(day)}` : "";
+    const firstUrl = `/api/bt-vehiclejourneys/?service=${encodeURIComponent(serviceId)}${dateParam}&limit=${pageSize}`;
+    const first = await fetchJson(firstUrl);
+    absorbPage(first);
+    const total = Number(first.count);
+    const offsets = [];
+    if (first.next && Number.isFinite(total) && total > pageSize) {
+      for (let page = 1, offset = pageSize; page < maxPages && offset < total; page += 1, offset += pageSize) {
+        offsets.push(offset);
+      }
+    } else if (first.next && maxPages > 1) {
+      let url = String(first.next).replace(
+        /^https?:\/\/bustimes\.org\/api\/vehiclejourneys/,
+        "/api/bt-vehiclejourneys",
+      );
+      for (let page = 1; page < maxPages && url; page += 1) {
+        const data = await fetchJson(url);
+        absorbPage(data);
+        if (!data.next) break;
+        url = String(data.next).replace(
+          /^https?:\/\/bustimes\.org\/api\/vehiclejourneys/,
+          "/api/bt-vehiclejourneys",
+        );
+      }
+    }
+    if (offsets.length) {
+      const pages = await Promise.all(
+        offsets.map((offset) =>
+          fetchJson(
+            `/api/bt-vehiclejourneys/?service=${encodeURIComponent(serviceId)}${dateParam}&limit=${pageSize}&offset=${offset}`,
+          ).catch(() => ({ results: [] })),
+        ),
+      );
+      for (const data of pages) absorbPage(data);
+    }
   }
   return trips.sort((a, b) => String(a.datetime || "").localeCompare(String(b.datetime || "")));
 }
@@ -1973,11 +3060,11 @@ function mergeRouteVehiclesWithLive(trips, liveBuses, service = null) {
   });
 }
 
-async function fetchLineJourneyVehicles(services, date, { maxServices = 12 } = {}) {
+async function fetchLineJourneyVehicles(services, date, { maxServices = 8 } = {}) {
   const pick = [...(services || [])].slice(0, maxServices);
   const batches = await Promise.all(
     pick.map((service) =>
-      fetchServiceJourneyVehicles(service.id, date).catch(() => []),
+      fetchServiceJourneyVehicles(service.id, date, { maxPages: 3 }).catch(() => []),
     ),
   );
   const trips = [];
@@ -2106,6 +3193,11 @@ export function createFleetBrowser({
     routeTimetableError: "",
     operatorRoutes: [],
     operatorRoutesLoading: false,
+    savedVehicles: loadSavedVehicles(),
+    savedBusy: false,
+    savedError: "",
+    vehicleRoutes: [],
+    vehicleRoutesLoading: false,
     photo: null,
     photoPending: false,
     photoStatus: "",
@@ -2470,18 +3562,114 @@ export function createFleetBrowser({
     `;
   }
 
-  function renderRouteNumberChips(routes, { loading = false, emptyLabel = "No routes yet" } = {}) {
+  function renderRouteNumberChips(routes, { loading = false, emptyLabel = "No routes yet", openLine = false } = {}) {
     if (loading) return `<div class="fleet-route-chips is-loading"><span class="fleet-muted">Loading routes…</span></div>`;
     const list = Array.isArray(routes) ? routes : [];
     if (!list.length) return `<div class="fleet-route-chips"><span class="fleet-muted">${esc(emptyLabel)}</span></div>`;
     return `<div class="fleet-route-chips" role="list">${list
       .map((row) => {
-        const at = Boolean(row._at);
-        const line = row.line_name || "?";
-        const title = row.description ? `${line} · ${row.description}` : line;
-        return `<button type="button" class="fleet-route-chip${at ? " is-at" : ""}" role="listitem" title="${esc(title)}" data-action="${at ? "open-at-route" : "open-route-service"}" data-arg="${esc(row.id)}" data-line="${esc(line)}">${esc(line)}</button>`;
+        const at = Boolean(row._at) || AT_LINE_SET.has(String(row.line_name || row.line || "").toUpperCase());
+        const school = SCHOOL_LINE_SET.has(String(row.line_name || row.line || "").toUpperCase());
+        const scfc = STOKE_FC_LINE_SET.has(String(row.line_name || row.line || "").toUpperCase());
+        const line = row.line_name || row.line || "?";
+        const trips = Number(row.trips) || 0;
+        const title = row.description
+          ? `${line} · ${row.description}`
+          : trips
+            ? `${line} · ${trips} trip${trips === 1 ? "" : "s"}${row.dest ? ` · ${row.dest}` : ""}`
+            : line;
+        const useLine = openLine || !row.id || String(row.id).startsWith("at:");
+        const action = at && !openLine && row.id
+          ? "open-at-route"
+          : useLine
+            ? "open-route-line"
+            : "open-route-service";
+        const extra = [
+          at ? " is-at" : "",
+          school ? " is-school" : "",
+          scfc ? " is-scfc" : "",
+        ].join("");
+        return `<button type="button" class="fleet-route-chip${extra}" role="listitem" title="${esc(title)}" data-action="${action}" data-arg="${esc(row.id || "")}" data-line="${esc(line)}">${esc(line)}</button>`;
       })
       .join("")}</div>`;
+  }
+
+  function isSavedVehicle(vehicle) {
+    const id = String(vehicle?.id || "");
+    const reg = compactQuery(vehicle?.reg);
+    return state.savedVehicles.some(
+      (row) => (id && row.id === id) || (reg && compactQuery(row.reg) === reg),
+    );
+  }
+
+  function persistSavedState() {
+    persistSavedVehicles(state.savedVehicles);
+  }
+
+  function upsertSavedVehicle(vehicle, routes = null) {
+    if (!vehicle?.id && !vehicle?.reg) return;
+    const id = String(vehicle.id || "");
+    const reg = String(vehicle.reg || "").trim();
+    const idx = state.savedVehicles.findIndex(
+      (row) => (id && row.id === id) || (reg && compactQuery(row.reg) === compactQuery(reg)),
+    );
+    const next = {
+      id,
+      reg,
+      fleet: String(vehicle.fleet_code || vehicle.fleet_number || vehicle.fleet || "").trim(),
+      operatorName: String(vehicle.operator?.name || vehicle.operatorName || "").trim(),
+      routes: Array.isArray(routes) ? routes : idx >= 0 ? state.savedVehicles[idx].routes : [],
+      routesAt: Array.isArray(routes) ? Date.now() : idx >= 0 ? state.savedVehicles[idx].routesAt : 0,
+    };
+    if (idx >= 0) state.savedVehicles[idx] = { ...state.savedVehicles[idx], ...next };
+    else state.savedVehicles.unshift(next);
+    persistSavedState();
+  }
+
+  function removeSavedVehicle(id, reg = "") {
+    const wantId = String(id || "");
+    const wantReg = compactQuery(reg);
+    state.savedVehicles = state.savedVehicles.filter(
+      (row) => !((wantId && row.id === wantId) || (wantReg && compactQuery(row.reg) === wantReg)),
+    );
+    persistSavedState();
+  }
+
+  function renderSavedVehicles() {
+    const list = state.savedVehicles;
+    return `<section class="fleet-section fleet-saved">
+      <h2 class="fleet-section-title">Your vehicles${list.length ? ` · ${list.length}` : ""}</h2>
+      <p class="fleet-muted fleet-section-note">Add a registration to keep a bus here. Route numbers (27, 27A, …) come from its recorded journeys.</p>
+      <form id="fleet-add-vehicle-form" class="fleet-add-vehicle">
+        <label class="sr-only" for="fleet-add-vehicle-query">Vehicle registration</label>
+        <input id="fleet-add-vehicle-query" type="search" placeholder="Vehicle reg e.g. YX23 ABC" autocomplete="off" />
+        <button type="submit"${state.savedBusy ? " disabled" : ""}>${state.savedBusy ? "Adding…" : "Add"}</button>
+      </form>
+      ${state.savedError ? `<p class="fleet-error">${esc(state.savedError)}</p>` : ""}
+      ${
+        list.length
+          ? `<ul class="fleet-list fleet-saved-list">${list
+              .map((row) => {
+                const routes = Array.isArray(row.routes) ? row.routes : [];
+                return `<li class="fleet-saved-card">
+                  <div class="fleet-saved-head">
+                    <button type="button" class="fleet-list-btn" data-action="open-vehicle" data-id="${esc(row.id)}">
+                      <span class="fleet-list-main">${esc(row.fleet || "—")} ${plateHtml(row.reg)}</span>
+                      <span class="fleet-list-sub">${esc(row.operatorName || "Saved bus")}${routes.length ? ` · ${routes.length} route${routes.length === 1 ? "" : "s"}` : ""}</span>
+                    </button>
+                    <button type="button" class="fleet-saved-remove" data-action="remove-saved-vehicle" data-id="${esc(row.id)}" data-reg="${esc(row.reg)}" title="Remove ${esc(row.reg || "vehicle")}" aria-label="Remove ${esc(row.reg || "vehicle")}">Remove</button>
+                  </div>
+                  ${renderRouteNumberChips(routes, {
+                    loading: state.savedBusy && !routes.length,
+                    emptyLabel: "No recorded routes yet.",
+                    openLine: true,
+                  })}
+                </li>`;
+              })
+              .join("")}</ul>`
+          : `<p class="fleet-muted">No saved vehicles yet.</p>`
+      }
+    </section>`;
   }
 
   function renderOperatorRouteColumn(op) {
@@ -2524,11 +3712,39 @@ export function createFleetBrowser({
         `${row.line} ${row.name} ${row.operator} ${meta.name || ""} stoke city fc bet365 shuttle matchday potteries`,
       ).includes(q);
     });
+    const fpotOosVehicles = (() => {
+      const list = fpotOosLiveCache.vehicles || [];
+      if (!q) return list;
+      return list.filter((row) =>
+        compactQuery(
+          `${row.regLabel || ""} ${row.fleet || ""} ${row.dest || ""} ${row.status || ""} first potteries oos out of service dead run`,
+        ).includes(q),
+      );
+    })();
+    const dgOosVehicles = (() => {
+      const list = dgOosLiveCache.vehicles || [];
+      if (!q) return list;
+      return list.filter((row) =>
+        compactQuery(
+          `${row.regLabel || ""} ${row.fleet || ""} ${row.dest || ""} ${row.status || ""} d&g dg dagc oos out of service dead run`,
+        ).includes(q),
+      );
+    })();
+    const deadRunSegments = (() => {
+      const list = deadRunsHistoryCache.segments || [];
+      if (!q) return list;
+      return list.filter((row) =>
+        compactQuery(
+          `${row.operatorName || ""} ${row.operator || ""} ${row.regLabel || ""} ${row.fleet || ""} ${row.dest || ""} dead run ticket machine fpot dagc first potteries`,
+        ).includes(q),
+      );
+    })();
     return `
       ${fleetNav([{ label: "Staffordshire" }, { label: homeCrumbLabel() }])}
       <h1 class="fleet-title">Staffordshire fleet</h1>
       <p class="fleet-lead">${regSearch ? "Registration search covers buses across the UK." : "Search bus companies and vehicles operating in Staffordshire."}</p>
       ${state.error ? `<p class="fleet-error">${esc(state.error)}</p>` : ""}
+      ${renderSavedVehicles()}
       ${
         state.query
           ? `<section class="fleet-section">
@@ -2570,6 +3786,97 @@ export function createFleetBrowser({
             )
             .join("")}
         </ul>
+      </section>
+      <section class="fleet-section">
+        <h2 class="fleet-section-title">First Potteries · out of service${fpotOosVehicles.length ? ` · ${fpotOosVehicles.length}` : ""}</h2>
+        <p class="fleet-muted fleet-section-note">Dead runs, depot transfers, finished trips and not-in-service buses from First Potteries Ticketer AVL (via BODS). Live while GPS is fresh (drops after 5 minutes with no update). Any depot / yard destination — not only Adderley Green.</p>
+        ${
+          fpotOosVehicles.length
+            ? `<ul class="fleet-list">${fpotOosVehicles
+                        .map((row) => {
+                  const label = [row.fleet, row.regLabel].filter(Boolean).join(" · ") || "Bus";
+                  const lineBit = row.deadRun || isDeadRunLine(row.line) ? "DR" : row.line && isPassengerServiceLine(row.line) ? row.line : "NIS";
+                  return `<li>
+                    <div class="fleet-list-row fleet-oos-row">
+                      <button type="button" class="fleet-list-btn" data-action="track-vehicle" data-id="${esc(row.id)}" data-reg="${esc(row.regLabel || row.reg || "")}" data-fleet="${esc(row.fleet || "")}" data-lat="${esc(row.lat)}" data-lng="${esc(row.lng)}">
+                        <span class="fleet-list-main"><span class="fleet-route fleet-route-nis">${esc(lineBit)}</span> ${esc(label)}</span>
+                        <span class="fleet-list-sub">${esc(row.status)}${row.dest ? ` · ${esc(row.dest)}` : ""}</span>
+                      </button>
+                      <button type="button" class="fleet-track-btn" data-action="track-vehicle" data-id="${esc(row.id)}" data-reg="${esc(row.regLabel || row.reg || "")}" data-fleet="${esc(row.fleet || "")}" data-lat="${esc(row.lat)}" data-lng="${esc(row.lng)}">Map</button>
+                    </div>
+                  </li>`;
+                })
+                .join("")}</ul>`
+            : `<p class="fleet-muted">No First Potteries out-of-service buses tracking right now.</p>`
+        }
+      </section>
+      <section class="fleet-section">
+        <h2 class="fleet-section-title">D &amp; G · out of service${dgOosVehicles.length ? ` · ${dgOosVehicles.length}` : ""}</h2>
+        <p class="fleet-muted fleet-section-note">Dead runs, depot transfers, finished trips and not-in-service buses from D&amp;G Ticketer AVL (via BODS) and NextStop. Live while GPS is fresh (drops after 5 minutes with no update). Garage / depot / yard destinations — passenger services past Mossfield or Adelaide stay in service.</p>
+        ${
+          dgOosVehicles.length
+            ? `<ul class="fleet-list">${dgOosVehicles
+                        .map((row) => {
+                  const label = [row.fleet, row.regLabel].filter(Boolean).join(" · ") || "Bus";
+                  const lineBit = row.deadRun || isDeadRunLine(row.line) ? "DR" : row.line && isPassengerServiceLine(row.line) ? row.line : "NIS";
+                  return `<li>
+                    <div class="fleet-list-row fleet-oos-row">
+                      <button type="button" class="fleet-list-btn" data-action="track-vehicle" data-id="${esc(row.id)}" data-reg="${esc(row.regLabel || row.reg || "")}" data-fleet="${esc(row.fleet || "")}" data-lat="${esc(row.lat)}" data-lng="${esc(row.lng)}">
+                        <span class="fleet-list-main"><span class="fleet-route fleet-route-nis">${esc(lineBit)}</span> ${esc(label)}</span>
+                        <span class="fleet-list-sub">${esc(row.status)}${row.dest ? ` · ${esc(row.dest)}` : ""}</span>
+                      </button>
+                      <button type="button" class="fleet-track-btn" data-action="track-vehicle" data-id="${esc(row.id)}" data-reg="${esc(row.regLabel || row.reg || "")}" data-fleet="${esc(row.fleet || "")}" data-lat="${esc(row.lat)}" data-lng="${esc(row.lng)}">Map</button>
+                    </div>
+                  </li>`;
+                })
+                .join("")}</ul>`
+            : `<p class="fleet-muted">No D&amp;G out-of-service buses tracking right now.</p>`
+        }
+      </section>
+      <section class="fleet-section">
+        <h2 class="fleet-section-title">Ticket machine · dead runs${deadRunSegments.length ? ` · ${deadRunSegments.length}` : ""}</h2>
+        <p class="fleet-muted fleet-section-note">Recorded First Potteries and D&amp;G Ticketer dead runs from GPS trails (last 7 days). One row per continuous dead-run stint — separate from the live out-of-service lists above.</p>
+        ${
+          deadRunsHistoryCache.loading && !deadRunsHistoryCache.at
+            ? `<p class="fleet-muted">Loading recorded dead runs…</p>`
+            : deadRunSegments.length
+              ? `<ul class="fleet-list">${deadRunSegments
+                  .map((row) => {
+                    const label =
+                      [row.fleet, row.regLabel].filter(Boolean).join(" · ") ||
+                      row.regLabel ||
+                      "Bus";
+                    const when = formatTrackedWhen({ trackedAt: row.datetime });
+                    const op =
+                      row.operatorName ||
+                      (row.operator === "FPOT"
+                        ? "First Potteries"
+                        : row.operator === "DAGC"
+                          ? "D & G Bus"
+                          : row.operator || "");
+                    const mapAttrs = fleetMapDataAttrs({
+                      vehicleId: row.vehicleId || "",
+                      trailKey: row.trailKey || "",
+                      reg: row.regLabel || row.reg || "",
+                      line: "DEAD_RUN",
+                      operator: row.operator || "",
+                      dest: row.dest || "Dead run",
+                      datetime: row.datetime || "",
+                      journeyId: row.journeyId || "",
+                    });
+                    return `<li>
+                      <div class="fleet-list-row fleet-oos-row">
+                        <button type="button" class="fleet-list-btn" data-action="play-journey" ${mapAttrs}>
+                          <span class="fleet-list-main"><span class="fleet-route fleet-route-nis">DR</span> ${esc(label)}</span>
+                          <span class="fleet-list-sub">${esc(op)} · ${esc(row.dest || "Dead run")}${when ? ` · ${esc(when)}` : ""}</span>
+                        </button>
+                        <button type="button" class="fleet-track-btn" data-action="play-journey" ${mapAttrs}>Map</button>
+                      </div>
+                    </li>`;
+                  })
+                  .join("")}</ul>`
+              : `<p class="fleet-muted">No dead runs recorded yet</p>`
+        }
       </section>
       <section class="fleet-section">
         <h2 class="fleet-section-title">School &amp; college buses · ${schoolRoutes.length}</h2>
@@ -2770,7 +4077,12 @@ export function createFleetBrowser({
           ),
           direction: row.direction || vehicle.direction || "",
           trip_id: row.trip_id || "",
-          journey_id: row.journey_id || row.id || "",
+          journey_id:
+            row.journey_id ||
+            (String(row.id || "").startsWith("at-trail-") || String(row.id || "").startsWith("at-live-")
+              ? ""
+              : row.id) ||
+            "",
           live: Boolean(row.atLive || vehicle.live),
         });
       }
@@ -3237,6 +4549,11 @@ export function createFleetBrowser({
       <div class="fleet-actions">
         <button type="button" class="fleet-track-btn" data-action="track-vehicle" data-id="${esc(v.id)}" data-reg="${esc(v.reg || "")}" data-fleet="${esc(v.fleet_code || "")}">Track this bus</button>
         ${
+          isSavedVehicle(v)
+            ? `<button type="button" class="fleet-link-btn" data-action="remove-saved-vehicle" data-id="${esc(v.id)}" data-reg="${esc(v.reg || "")}">Remove from your vehicles</button>`
+            : `<button type="button" class="fleet-link-btn" data-action="save-vehicle" data-id="${esc(v.id)}" data-reg="${esc(v.reg || "")}">Save this bus</button>`
+        }
+        ${
           isSingleVehicleRouteOperator(v.operator?.id || v.operator?.noc || state.operator?.noc)
             ? (() => {
                 const route =
@@ -3257,6 +4574,17 @@ export function createFleetBrowser({
         }
       </div>
       ${renderVehiclePhoto(v)}
+      <section class="fleet-section fleet-vehicle-routes">
+        <h2 class="fleet-section-title">Routes this bus has run${
+          !state.vehicleRoutesLoading && state.vehicleRoutes.length ? ` · ${state.vehicleRoutes.length}` : ""
+        }</h2>
+        <p class="fleet-muted fleet-section-note">Unique service numbers from recent recorded journeys (27, 27A, …). Press a number to open that route.</p>
+        ${renderRouteNumberChips(state.vehicleRoutes, {
+          loading: state.vehicleRoutesLoading,
+          emptyLabel: "No routes recorded yet for this bus.",
+          openLine: true,
+        })}
+      </section>
       <label class="fleet-date">
         <span class="sr-only">Date</span>
         <select id="fleet-date">${Array.from({ length: 14 }, (_, i) => {
@@ -3266,46 +4594,6 @@ export function createFleetBrowser({
           return `<option value="${esc(key)}" ${key === state.date ? "selected" : ""}>${esc(formatLongDate(key))}</option>`;
         }).join("")}</select>
       </label>
-      ${
-        state.lineFilter
-          ? `<p class="fleet-lead">Showing route <span class="fleet-route">${esc(state.lineFilter)}</span> only</p>`
-          : ""
-      }
-      ${(() => {
-        const lines = [];
-        const seen = new Set();
-        for (const row of state.allJourneys || state.journeys || []) {
-          const code =
-            (row.route_name && !/^div/i.test(String(row.route_name))
-              ? row.route_name
-              : "") ||
-            row.extracted_route ||
-            row.route_name ||
-            "";
-          const upper = String(code || "").trim().toUpperCase();
-          if (!upper || seen.has(upper)) continue;
-          seen.add(upper);
-          lines.push({
-            code: String(code).trim(),
-            at: AT_LINE_SET.has(upper) || row.atLive || row.atTrail,
-          });
-        }
-        lines.sort((a, b) => compareLineNames(a.code, b.code));
-        if (lines.length < 2 && !lines.some((row) => row.at)) return "";
-        return `<div class="fleet-route-chips fleet-vehicle-route-chips" role="list" aria-label="Routes this bus has run">
-          ${
-            state.lineFilter
-              ? `<button type="button" class="fleet-route-chip" role="listitem" data-action="clear-vehicle-line">All</button>`
-              : ""
-          }
-          ${lines
-            .map((row) => {
-              const on = sameLineCode(state.lineFilter, row.code);
-              return `<button type="button" class="fleet-route-chip${row.at ? " is-at" : ""}${on ? " is-on" : ""}" role="listitem" data-action="filter-vehicle-line" data-line="${esc(row.code)}" title="${row.at ? "Alton Towers employee route" : `Filter to route ${row.code}`}">${esc(row.code)}</button>`;
-            })
-            .join("")}
-        </div>`;
-      })()}
       ${state.error ? `<p class="fleet-error">${esc(state.error)}</p>` : ""}
       ${
         state.loading
@@ -3325,7 +4613,7 @@ export function createFleetBrowser({
                         row.route_name ||
                         "";
                       return `<tr>
-                        <td>${routeNumberBtn(line, { className: row.atLive || row.atTrail ? "fleet-route-at" : "" })}${row.atLive || row.live ? ` <span class="fleet-live-tag">live</span>` : ""}${row.diverted ? ` <span class="fleet-divert-tag">div</span>` : ""}</td>
+                        <td>${routeNumberBtn(line, { className: row.atLive || row.atTrail || row.coachTrail ? "fleet-route-at" : "" })}${row.atLive || row.live ? ` <span class="fleet-live-tag">live</span>` : ""}${row.diverted ? ` <span class="fleet-divert-tag">div</span>` : ""}</td>
                         <td class="fleet-trip"><span>${esc(time)}</span><span class="fleet-trip-alt">${esc(time)}</span></td>
                         <td>${esc(row.destination || "—")}${row.diverted ? ` <span class="fleet-muted">(diverted)</span>` : ""}</td>
                         <td class="fleet-row-actions">
@@ -3358,11 +4646,7 @@ export function createFleetBrowser({
                     .join("")}
                 </tbody>
               </table>`
-            : `<p class="fleet-muted">${
-                state.lineFilter
-                  ? `No ${esc(state.lineFilter)} journeys recorded for this date.`
-                  : "No journeys recorded for this date."
-              }</p>`
+            : `<p class="fleet-muted">No journeys recorded for this date.</p>`
       }
     `;
   }
@@ -3391,7 +4675,7 @@ export function createFleetBrowser({
     return showHome("");
   }
 
-  async function showHome(query = state.query) {
+  async function showHome(query = state.query, { fetchLive = true } = {}) {
     state.view = "home";
     state.query = query;
     state.operator = null;
@@ -3415,26 +4699,146 @@ export function createFleetBrowser({
     state.journeys = [];
     state.allJourneys = [];
     state.vehicleHits = [];
-    if (state.tab === "fleet") {
-      await Promise.all([
-        ensureAtLive().catch(() => {}),
-        ensureSchoolLive().catch(() => {}),
-      ]);
-    }
+    state.vehicleRoutes = [];
+    state.vehicleRoutesLoading = false;
     if (compactQuery(query).length >= 2) {
       setLoading(true);
       try {
         state.vehicleHits = await searchStaffsVehicles(query);
         setLoading(false);
-        attachLastRoutes(state.vehicleHits, () => {
-          if (state.view === "home") render();
-        });
+        attachLastRoutes(
+          state.vehicleHits,
+          () => {
+            if (state.view === "home") render();
+          },
+          { fetchHistory: true, historyLimit: 8 },
+        );
       } catch (error) {
         setLoading(false, error.message || "Search failed");
       }
+      if (fetchLive && state.tab === "fleet") void refreshFleetHomeLive();
       return;
     }
     render();
+    if (fetchLive && state.tab === "fleet") void refreshFleetHomeLive();
+  }
+
+  async function refreshFleetHomeLive() {
+    await Promise.all([
+      ensureAtLive().catch(() => {}),
+      ensureSchoolLive().catch(() => {}),
+      ensureFpotOosLive().catch(() => {}),
+      ensureDgOosLive().catch(() => {}),
+      ensureDeadRunsHistory().catch(() => {}),
+    ]);
+    if (state.view === "home") render();
+    void refreshSavedVehicleSummaries();
+  }
+
+  function unionRouteLines(existing, rows) {
+    const map = new Map(
+      (existing || [])
+        .filter((row) => row?.line)
+        .map((row) => [String(row.line).toUpperCase(), { ...row }]),
+    );
+    for (const row of rows || []) {
+      const line = journeyLineCode(row);
+      if (!line) continue;
+      const key = line.toUpperCase();
+      if (!map.has(key)) {
+        map.set(key, {
+          line,
+          trips: 1,
+          lastAt: row.datetime || row.date || "",
+          dest: row.destination || "",
+        });
+      }
+    }
+    return [...map.values()].sort((a, b) => compareLineNames(a.line, b.line));
+  }
+
+  async function loadVehicleRouteSummary(vehicle) {
+    const id = String(vehicle?.id || "");
+    if (!id) {
+      state.vehicleRoutes = [];
+      state.vehicleRoutesLoading = false;
+      return;
+    }
+    const saved = state.savedVehicles.find((row) => row.id === id);
+    if (saved?.routes?.length && !state.vehicleRoutes.length) {
+      state.vehicleRoutes = saved.routes;
+    }
+    if (!state.vehicleRoutes.length) state.vehicleRoutesLoading = true;
+    try {
+      const routes = await fetchVehicleRouteSummary(id);
+      if (String(state.vehicle?.id) !== id) return;
+      const merged = unionRouteLines(routes, state.allJourneys);
+      state.vehicleRoutes = merged;
+      state.vehicleRoutesLoading = false;
+      if (isSavedVehicle(vehicle)) upsertSavedVehicle(vehicle, merged);
+      render();
+    } catch {
+      if (String(state.vehicle?.id) === id) {
+        state.vehicleRoutesLoading = false;
+        render();
+      }
+    }
+  }
+
+  async function refreshSavedVehicleSummaries() {
+    const staleMs = 6 * 60 * 60 * 1000;
+    for (const item of state.savedVehicles) {
+      if (!item.id) continue;
+      if (item.routes?.length && Date.now() - (item.routesAt || 0) < staleMs) continue;
+      try {
+        const routes = await fetchVehicleRouteSummary(item.id);
+        item.routes = routes;
+        item.routesAt = Date.now();
+        persistSavedState();
+        if (state.view === "home") render();
+      } catch {
+        /* keep cached routes */
+      }
+    }
+  }
+
+  async function addSavedVehicleByQuery(raw) {
+    const query = String(raw || "").trim();
+    if (!query) return;
+    state.tab = "fleet";
+    state.savedError = "";
+    state.savedBusy = true;
+    if (state.view === "home") render();
+    try {
+      const hits = await searchStaffsVehicles(query);
+      const plate = looksLikeUkReg(query) ? compactQuery(query) : "";
+      const exact = plate ? hits.filter((v) => compactQuery(v.reg) === plate) : [];
+      const pool = exact.length ? exact : hits;
+      if (!pool.length) {
+        state.savedBusy = false;
+        state.savedError = `No vehicle matched “${query}”.`;
+        return showHome(query);
+      }
+      if (pool.length > 1) {
+        state.savedBusy = false;
+        state.savedError = "Several matches — open the bus you want, then press Save this bus.";
+        return showHome(query);
+      }
+      const vehicle = pool[0];
+      upsertSavedVehicle(vehicle);
+      state.savedBusy = false;
+      const panel = root.closest("#fleet-panel");
+      const toolbar = panel?.querySelector("#fleet-vehicle-query");
+      if (toolbar) toolbar.value = "";
+      await showHome("", { fetchLive: false });
+      const routes = await fetchVehicleRouteSummary(vehicle.id);
+      upsertSavedVehicle(vehicle, routes);
+      if (state.view === "home") render();
+    } catch (error) {
+      state.savedBusy = false;
+      state.savedError = error.message || "Could not add that vehicle";
+      if (state.view === "home") render();
+    }
   }
 
   async function showRouteLine(line, date = state.date) {
@@ -3479,6 +4883,13 @@ export function createFleetBrowser({
         state.routeLiveCount = 0;
         setLoading(false, `No Staffordshire services found for route ${code}`);
         return;
+      }
+      if (services.length === 1) {
+        return showRouteService(String(services[0].id), state.date);
+      }
+      const primaryId = String(services[0]?.id || "");
+      if (primaryId) {
+        fetchServiceTimetableTrips(primaryId, state.date).catch(() => {});
       }
       const [vehicles, liveBatches] = await Promise.all([
         fetchLineJourneyVehicles(services, state.date),
@@ -3532,37 +4943,64 @@ export function createFleetBrowser({
         if (op) state.operator = op;
       }
       const coach = ["FLIX", "NATX"].includes(noc);
-      const [vehicles, live, trips] = await Promise.all([
+      const stillThisService = () =>
+        state.view === "route" && String(state.routeService?.id) === id;
+      const applyTimetable = (trips, { loading = false, error = "" } = {}) => {
+        if (!stillThisService()) return;
+        state.routeTimetable = trips;
+        state.routeTimetableLoading = loading;
+        if (error) state.routeTimetableError = error;
+        render();
+      };
+      const fillStopTimes = (trips) => {
+        if (!trips.length || !stillThisService()) return;
+        enrichTripsWithStopTimes(trips, {
+          perDirection: 8,
+          concurrency: 10,
+          onChunk: (partial) => applyTimetable(partial, { loading: true }),
+        })
+          .then((enriched) => applyTimetable(enriched, { loading: false }))
+          .catch((error) =>
+            applyTimetable(trips, {
+              loading: false,
+              error: error.message || "Could not load stop times",
+            }),
+          );
+      };
+      let stopTimesStarted = false;
+      fetchServiceTimetableTrips(id, state.date, {
+        onPage(trips) {
+          applyTimetable(trips, { loading: true });
+          if (!stopTimesStarted) {
+            stopTimesStarted = true;
+            fillStopTimes(trips);
+          }
+        },
+      })
+        .then((trips) => {
+          if (!stillThisService()) return;
+          state.routeTimetable = trips;
+          if (!trips.length) {
+            state.routeTimetableLoading = false;
+            render();
+            return;
+          }
+          fillStopTimes(trips);
+        })
+        .catch((error) => {
+          applyTimetable([], {
+            loading: false,
+            error: error.message || "Could not load timetable",
+          });
+        });
+      const [vehicles, live] = await Promise.all([
         fetchServiceJourneyVehicles(id, state.date, { includeAnonymous: coach }),
         fetchLiveServiceVehicles(id),
-        fetchServiceTimetableTrips(id, state.date).catch((error) => {
-          state.routeTimetableError = error.message || "Could not load timetable";
-          return [];
-        }),
       ]);
-      // FlixBus hides plates on journeys — Vehicles tab must still list coaches running now.
+      if (!stillThisService()) return;
       state.routeVehicles = coach ? mergeRouteVehiclesWithLive(vehicles, live, service) : vehicles;
       state.routeLiveCount = live.length;
-      state.routeTimetable = trips;
-      state.routeTimetableLoading = Boolean(trips.length);
       setLoading(false);
-      if (trips.length) {
-        enrichTripsWithStopTimes(trips)
-          .then((enriched) => {
-            if (String(state.routeService?.id) !== id) return;
-            state.routeTimetable = enriched;
-            state.routeTimetableLoading = false;
-            if (state.view === "route") render();
-          })
-          .catch((error) => {
-            if (String(state.routeService?.id) !== id) return;
-            state.routeTimetableLoading = false;
-            state.routeTimetableError = error.message || "Could not load stop times";
-            if (state.view === "route") render();
-          });
-      } else {
-        state.routeTimetableLoading = false;
-      }
     } catch (error) {
       state.routeVehicles = [];
       state.routeLiveCount = 0;
@@ -3597,18 +5035,26 @@ export function createFleetBrowser({
       const cache = await ensureAtLive(0);
       state.atMeta = cache.meta.get(code) || AT_ROUTES.find((row) => row.line === code) || { line: code };
       const liveEntries = [...(cache.byLine.get(code) || [])];
-      const [, dayVehicles, trips] = await Promise.all([
+      fetchAtTimetableTrips(code, state.date)
+        .then((trips) => {
+          if (state.view !== "at-route" || String(state.atLine || "").toUpperCase() !== code) return;
+          state.routeTimetable = trips;
+          state.routeTimetableLoading = false;
+          render();
+        })
+        .catch((error) => {
+          if (state.view !== "at-route" || String(state.atLine || "").toUpperCase() !== code) return;
+          state.routeTimetable = [];
+          state.routeTimetableLoading = false;
+          state.routeTimetableError = error.message || "Could not load timetable";
+          render();
+        });
+      const [, dayVehicles] = await Promise.all([
         Promise.all(liveEntries.map((entry) => resolveAtVehicleId(entry))),
         fetchAtVehiclesForDay(code, state.date),
-        fetchAtTimetableTrips(code, state.date).catch((error) => {
-          state.routeTimetableError = error.message || "Could not load timetable";
-          return [];
-        }),
       ]);
       state.atVehicles = liveEntries;
       state.atDayVehicles = dayVehicles;
-      state.routeTimetable = trips;
-      state.routeTimetableLoading = false;
       setLoading(false);
     } catch (error) {
       state.routeTimetable = [];
@@ -3699,90 +5145,469 @@ export function createFleetBrowser({
     setLoading(true);
     const wantRoutes = isRouteCatalogueOperator(op.noc);
     if (wantRoutes) state.operatorRoutesLoading = true;
+    void fetchOperatorLiveMap(op.noc).catch(() => {});
+    const opSlug = op.slug;
+    let liveAttached = false;
+    const bumpLive = (rows) => {
+      attachLastRoutes(
+        rows,
+        () => {
+          if (state.view === "operator" && state.operator?.slug === opSlug) render();
+        },
+        { operatorNoc: op.noc, fetchHistory: false },
+      );
+    };
+    if (wantRoutes) {
+      fetchAllOperatorServices(op.noc)
+        .catch(() => [])
+        .then((routes) => {
+          if (state.operator?.slug !== opSlug || state.view !== "operator") return;
+          const list = [...routes];
+          if (String(op.noc).toUpperCase() === "DAGC") {
+            for (const at of AT_ROUTES) {
+              if (!list.some((row) => sameLineCode(row.line_name, at.line))) {
+                list.unshift({
+                  id: `at:${at.line}`,
+                  line_name: at.line,
+                  description: `${at.name} · ${at.origin || ""} → ${at.destination || "Alton Towers"}`,
+                  _at: true,
+                });
+              }
+            }
+            list.sort((a, b) => {
+              const aAt = Boolean(a._at);
+              const bAt = Boolean(b._at);
+              if (aAt !== bAt) return aAt ? -1 : 1;
+              return compareLineNames(a.line_name, b.line_name);
+            });
+          }
+          state.operatorRoutes = list;
+          state.operatorRoutesLoading = false;
+          render();
+          const day = ukDateKey();
+          for (const row of list.slice(0, 8)) {
+            const sid = String(row.id || "");
+            if (!sid || sid.startsWith("at:")) continue;
+            fetchServiceTimetableTrips(sid, day).catch(() => {});
+          }
+          if (String(op.noc).toUpperCase() === "DAGC") {
+            for (const at of AT_ROUTES) fetchAtTimetableTrips(at.line).catch(() => {});
+          }
+        });
+    }
     try {
-      const vehiclePromise = fetchAllOperatorVehicles(op.noc, { search: state.query });
-      const routesPromise = wantRoutes
-        ? fetchAllOperatorServices(op.noc).catch(() => [])
-        : Promise.resolve([]);
-      const [data, routes] = await Promise.all([vehiclePromise, routesPromise]);
+      const data = await fetchAllOperatorVehicles(op.noc, {
+        search: state.query,
+        onPage(results, count, done) {
+          if (state.operator?.slug !== opSlug || state.view !== "operator") return;
+          state.vehicles = results;
+          state.vehicleCount = count || results.length;
+          state.vehicleOffset = results.length;
+          state.loading = false;
+          state.error = "";
+          render();
+          if (!liveAttached || done) {
+            liveAttached = true;
+            bumpLive(results);
+          }
+        },
+      });
       const batch = data.results || [];
       state.vehicles = batch;
       state.vehicleCount = data.count || batch.length;
       state.vehicleOffset = batch.length;
-      if (wantRoutes) {
-        const list = [...routes];
-        if (String(op.noc).toUpperCase() === "DAGC") {
-          for (const at of AT_ROUTES) {
-            if (!list.some((row) => sameLineCode(row.line_name, at.line))) {
-              list.unshift({
-                id: `at:${at.line}`,
-                line_name: at.line,
-                description: `${at.name} · ${at.origin || ""} → ${at.destination || "Alton Towers"}`,
-                _at: true,
-              });
-            }
-          }
-          list.sort((a, b) => {
-            const aAt = Boolean(a._at);
-            const bAt = Boolean(b._at);
-            if (aAt !== bAt) return aAt ? -1 : 1;
-            return compareLineNames(a.line_name, b.line_name);
-          });
-        }
-        state.operatorRoutes = list;
-        state.operatorRoutesLoading = false;
-      }
       setLoading(false);
-      attachLastRoutes(batch, () => {
-        if (state.view === "operator") render();
-      });
+      bumpLive(batch);
     } catch (error) {
       state.operatorRoutesLoading = false;
       setLoading(false, error.message || "Could not load vehicles");
     }
   }
 
-  async function showVehicle(id, date = state.date, opts = {}) {
-    const hasLineOpt = Object.prototype.hasOwnProperty.call(opts, "line");
-    if (hasLineOpt) {
-      state.lineFilter = String(opts.line || "").trim();
-    } else if (String(state.vehicle?.id) !== String(id)) {
-      state.lineFilter = state.schoolLine || state.matchdayLine || state.atLine || "";
+  let vehicleLoadToken = 0;
+
+  function resolveOperatorFromVehicle(vehicle, seed = null) {
+    return (
+      STAFFS_OPERATORS.find(
+        (op) =>
+          op.slug === vehicle?.operator?.slug ||
+          op.noc === vehicle?.operator?.id ||
+          op.slug === seed?.operator?.slug ||
+          op.noc === seed?.operator?.id ||
+          op.noc === seed?.operator?.noc,
+      ) || {
+        name: vehicle?.operator?.name || seed?.operator?.name || "Operator",
+        slug: vehicle?.operator?.slug || seed?.operator?.slug || "",
+        noc: vehicle?.operator?.id || seed?.operator?.noc || seed?.operator?.id || null,
+      }
+    );
+  }
+
+  function buildSeedVehicle(id, seed = {}) {
+    const fleetCode = seed.fleet || seed.fleet_code || "";
+    const plate = seed.reg || "";
+    const line = seed.line || seed.lastRoute?.route || "";
+    return {
+      id: id || seed.id || "",
+      reg: plate,
+      fleet_code: fleetCode,
+      fleet_number: fleetCode,
+      branding: seed.branding || "",
+      previous_reg: seed.previous_reg || "",
+      livery: seed.livery || null,
+      vehicle_type: seed.vehicle_type || null,
+      operator: seed.operator || { name: "Operator", slug: "", id: null },
+      lastRoute:
+        seed.lastRoute ||
+        (line
+          ? {
+              route: line,
+              dest: seed.dest || "",
+              live: true,
+              trackedAt: seed.trackedAt || new Date().toISOString(),
+            }
+          : null),
+      _seed: true,
+    };
+  }
+
+  /** Immediate fleet vehicle shell from map popup data — does not wait on bustimes. */
+  function showVehiclePending(seed = {}) {
+    const token = ++vehicleLoadToken;
+    state.photo = null;
+    state.photoPending = false;
+    state.photoStatus = "";
+    state.photoLoading = Boolean(seed.reg);
+    state.view = "vehicle";
+    state.vehicle = buildSeedVehicle(seed.id || "", seed);
+    state.operator = resolveOperatorFromVehicle(state.vehicle, seed);
+    state.date = state.date || ukDateKey();
+    state.journeys = [];
+    state.allJourneys = [];
+    state.loading = true;
+    state.error = "";
+    render();
+    if (seed.reg) loadVehiclePhoto(state.vehicle);
+    return token;
+  }
+
+  function applyJourneysToState(vehicle, journeys, lineFilter) {
+    state.allJourneys = journeys;
+    state.journeys = filterJourneysByLine(journeys, lineFilter);
+    state.vehicle = vehicle;
+    state.loading = false;
+    state.error = "";
+    if (state.vehicleRoutes.length) {
+      state.vehicleRoutes = unionRouteLines(state.vehicleRoutes, journeys);
     }
+    render();
+  }
+
+  async function mergeAtHistoryDeferred({
+    token,
+    vehicle,
+    date,
+    at,
+    lineFilter,
+    journeys,
+  }) {
+    const atLineFilter = AT_LINE_SET.has(String(lineFilter || "").toUpperCase())
+      ? String(lineFilter).toUpperCase()
+      : "";
+    const isDg =
+      String(vehicle.operator?.id || vehicle.operator?.noc || "").toUpperCase() === "DAGC" ||
+      /d-g-coach|D\s*&\s*G/i.test(`${vehicle.operator?.slug || ""} ${vehicle.operator?.name || ""}`);
+    if (!(atLineFilter || at || isDg)) return;
+    const regKey = compactQuery(vehicle.reg);
+    const trailKeys = [
+      at?.ref ? `staff-${at.ref}` : "",
+      String(vehicle.id || ""),
+      regKey && /^[A-Z0-9]+$/.test(regKey) ? `reg:${regKey}` : "",
+    ].filter(Boolean);
+    try {
+      const atRows = await fetchAtHistoryFromTrails({
+        trailKeys,
+        line: atLineFilter || "",
+        date,
+        days: 7,
+      });
+      if (token !== vehicleLoadToken || String(state.vehicle?.id) !== String(vehicle.id)) return;
+      const defaultTrail =
+        (at?.ref ? `staff-${at.ref}` : "") || String(vehicle.id || "");
+      const base = Array.isArray(state.allJourneys) && state.allJourneys.length ? state.allJourneys : journeys;
+      const merged = mergeAtHistoryRows(base, atRows).map((row) => ({
+        ...row,
+        trailKey: row.trailKey || defaultTrail,
+      }));
+      applyJourneysToState(vehicle, merged, state.lineFilter);
+    } catch {
+      // AT trail history is optional enrichment.
+    }
+  }
+
+  /** FlixBus vehicle day view — GPS trail store only (no bustimes.org journeys). */
+  async function mergeFlixHistoryDeferred({ token, vehicle, date, lineFilter, journeys }) {
+    const noc = String(vehicle.operator?.noc || vehicle.operator?.id || "").toUpperCase();
+    const isFlix =
+      noc === "FLIX" ||
+      /flix/i.test(`${vehicle.operator?.slug || ""} ${vehicle.operator?.name || ""}`);
+    if (!isFlix) return;
+    const regKey = compactQuery(vehicle.reg);
+    const trailKeys = [
+      String(vehicle.id || ""),
+      /^\d+$/.test(String(vehicle.id || "")) ? `jny:${vehicle.id}` : "",
+      regKey && /^[A-Z0-9]+$/.test(regKey) ? `reg:${regKey}` : "",
+    ].filter(Boolean);
+    try {
+      const coachRows = await fetchCoachHistoryFromTrails({
+        trailKeys,
+        line: String(lineFilter || "").trim(),
+        days: 7,
+        operator: "FLIX",
+      });
+      if (token !== vehicleLoadToken || String(state.vehicle?.id) !== String(vehicle.id)) return;
+      const filtered = date
+        ? coachRows.filter((row) => !row.date || row.date === date)
+        : coachRows;
+      const base = Array.isArray(state.allJourneys) && state.allJourneys.length ? state.allJourneys : journeys;
+      const merged = mergeAtHistoryRows(base, filtered).map((row) => ({
+        ...row,
+        trailKey: row.trailKey || String(vehicle.id || ""),
+      }));
+      applyJourneysToState(vehicle, merged, state.lineFilter);
+    } catch {
+      // Flix GPS history optional.
+    }
+  }
+
+  /**
+   * First Potteries / Staffordshire locals: merge GPS-trail run history into the
+   * bustimes day view (dead runs, positioning legs and journeys bustimes lacks).
+   * Mirrors the map popup's isStaffsBusTrail merge.
+   */
+  async function mergeStaffsHistoryDeferred({ token, vehicle, date, lineFilter, journeys }) {
+    const noc = String(
+      vehicle.operator?.noc || vehicle.operator?.id || state.operator?.noc || "",
+    ).toUpperCase();
+    const staffsNocs = new Set(STAFFS_OPERATORS.map((op) => op.noc).filter(Boolean));
+    const isStaffs = staffsNocs.has(noc);
+    if (!isStaffs) return;
+    const regKey = compactQuery(vehicle.reg);
+    const idKey = String(vehicle.id || "").trim();
+    // Trail store keys: reg:YY16YLX and the raw BODS id bods-FPOT-FPOT-YY16_YLX.
+    const bodsKey =
+      regKey && /^[A-Z]{2}\d{2}[A-Z]{3}$/.test(regKey)
+        ? `bods-${noc}-${noc}-${regKey.slice(0, 4)}_${regKey.slice(4)}`
+        : "";
+    const trailKeys = [
+      idKey,
+      regKey && /^[A-Z0-9]+$/.test(regKey) ? `reg:${regKey}` : "",
+      bodsKey,
+    ].filter(Boolean);
+    if (!trailKeys.length) return;
+    try {
+      const coachRows = await fetchCoachHistoryFromTrails({
+        trailKeys,
+        line: String(lineFilter || "").trim(),
+        days: 7,
+        operator: noc,
+        busMode: true,
+      });
+      if (token !== vehicleLoadToken || String(state.vehicle?.id) !== String(vehicle.id)) return;
+      const filtered = date
+        ? coachRows.filter((row) => !row.date || row.date === date)
+        : coachRows;
+      if (!filtered.length) return;
+      const base = Array.isArray(state.allJourneys) && state.allJourneys.length ? state.allJourneys : journeys;
+      const merged = mergeAtHistoryRows(base, filtered).map((row) => ({
+        ...row,
+        trailKey: row.trailKey || idKey || `reg:${regKey}`,
+      }));
+      applyJourneysToState(vehicle, merged, state.lineFilter);
+    } catch {
+      // Staffs GPS history optional.
+    }
+  }
+
+  async function showVehicle(id, date = state.date, opts = {}) {
+    // Vehicle day view always lists every route for that day (no per-line chips).
+    state.lineFilter = "";
+    const seed = opts.seed || null;
+    const token = ++vehicleLoadToken;
     state.photo = null;
     state.photoPending = false;
     state.photoStatus = "";
     state.photoLoading = true;
-    setLoading(true);
-    try {
-      const vehicle = await fetchVehicle(id);
-      lastRouteCache.delete(String(vehicle.id));
-      vehicle.lastRoute = await fetchLastRoute(vehicle);
+    state.date = date;
+    state.error = "";
+    if (String(state.vehicle?.id) !== String(id)) {
+      state.vehicleRoutes = [];
+      state.vehicleRoutesLoading = true;
+    }
+
+    // First paint: shell from map/live seed (or keep prior vehicle if same id) before network.
+    if (seed || String(state.vehicle?.id) === String(id)) {
       state.view = "vehicle";
-      state.vehicle = vehicle;
-      state.date = date;
-      state.operator =
-        STAFFS_OPERATORS.find((op) => op.slug === vehicle.operator?.slug || op.noc === vehicle.operator?.id) ||
-        {
-          name: vehicle.operator?.name || "Operator",
-          slug: vehicle.operator?.slug || "",
-          noc: vehicle.operator?.id || null,
+      if (seed) {
+        const prior =
+          state.vehicle && String(state.vehicle.id) === String(id) && !state.vehicle._seed
+            ? state.vehicle
+            : null;
+        state.vehicle = {
+          ...(prior || {}),
+          ...buildSeedVehicle(id, seed),
+          id,
+          // Prefer real prior meta when we already have a full record for this id.
+          ...(prior
+            ? {
+                livery: prior.livery || seed.livery || null,
+                vehicle_type: prior.vehicle_type || seed.vehicle_type || null,
+                branding: prior.branding || seed.branding || "",
+                previous_reg: prior.previous_reg || seed.previous_reg || "",
+                operator: prior.operator || seed.operator || null,
+              }
+            : {}),
         };
+        state.operator = resolveOperatorFromVehicle(state.vehicle, seed);
+      }
+      state.journeys = [];
+      state.allJourneys = [];
+      state.loading = true;
+      render();
+    } else {
+      // Fleet list / date change — still paint a minimal card shell immediately.
+      state.view = "vehicle";
+      state.vehicle = {
+        id,
+        reg: "",
+        fleet_code: "",
+        operator: state.operator || { name: "Operator", slug: "", id: null },
+        lastRoute: null,
+        _seed: true,
+      };
+      state.journeys = [];
+      state.allJourneys = [];
+      state.loading = true;
+      state.error = "";
+      render();
+    }
+
+    try {
+      // Vehicle detail + live AVL in parallel (skip serial lastRoute / duplicate live fetch).
+      let vehicle = null;
       let liveBus = null;
       try {
-        const liveRes = await fetch(`/api/vehicles?id=${encodeURIComponent(vehicle.id)}`);
-        if (liveRes.ok) {
-          const live = await liveRes.json();
-          const rows = Array.isArray(live) ? live : [];
-          liveBus =
-            rows.find((item) => String(item.id) === String(vehicle.id)) || rows[0] || null;
-        }
-      } catch {
-        // Live AVL optional — history still loads from journeys.
+        [vehicle, liveBus] = await Promise.all([
+          fetchVehicle(id),
+          fetchLiveVehicleById(id),
+        ]);
+      } catch (detailError) {
+        liveBus = await fetchLiveVehicleById(id).catch(() => null);
+        const flixSeed =
+          seed ||
+          (liveBus &&
+          (/flix/i.test(
+            `${liveBus.operator?.name || ""} ${liveBus.operator?.noc || liveBus.operator?.id || ""} ${liveBus.vehicle?.name || ""}`,
+          ) ||
+            String(liveBus.operator?.noc || liveBus.operator?.id || liveBus._bods?.operator || "")
+              .toUpperCase() === "FLIX")
+            ? {
+                id,
+                line: liveBus.service?.line_name || "",
+                dest: liveBus.destination || "",
+                reg: liveBus.vehicle?.reg || "",
+                operator: {
+                  name: "FlixBus",
+                  slug: "flixbus",
+                  noc: "FLIX",
+                  id: "FLIX",
+                },
+                trackedAt: liveBus.datetime || "",
+              }
+            : null);
+        if (!flixSeed) throw detailError;
+        vehicle = buildSeedVehicle(id, flixSeed);
+        vehicle.operator = {
+          name: "FlixBus",
+          slug: "flixbus",
+          noc: "FLIX",
+          id: "FLIX",
+        };
       }
-      let journeys = (await fetchVehicleJourneys(vehicle.id, date)).map((row) =>
-        enrichJourneyRow(row, liveBus),
-      );
+      if (token !== vehicleLoadToken) return;
+
+      lastRouteCache.delete(String(vehicle.id));
+      if (liveBus && (liveBus.service?.line_name || liveBus.destination || liveBus.datetime)) {
+        vehicle.lastRoute = {
+          route: extractRouteFromVehicle(liveBus) || liveBus.service?.line_name || "",
+          dest: liveBus.destination || "",
+          live: true,
+          diverted: isDivertedText(liveBus.destination, liveBus.service?.line_name),
+          trackedAt: liveBus.datetime || new Date().toISOString(),
+          direction: directionFromJourneyRow(liveBus),
+        };
+      } else if (seed?.lastRoute || seed?.line) {
+        vehicle.lastRoute =
+          seed.lastRoute ||
+          {
+            route: seed.line || "",
+            dest: seed.dest || "",
+            live: true,
+            trackedAt: seed.trackedAt || "",
+          };
+      }
+
+      // Ensure Flix operator meta even when bustimes vehicle record is missing.
+      const seedIsFlix =
+        seed &&
+        (/flix/i.test(`${seed.operator?.name || seed.operator || seed.operatorName || ""}`) ||
+          String(seed.operator?.noc || seed.operator?.id || "").toUpperCase() === "FLIX");
+      if (
+        seedIsFlix ||
+        String(liveBus?.operator?.noc || liveBus?._bods?.operator || "").toUpperCase() === "FLIX"
+      ) {
+        vehicle.operator = {
+          ...(vehicle.operator || {}),
+          name: "FlixBus",
+          slug: "flixbus",
+          noc: "FLIX",
+          id: vehicle.operator?.id || "FLIX",
+        };
+      }
+
+      state.view = "vehicle";
+      state.vehicle = vehicle;
+      state.operator = resolveOperatorFromVehicle(vehicle, seed) || state.operator;
+      state.loading = true;
+      render(); // Shell with full bustimes meta; journeys still loading
+      loadVehiclePhoto(vehicle);
+
+      // Warm lastRoute cache in background when live AVL missed (do not block paint).
+      if (!vehicle.lastRoute) {
+        fetchLastRoute(vehicle)
+          .then((route) => {
+            if (token !== vehicleLoadToken || !route) return;
+            if (String(state.vehicle?.id) !== String(vehicle.id)) return;
+            if (state.vehicle.lastRoute) return;
+            state.vehicle.lastRoute = route;
+            render();
+          })
+          .catch(() => {});
+      }
+
+      let journeys = [];
+      const vehicleNoc = String(vehicle.operator?.noc || vehicle.operator?.id || "").toUpperCase();
+      const isFlixVehicle =
+        vehicleNoc === "FLIX" ||
+        /flix/i.test(`${vehicle.operator?.slug || ""} ${vehicle.operator?.name || ""}`) ||
+        seedIsFlix;
+      if (!isFlixVehicle) {
+        journeys = (await fetchVehicleJourneys(vehicle.id, date)).map((row) =>
+          enrichJourneyRow(row, liveBus),
+        );
+      }
+      if (token !== vehicleLoadToken) return;
+
       if (liveBus && date === ukDateKey()) {
         const liveRow = liveVehicleAsHistoryRow(liveBus, {
           trailKey: String(vehicle.id || ""),
@@ -3801,6 +5626,8 @@ export function createFleetBrowser({
           }
         }
       }
+
+      // AT live match is cheap if cache warm; do not await a cold ensureAtLive here.
       const at = matchAtLive(vehicle);
       if (at && date === ukDateKey()) {
         const trailKey = at.ref ? `staff-${at.ref}` : "";
@@ -3862,40 +5689,77 @@ export function createFleetBrowser({
         };
       }
 
-      // AT1–AT3 history comes from the server trail recorder (not Bustimes).
-      // Always merge for D&G vehicles so AT routes appear alongside public routes (1, 32, …).
-      const atLineFilter = AT_LINE_SET.has(String(state.lineFilter || "").toUpperCase())
-        ? String(state.lineFilter).toUpperCase()
-        : "";
-      const isDg =
-        String(vehicle.operator?.id || vehicle.operator?.noc || "").toUpperCase() === "DAGC" ||
-        /d-g-coach|D\s*&\s*G/i.test(`${vehicle.operator?.slug || ""} ${vehicle.operator?.name || ""}`);
-      if (atLineFilter || at || isDg) {
-        const regKey = compactQuery(vehicle.reg);
-        const trailKeys = [
-          at?.ref ? `staff-${at.ref}` : "",
-          String(vehicle.id || ""),
-          regKey && /^[A-Z0-9]+$/.test(regKey) ? `reg:${regKey}` : "",
-        ].filter(Boolean);
-        const atRows = await fetchAtHistoryFromTrails({
-          trailKeys,
-          line: atLineFilter || "",
-          date,
-          days: 7,
-        });
-        journeys = mergeAtHistoryRows(journeys, atRows);
-      }
-
-      // Allow Map on finished journeys via tracked GPS even without a trip shape.
+      const defaultTrail = (at?.ref ? `staff-${at.ref}` : "") || String(vehicle.id || "");
       journeys = journeys.map((row) => ({
         ...row,
-        trailKey: row.trailKey || (at?.ref ? `staff-${at.ref}` : "") || String(vehicle.id || ""),
+        trailKey: row.trailKey || defaultTrail,
       }));
-      state.allJourneys = journeys;
-      state.journeys = filterJourneysByLine(journeys, state.lineFilter);
-      setLoading(false);
-      loadVehiclePhoto(vehicle);
+
+      // Paint today's bustimes journeys immediately — do not wait on 7-day AT trails.
+      applyJourneysToState(vehicle, journeys, state.lineFilter);
+      void loadVehicleRouteSummary(vehicle);
+
+      void mergeAtHistoryDeferred({
+        token,
+        vehicle,
+        date,
+        at,
+        lineFilter: state.lineFilter,
+        journeys,
+      });
+
+      void mergeFlixHistoryDeferred({
+        token,
+        vehicle,
+        date,
+        lineFilter: state.lineFilter,
+        journeys,
+      });
+
+      void mergeStaffsHistoryDeferred({
+        token,
+        vehicle,
+        date,
+        lineFilter: state.lineFilter,
+        journeys,
+      });
+
+      // If AT cache was cold, refresh in background and re-merge live AT row when ready.
+      if (!at) {
+        const isDg =
+          String(vehicle.operator?.id || vehicle.operator?.noc || "").toUpperCase() === "DAGC" ||
+          /d-g-coach|D\s*&\s*G/i.test(`${vehicle.operator?.slug || ""} ${vehicle.operator?.name || ""}`);
+        if (isDg) {
+          ensureAtLive()
+            .then(() => {
+              if (token !== vehicleLoadToken) return;
+              const lateAt = matchAtLive(vehicle);
+              if (!lateAt || date !== ukDateKey()) return;
+              void mergeAtHistoryDeferred({
+                token,
+                vehicle,
+                date,
+                at: lateAt,
+                lineFilter: state.lineFilter,
+                journeys: state.allJourneys || journeys,
+              });
+              if (String(state.vehicle?.id) === String(vehicle.id)) {
+                state.vehicle.lastRoute = {
+                  route: lateAt.line,
+                  dest: lateAt.dest,
+                  live: true,
+                  at: true,
+                  trackedAt: lateAt.recordedAtTime || new Date().toISOString(),
+                  direction: normalizeFleetDirection(lateAt.direction || lateAt.directionRef || ""),
+                };
+                render();
+              }
+            })
+            .catch(() => {});
+        }
+      }
     } catch (error) {
+      if (token !== vehicleLoadToken) return;
       const msg = String(error?.message || "");
       if (/Request failed \(404\)/i.test(msg)) {
         setLoading(false, "Vehicle not found — open FlixBus or National Express from the Fleet list");
@@ -3927,29 +5791,29 @@ export function createFleetBrowser({
       const oneId = btn.dataset.vehicleId || "";
       const oneTrail = btn.dataset.trailKey || "";
       const oneReg = btn.dataset.reg || "";
-      // For Flix / NATX / D&G / First Potteries / Stanton's / AT1–AT3 always focus one bus.
+      // Flix / NATX / D&G / First Potteries / Stanton's / AT1–AT3: prefer one bus when known.
       const forceSingle =
         isSingleVehicleRouteOperator(operator) || AT_LINE_SET.has(String(line || "").toUpperCase());
-      const vehicles =
-        oneId || oneTrail || oneReg || forceSingle
-          ? []
-          : state.routeVehicles?.length
-            ? (() => {
-                // routeVehicles is one row per trip — dedupe to one bus for Map · tails.
-                const byBus = new Map();
-                for (const row of state.routeVehicles) {
-                  if (!sameServiceLine(row.route_name || row.line || line, line)) continue;
-                  const id = String(row.id || row.btId || "");
-                  if (!id || byBus.has(id)) continue;
-                  byBus.set(id, row);
-                }
-                return [...byBus.values()];
-              })()
-            : state.atVehicles?.length
-              ? state.atVehicles.filter((v) => sameServiceLine(v.line || line, line))
-              : state.schoolVehicles?.length
-                ? state.schoolVehicles.filter((v) => sameServiceLine(v.line || line, line))
-                : (state.matchdayVehicles || []).filter((v) => sameServiceLine(v.line || line, line));
+      const dedupeRouteVehicles = (rows) => {
+        const byBus = new Map();
+        for (const row of rows || []) {
+          if (!sameServiceLine(row.route_name || row.line || line, line)) continue;
+          const id = String(row.id || row.btId || row.vehicleId || "");
+          if (!id || byBus.has(id)) continue;
+          byBus.set(id, row);
+        }
+        return [...byBus.values()];
+      };
+      let vehicles = [];
+      if (!(oneId || oneTrail || oneReg || (forceSingle && state.vehicle?.id))) {
+        vehicles = state.routeVehicles?.length
+          ? dedupeRouteVehicles(state.routeVehicles)
+          : state.atVehicles?.length
+            ? state.atVehicles.filter((v) => sameServiceLine(v.line || line, line))
+            : state.schoolVehicles?.length
+              ? state.schoolVehicles.filter((v) => sameServiceLine(v.line || line, line))
+              : dedupeRouteVehicles(state.matchdayVehicles || []);
+      }
       onShowRouteTails?.({
         line,
         operator,
@@ -3970,37 +5834,34 @@ export function createFleetBrowser({
       beginFleetPhotoUpload(btn);
       return;
     }
+    if (action === "save-vehicle") {
+      event.preventDefault();
+      event.stopPropagation();
+      const vehicle =
+        state.vehicle && String(state.vehicle.id) === String(btn.dataset.id || state.vehicle.id)
+          ? state.vehicle
+          : { id: btn.dataset.id, reg: btn.dataset.reg, fleet: btn.dataset.fleet };
+      upsertSavedVehicle(vehicle, state.vehicleRoutes.length ? state.vehicleRoutes : null);
+      if (!state.vehicleRoutes.length && vehicle.id) void loadVehicleRouteSummary(vehicle);
+      else render();
+      return;
+    }
+    if (action === "remove-saved-vehicle") {
+      event.preventDefault();
+      event.stopPropagation();
+      removeSavedVehicle(btn.dataset.id, btn.dataset.reg);
+      render();
+      return;
+    }
     if (action === "home") showHome("");
     if (action === "back") goBack();
     if (action === "open-operator") showOperator(btn.dataset.arg || btn.dataset.slug);
     if (action === "open-at-route") showAtRoute(btn.dataset.line);
     if (action === "open-school-route") showSchoolRoute(btn.dataset.line);
-    if (action === "filter-vehicle-line") {
-      event.preventDefault();
-      event.stopPropagation();
-      if (!state.vehicle?.id) return;
-      showVehicle(state.vehicle.id, state.date, { line: btn.dataset.line || "" });
-      return;
-    }
-    if (action === "clear-vehicle-line") {
-      event.preventDefault();
-      event.stopPropagation();
-      if (!state.vehicle?.id) return;
-      showVehicle(state.vehicle.id, state.date, { line: "" });
-      return;
-    }
     if (action === "open-matchday-route") showMatchdayRoute(btn.dataset.line);
     if (action === "open-route-service") showRouteService(btn.dataset.arg);
     if (action === "open-vehicle") {
-      showVehicle(btn.dataset.id, state.date, {
-        line:
-          btn.dataset.line ||
-          state.routeLine ||
-          state.atLine ||
-          state.schoolLine ||
-          state.matchdayLine ||
-          "",
-      });
+      showVehicle(btn.dataset.id, state.date);
     }
     if (action === "more-vehicles" && state.operator) showOperator(state.operator.slug, { reset: false });
     if (action === "track-vehicle" || action === "track-at") {
@@ -4010,15 +5871,11 @@ export function createFleetBrowser({
         fleet: btn.dataset.fleet,
         ref: btn.dataset.ref,
         line: btn.dataset.line,
+        lat: btn.dataset.lat,
+        lng: btn.dataset.lng,
       });
     }
     if (action === "play-journey") {
-      const line = String(btn.dataset.line || "").trim();
-      if (line && state.view === "vehicle") {
-        state.lineFilter = line;
-        state.journeys = filterJourneysByLine(state.allJourneys || [], line);
-        render();
-      }
       onPlayJourney?.({
         tripId: btn.dataset.tripId,
         journeyId: btn.dataset.journeyId,
@@ -4032,6 +5889,14 @@ export function createFleetBrowser({
         datetime: btn.dataset.datetime,
       });
     }
+  });
+
+  root.addEventListener("submit", (event) => {
+    const form = event.target.closest?.("#fleet-add-vehicle-form");
+    if (!form || !root.contains(form)) return;
+    event.preventDefault();
+    const query = form.querySelector("#fleet-add-vehicle-query")?.value.trim() || "";
+    addSavedVehicleByQuery(query);
   });
 
   root.addEventListener("keydown", (event) => {
@@ -4062,12 +5927,14 @@ export function createFleetBrowser({
     btn.addEventListener("click", () => setTab(btn.dataset.fleetTab));
   });
 
-  showHome("");
+  // Lightweight first paint — no AT/school live network until Fleet is opened.
+  showHome("", { fetchLive: false });
 
   return {
     showHome,
     showOperator,
     showVehicle,
+    showVehiclePending,
     showAtRoute,
     showSchoolRoute,
     showMatchdayRoute,
@@ -4079,6 +5946,24 @@ export function createFleetBrowser({
     },
     searchRoute(line) {
       return showRouteLine(line);
+    },
+    addVehicleReg(query) {
+      return addSavedVehicleByQuery(query);
+    },
+    /** Call when Fleet panel becomes visible so live AT/school cards can load. */
+    wake() {
+      if (state.view !== "home") return Promise.resolve();
+      const atFresh = Date.now() - atLiveCache.at < 20000 && atLiveCache.meta.size;
+      const schoolFresh = Date.now() - schoolLiveCache.at < 15000 && schoolLiveCache.meta.size;
+      const oosFresh = Date.now() - fpotOosLiveCache.at < 15000 && fpotOosLiveCache.at > 0;
+      const dgOosFresh = Date.now() - dgOosLiveCache.at < 15000 && dgOosLiveCache.at > 0;
+      const deadRunsFresh =
+        Date.now() - deadRunsHistoryCache.at < 60_000 && deadRunsHistoryCache.at > 0;
+      if (atFresh && schoolFresh && oosFresh && dgOosFresh && deadRunsFresh) {
+        void refreshSavedVehicleSummaries();
+        return Promise.resolve();
+      }
+      return refreshFleetHomeLive();
     },
     getState: () => ({ ...state }),
   };

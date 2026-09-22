@@ -1,0 +1,9 @@
+verify cbbc9857-2ade-4505-9332-365ddcd84d56
+verifyStatus=200
+{"object":"domain","id":"cbbc9857-2ade-4505-9332-365ddcd84d56"}
+poll1 status=pending
+poll2 status=pending
+poll3 status=pending
+poll4 status=pending
+poll5 status=pending
+poll6 status=verified

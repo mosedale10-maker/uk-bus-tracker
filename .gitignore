@@ -8,4 +8,10 @@ dist
 data/trails/
 data/pg/
 data/pc-database.url
+data/pc-env.cache.json
+data/maintenance.on
+logs/
 scripts/_empty.bin
+
+.tmp-ssh-setup/
+
