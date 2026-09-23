@@ -3918,12 +3918,12 @@ export function createFleetBrowser({
         <h2 class="fleet-section-title">Alton Towers employee-only routes</h2>
         <ul class="fleet-list">
           ${atRoutes
-            .map((row) => {
+            .map((row, idx) => {
               const meta = atLiveCache.meta.get(row.line) || row;
               const live = meta.live || atLiveCache.byLine.get(row.line)?.length || 0;
               return `<li>
                 <button type="button" class="fleet-list-btn" data-action="open-at-route" data-line="${esc(row.line)}">
-                  <span class="fleet-list-main"><span class="fleet-route">${esc(row.line)}</span> ${esc(meta.origin || row.origin)} → ${esc(meta.destination || row.destination)}</span>
+                  <span class="fleet-list-main"><span class="fleet-route">${esc(row.line)}</span><span class="fleet-service-num">${idx + 1}</span> ${esc(meta.origin || row.origin)} → ${esc(meta.destination || row.destination)}</span>
                   <span class="fleet-list-sub">${live ? `${live} live now · D&G Bus` : "D&G Bus employee-only service"}</span>
                 </button>
               </li>`;
