@@ -183,8 +183,8 @@ export function startFirstStream() {
   // force-close it so the reconnect logic opens a fresh connection.
   setInterval(() => {
     if (Date.now() - lastFrameAt > 45_000 && ws && ws.readyState === WebSocket.OPEN) {
-      console.log("[first-stream] no frames for 45s, closing socket");
-      ws.close();
+      console.log("[first-stream] no frames for 45s, terminating socket");
+      ws.terminate();
     }
   }, 30_000);
 }
