@@ -3901,12 +3901,12 @@ export function createFleetBrowser({
         <p class="fleet-muted fleet-section-note">First Potteries BS1–BS2 matchday shuttles to bet365 Stadium. Live on the map when buses are running (usually from 90 minutes before kick-off).</p>
         <ul class="fleet-list">
           ${matchdayRoutes
-            .map((row) => {
+            .map((row, idx) => {
               const meta = matchdayLiveCache.meta.get(row.line) || row;
               const live = meta.live || matchdayLiveCache.byLine.get(row.line)?.length || 0;
               return `<li>
                 <button type="button" class="fleet-list-btn" data-action="open-matchday-route" data-line="${esc(row.line)}">
-                  <span class="fleet-list-main"><span class="fleet-route fleet-route-scfc">${esc(row.line)}</span> ${esc(row.name)}</span>
+                  <span class="fleet-list-main"><span class="fleet-route fleet-route-scfc">${esc(row.line)}</span><span class="fleet-service-num">${idx + 1}</span> ${esc(row.name)}</span>
                   <span class="fleet-list-sub">${live ? `${live} live now · ${esc(row.operator)}` : `${esc(row.operator)} · matchday shuttle`}</span>
                 </button>
               </li>`;
