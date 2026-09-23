@@ -2126,6 +2126,8 @@ function selectMapMarker(marker) {
   });
   if (marker.bus) enrichBustimes(marker);
   else if (marker.staff) enrichStaff(marker);
+  // Load First seat counts immediately on selection (bypass the 60s cooldown on first click).
+  refreshFirstOccupancyIfDue(marker);
 }
 
 function clearMapMarkerSelection({ keepPlayback = false } = {}) {
