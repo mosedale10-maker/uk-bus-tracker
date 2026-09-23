@@ -8338,11 +8338,11 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
       ${nis ? (to ? `<div class="popup-meta">Shown as ${esc(to)}</div>` : "") : routeBlock(from, to)}
       <div class="popup-actions">
         ${followButtonHtml({ bus })}
+        ${playRouteButtonHtml(bus, historyExtra)}
       </div>
       ${photoBlock(extra, { reg: photoReg, fleet, operator })}
       ${seatsBlock(bus, extra)}
       ${omitStops || nis ? "" : stopsBlock(extra.stops, lat, lng, stickyNext)}
-      ${historyBlock(historyExtra)}
       <div class="popup-details">
         <div>${metaBits.join(" · ")}</div>
         <div class="popup-details-live">${formatSpeedLiveHtml(bus.speedMph, resolveLimitMph(bus, extra, lat, lng), timeAgo(bus.datetime))}</div>
@@ -8899,7 +8899,6 @@ function staffPopup(item, extra = {}, { omitStops = false, sidePanel = false } =
         fleet: parsed.fleet || "",
         operator: "D&G Bus",
       })}
-      ${historyBlock(popupExtra)}
       <div class="popup-details">
         <div>${[
           parsed.fleet ? esc(`#${parsed.fleet}`) : "",
