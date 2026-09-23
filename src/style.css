@@ -1470,6 +1470,21 @@ html[data-plus="1"] .plus-tag {
   font-size: 0.78rem;
 }
 
+/* One-click Replay on the bus card — green to match the travelled-path overlay. */
+.replay-bus-btn {
+  border-color: #22a447;
+  color: #7ee2a8;
+}
+.replay-bus-btn:hover {
+  background: #14301f;
+}
+.replay-bus-btn.is-on {
+  background: #22a447;
+  color: #06170d;
+  border-color: #22a447;
+  font-weight: 700;
+}
+
 .history-play-btn {
   border: 0;
   background: transparent;

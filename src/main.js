@@ -1728,6 +1728,43 @@ function gpsReplayControls(show) {
   playbackSpeedEl.hidden = !on;
 }
 
+/** bustimes.org-style travelled-so-far overlay: green stroke over the indigo planned route. */
+const REPLAY_TRAVELLED_COLOR = "#22a447";
+const REPLAY_TRAVELLED_WEIGHT = 5;
+
+/** Grow the green "been here" line up to the replay cursor. */
+function gpsReplayUpdateTravelled(t) {
+  const line = gpsReplay?.travelledLine;
+  if (!line || !gpsReplay?.pts?.length) return;
+  const pts = gpsReplay.pts;
+  const latlngs = [[pts[0].lat, pts[0].lng]];
+  for (let i = 1; i < pts.length; i += 1) {
+    if (pts[i].t > t) break;
+    latlngs.push([pts[i].lat, pts[i].lng]);
+  }
+  const p = gpsReplayInterp(pts, t);
+  if (p && (!latlngs.length || latlngs[latlngs.length - 1][0] !== p.lat || latlngs[latlngs.length - 1][1] !== p.lng)) {
+    latlngs.push([p.lat, p.lng]);
+  }
+  if (latlngs.length >= 2) line.setLatLngs(latlngs);
+}
+
+function gpsReplayTravelledLine() {
+  if (!gpsReplay) return null;
+  if (gpsReplay.travelledLine) return gpsReplay.travelledLine;
+  const first = gpsReplay.pts?.[0];
+  if (!first) return null;
+  gpsReplay.travelledLine = L.polyline([[first.lat, first.lng]], {
+    color: REPLAY_TRAVELLED_COLOR,
+    weight: REPLAY_TRAVELLED_WEIGHT,
+    opacity: 0.95,
+    lineJoin: "round",
+    lineCap: "round",
+    interactive: false,
+  }).addTo(playbackLayer);
+  return gpsReplay.travelledLine;
+}
+
 function gpsReplayMarkerAt(lat, lng, heading) {
   if (!gpsReplay) return;
   if (!gpsReplay.marker) {
@@ -1806,6 +1843,7 @@ function gpsReplayFrame(ts) {
   if (p) {
     gpsReplayMarkerAt(p.lat, p.lng, p.heading);
     gpsReplaySetClock(t);
+    gpsReplayUpdateTravelled(t);
     if (playbackScrubEl) playbackScrubEl.value = String(Math.round((p.frac || 0) * 1000));
     updateReplayBusMarkerAt(p);
   }
@@ -1838,6 +1876,7 @@ function gpsReplayPause() {
 function gpsReplayTeardown() {
   if (gpsReplay?.marker) playbackLayer.removeLayer(gpsReplay.marker);
   if (gpsReplay?.arrow) playbackLayer.removeLayer(gpsReplay.arrow);
+  if (gpsReplay?.travelledLine) playbackLayer.removeLayer(gpsReplay.travelledLine);
   gpsReplay = null;
   if (playbackReplayEl) {
     playbackReplayEl.textContent = "▶ Replay";
@@ -1876,7 +1915,11 @@ function gpsReplaySetup(pts) {
     raf: 0,
     marker: null,
     arrow: null,
+    travelledLine: null,
   };
+  // Show the whole recorded path as "travelled" until the replay is started/scrubbed.
+  gpsReplayTravelledLine();
+  gpsReplayUpdateTravelled(gpsReplay.t1);
   gpsReplayControls(true);
 }
 const journeyPanelEl = document.getElementById("journey-panel");
@@ -4718,6 +4761,7 @@ async function startRoutePlayback({
   reg = "",
   showTail = false,
   diverted = false,
+  autoReplay = false,
 } = {}) {
   const playKey = tripId || journeyId || trailKey || vehicleId || regTrailKey(reg);
   if (!playKey) {
@@ -4725,6 +4769,11 @@ async function startRoutePlayback({
     return;
   }
   if (routeOverlayActive(playKey, { vehicleId, trailKey })) {
+    // Already showing this route — Replay should animate it rather than hide it.
+    if (autoReplay && gpsReplay?.pts?.length >= 2) {
+      gpsReplayStart();
+      return;
+    }
     stopRoutePlayback("", { clearTail: true });
     return;
   }
@@ -5122,6 +5171,8 @@ async function startRoutePlayback({
   loadBuses({ replace: false }).catch(() => {});
   const open = openJourneyMarker();
   if (open) refreshPopup(open, { force: true });
+  // One-click Replay: start animating along the recorded pings straight away.
+  if (autoReplay && gpsReplay?.pts?.length >= 2) gpsReplayStart();
 
   // Quality upgrade in the background: once OSRM road-matching finishes, redraw the
   // timetable path onto real roads (still clipped at the bus). Never blocks first paint.
@@ -5422,6 +5473,31 @@ function playRouteButtonHtml(bus, extra = {}) {
   return `<button type="button" class="play-route-btn${on ? " is-on" : ""}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(bus?.journey_id || "")}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(bus?.service?.line_name || extra.line || "")}" data-operator="${esc(trailOperatorForBus(bus) || extra.operator || "")}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || bus?.destination || "")}" data-datetime="${esc(bus?.datetime || "")}">${on ? "Hide route" : "Show route"}</button>`;
 }
 
+/**
+ * One-click GPS replay straight off the bus card. Reuses the same recorded BODS pings as
+ * "Show route" but starts the animation immediately, so the user does not have to open the
+ * playback bar and hunt for the Replay control.
+ */
+function replayBusButtonHtml(bus, extra = {}) {
+  const tripId = bus?.trip_id || extra.tripId || "";
+  const vehicleId = historyVehicleId(bus, extra) || "";
+  const trailKey = extra.trailKey || String(bus?.id || "").trim();
+  const reg =
+    extra.vehicle?.reg ||
+    extra.btVehicle?.reg ||
+    extra.coachReg ||
+    bus?.vehicle?.reg ||
+    busRegistration(bus, extra) ||
+    "";
+  if (!tripId && !vehicleId && !trailKey && !compactReg(reg) && !bus?.journey_id) return "";
+  const playKey = tripId || trailKey || vehicleId || regTrailKey(reg) || bus?.journey_id || "";
+  const on = routeOverlayActive(playKey, { vehicleId, trailKey });
+  const direction = normalizeTrailDirection(
+    extra.direction || bus?.direction || bus?.directionRef || bus?.currentJourney?.directionRef || "",
+  );
+  return `<button type="button" class="play-route-btn replay-bus-btn${on ? " is-on" : ""}" data-replay="1" data-trip-id="${esc(tripId)}" data-journey-id="${esc(bus?.journey_id || "")}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(bus?.service?.line_name || extra.line || "")}" data-operator="${esc(trailOperatorForBus(bus) || extra.operator || "")}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || bus?.destination || "")}" data-datetime="${esc(bus?.datetime || "")}" title="Replay the roads this bus has actually driven">⏵ Replay</button>`;
+}
+
 function playStaffRouteButtonHtml(item, extra = {}) {
   const trailKey = extra.trailKey || staffTrailKey(item);
   const vehicleId = historyVehicleId(null, extra);
@@ -5605,7 +5681,9 @@ document.addEventListener(
         datetime: playBtn.dataset.datetime || "",
         showTail: true,
         diverted: playBtn.dataset.diverted === "1",
-      });
+        autoReplay: playBtn.dataset.replay === "1",
+      })
+        .catch(() => {});
       return;
     }
     const fleetRegBtn = event.target.closest(".popup-fleet-reg, [data-action='open-fleet-vehicle']");
@@ -8339,6 +8417,7 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
       <div class="popup-actions">
         ${followButtonHtml({ bus })}
         ${playRouteButtonHtml(bus, historyExtra)}
+        ${replayBusButtonHtml(bus, historyExtra)}
       </div>
       ${photoBlock(extra, { reg: photoReg, fleet, operator })}
       ${seatsBlock(bus, extra)}
@@ -11895,6 +11974,7 @@ playbackScrubEl?.addEventListener("input", () => {
   if (p) {
     gpsReplayMarkerAt(p.lat, p.lng, p.heading);
     gpsReplaySetClock(t);
+    gpsReplayUpdateTravelled(t);
     updateReplayBusMarkerAt(p);
   }
 });
