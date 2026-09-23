@@ -1972,6 +1972,15 @@ app.use((req, res, next) => {
   });
 });
 
+// Keep the process alive on client-abort errors (Express "Request aborted")
+// so a single disconnected browser request cannot restart the whole server.
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err.message || err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", String(reason));
+});
+
 const server = app.listen(port, "0.0.0.0", () => {
   console.log(`UK Bus Tracker listening on http://0.0.0.0:${port}`);
   console.log(
