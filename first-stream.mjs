@@ -125,6 +125,11 @@ function scheduleReconnect() {
 
 async function connect() {
   console.log("[first-stream] connecting...");
+  // kill any prior zombie socket (connect() can be re-entered while a socket is stuck).
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    console.log("[first-stream] terminating prior stuck socket");
+    ws.terminate();
+  }
   let creds;
   try {
     creds = await socketCreds();
