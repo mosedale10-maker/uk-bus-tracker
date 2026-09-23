@@ -6595,6 +6595,7 @@ function seatsBlock(bus, extra = {}) {
     leftLabel = `${info.remaining} left`;
     cls = info.remaining <= 8 ? "is-low" : "is-ok";
   }
+  if (leftLabel === "seats available") return ""; // no real reading — don't show a guess
   // Live wheelchair-space count — only First Bus publishes a real reading.
   const wheelFree =
     info.source === "First Bus" &&
