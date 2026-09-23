@@ -1075,6 +1075,9 @@ function mapTripStops(times) {
       lat: Number.isFinite(lat) ? lat : null,
       lng: Number.isFinite(lng) ? lng : null,
       aimed,
+      // Raw ISO (same instant as the First board's scheduledTime) — used to tie a
+      // departure-board row to THIS trip instead of another bus on the same line.
+      aimedIso: rowAimed(row),
       aimedArr,
       aimedDep,
       expected,
@@ -6583,7 +6586,6 @@ function seatsBlock(bus, extra = {}) {
     priority: 4,
     band: "seats",
   };
-  const seatLabel = info.seats ? `About ${info.seats} seats` : "About 41 seats";
   let leftLabel = "seats available";
   let cls = "is-ok";
   if (info.band === "standing") {
@@ -6610,7 +6612,7 @@ function seatsBlock(bus, extra = {}) {
       : "";
   return `
     <div class="popup-seats ${cls}">
-      <div class="popup-seats-main">${esc(`${seatLabel} · ${leftLabel}${wheel}`)}</div>
+      <div class="popup-seats-main">${esc(`${leftLabel}${wheel}`)}</div>
     </div>
   `;
 }
@@ -6687,7 +6689,7 @@ async function fetchFirstStopTimes(atco) {
   }
 }
 
-function matchFirstDeparture(data, bus) {
+function matchFirstDeparture(data, bus, stopIso = "") {
   const times = data?.times || data?.departures || [];
   const rows = Array.isArray(times)
     ? times
@@ -6707,25 +6709,48 @@ function matchFirstDeparture(data, bus) {
   });
   const pool = firstOnly.length ? firstOnly : matches;
   if (!pool.length) return null;
-  const withOcc = pool.filter((row) => parseFirstOccupancy(row));
-  if (dest) {
-    const destPool = (withOcc.length ? withOcc : pool).filter((row) =>
-      compactQuery(row.Destination || row.direction || "").includes(dest.slice(0, 6)),
-    );
-    if (destPool.length) return destPool.find((row) => parseFirstOccupancy(row)) || destPool[0];
+  const destMatch = (row) =>
+    !dest || compactQuery(row.Destination || row.direction || "").includes(dest.slice(0, 6));
+
+  // Pin the row to THIS trip: the row whose scheduled time matches this stop's own
+  // timetable time. Without this, a fuller/later bus on the same line could be shown.
+  const t0 = Date.parse(String(stopIso || ""));
+  if (Number.isFinite(t0)) {
+    const near = [];
+    for (const row of pool) {
+      const t = Date.parse(row.scheduledTime || row["departure-time"] || "");
+      if (!Number.isFinite(t)) continue;
+      const d = Math.abs(t - t0);
+      if (d <= 20 * 60_000) near.push({ row, d });
+    }
+    // This trip isn't on this stop's board (already departed / row dropped) — don't guess.
+    if (!near.length) return null;
+    near.sort((a, b) => a.d - b.d);
+    return (near.find((x) => destMatch(x.row)) || near[0]).row;
   }
-  return withOcc[0] || pool.find((row) => parseFirstOccupancy(row)) || pool[0];
+
+  // No trip time available — best effort, but never borrow another direction's counts.
+  const destPool = pool.filter(destMatch);
+  if (!destPool.length) return null;
+  const withOcc = destPool.filter((row) => parseFirstOccupancy(row));
+  return withOcc[0] || destPool.find((row) => parseFirstOccupancy(row)) || destPool[0];
 }
 
 async function firstOccupancyFor(bus, extra, lat, lng) {
   if (!(isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))) return null;
   // Live seats come from the First Bus app's departure board (?live=true) — server-cached.
+  // Only stops this bus hasn't served yet: their boards still carry THIS trip's row
+  // (matched by the stop's own aimed time — see matchFirstDeparture).
   const stops = extra.stops || [];
   const upcoming = upcomingStops(stops, lat, lng);
-  const atcos = [...upcoming, ...stops].map((stop) => stop.atco).filter(Boolean);
-  for (const atco of atcos.slice(0, 8)) {
-    const data = await fetchFirstStopTimes(atco);
-    const occ = parseFirstOccupancy(matchFirstDeparture(data, bus));
+  const ordered = [...upcoming, ...stops];
+  const seen = new Set();
+  for (const stop of ordered) {
+    if (!stop?.atco || stop.done || seen.has(stop.atco)) continue;
+    seen.add(stop.atco);
+    if (seen.size > 8) break;
+    const data = await fetchFirstStopTimes(stop.atco);
+    const occ = parseFirstOccupancy(matchFirstDeparture(data, bus, stop.aimedIso));
     if (occ) return occ;
   }
   return null;
