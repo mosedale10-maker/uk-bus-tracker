@@ -44,6 +44,7 @@ let ws = null;
 let started = false;
 let reconnectTimer = null;
 let reconnectDelayMs = RECONNECT_MIN_MS;
+let lastFrameAt = 0;
 
 async function socketCreds() {
   const key = appKey();
@@ -87,6 +88,7 @@ export function ingestFrame(text) {
   }
   const members = frame?.params?.resource?.member;
   if (frame?.method !== "update" || !Array.isArray(members)) return;
+  lastFrameAt = Date.now();
   const now = Date.now();
   for (const m of members) {
     const id = m?.status?.vehicle_id;
@@ -176,6 +178,14 @@ export function startFirstStream() {
   if (started) return;
   started = true;
   connect().catch(() => {});
+  // If the gateway accepts the socket but never sends frames (stuck / rate-limited),
+  // force-close it so the reconnect logic opens a fresh connection.
+  setInterval(() => {
+    if (lastFrameAt && Date.now() - lastFrameAt > 45_000 && ws && ws.readyState === WebSocket.OPEN) {
+      console.log("[first-stream] no frames for 45s, closing socket");
+      ws.close();
+    }
+  }, 30_000);
 }
 
 const LONDON_HM_FMT = new Intl.DateTimeFormat("en-GB", {
