@@ -148,14 +148,14 @@ async function connect() {
     if (ws !== sock) return;
     console.log("[first-stream] open, sending configuration");
     reconnectDelayMs = RECONNECT_MIN_MS;
-    sock.send(
+    try { sock.send(
       JSON.stringify({
         jsonrpc: "2.0",
         id: "ukbustracker-configuration",
         method: "configuration",
         params: BBOX ? { ...BBOX, operator: "FPOT" } : {},
       }),
-    );
+    ); } catch (e) { console.error("[first-stream] send failed:", e.message); }
   });
   sock.on("message", (data, isBinary) => {
     if (ws !== sock || isBinary) return;
@@ -166,7 +166,7 @@ async function connect() {
   });
   sock.on("close", (code) => {
     if (ws === sock) ws = null;
-    console.log("[first-stream] close", code, "(vehicles:", vehicles.size, ")");
+    console.error("[first-stream] close", code, "(vehicles:", vehicles.size, ")");
     scheduleReconnect();
   });
 }
