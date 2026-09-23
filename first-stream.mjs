@@ -113,6 +113,7 @@ function prune() {
 
 function scheduleReconnect() {
   if (reconnectTimer) return;
+  console.log("[first-stream] reconnecting in", reconnectDelayMs, "ms (vehicles:", vehicles.size, ")");
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
@@ -121,10 +122,13 @@ function scheduleReconnect() {
 }
 
 async function connect() {
+  console.log("[first-stream] connecting...");
   let creds;
   try {
     creds = await socketCreds();
-  } catch {
+    console.log("[first-stream] socketinfo ok");
+  } catch (e) {
+    console.error("[first-stream] socketinfo failed:", e.message);
     scheduleReconnect();
     return;
   }
@@ -134,13 +138,15 @@ async function connect() {
       headers: { Authorization: `Bearer ${creds.accessToken}` },
       perMessageDeflate: true,
     });
-  } catch {
+  } catch (e) {
+    console.error("[first-stream] ws create failed:", e.message);
     scheduleReconnect();
     return;
   }
   ws = sock;
   sock.on("open", () => {
     if (ws !== sock) return;
+    console.log("[first-stream] open, sending configuration");
     reconnectDelayMs = RECONNECT_MIN_MS;
     sock.send(
       JSON.stringify({
@@ -155,11 +161,12 @@ async function connect() {
     if (ws !== sock || isBinary) return;
     ingestFrame(String(data));
   });
-  sock.on("error", () => {
-    /* the close handler below schedules the reconnect */
+  sock.on("error", (e) => {
+    console.error("[first-stream] ws error:", e.message || e);
   });
-  sock.on("close", () => {
+  sock.on("close", (code) => {
     if (ws === sock) ws = null;
+    console.log("[first-stream] close", code, "(vehicles:", vehicles.size, ")");
     scheduleReconnect();
   });
 }
