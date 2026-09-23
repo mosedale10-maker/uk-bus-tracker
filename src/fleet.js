@@ -3671,10 +3671,19 @@ export function createFleetBrowser({
           ? `<ul class="fleet-list fleet-saved-list">${list
               .map((row) => {
                 const routes = Array.isArray(row.routes) ? row.routes : [];
+                // Most recent recorded journey → route number + dest + when, beside the reg.
+                const latest = routes.reduce((best, r) => {
+                  if (!r?.lastAt) return best;
+                  if (!best || String(r.lastAt) > String(best.lastAt)) return r;
+                  return best;
+                }, null);
+                const lastRoute = latest
+                  ? { route: latest.line, dest: latest.dest, trackedAt: latest.lastAt }
+                  : null;
                 return `<li class="fleet-saved-card">
                   <div class="fleet-saved-head">
                     <button type="button" class="fleet-list-btn" data-action="open-vehicle" data-id="${esc(row.id)}">
-                      <span class="fleet-list-main">${esc(row.fleet || "—")} ${plateHtml(row.reg)}</span>
+                      <span class="fleet-list-main">${esc(row.fleet || "—")} ${plateHtml(row.reg)}${lastRouteHtml(lastRoute)}${lastTrackedHtml(lastRoute)}</span>
                       <span class="fleet-list-sub">${esc(row.operatorName || "Saved bus")}${routes.length ? ` · ${routes.length} route${routes.length === 1 ? "" : "s"}` : ""}</span>
                     </button>
                     <button type="button" class="fleet-saved-remove" data-action="remove-saved-vehicle" data-id="${esc(row.id)}" data-reg="${esc(row.reg)}" title="Remove ${esc(row.reg || "vehicle")}" aria-label="Remove ${esc(row.reg || "vehicle")}">Remove</button>
