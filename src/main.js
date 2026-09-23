@@ -2843,6 +2843,12 @@ const TRAIL_STROKE = {
   interactive: false,
 };
 
+/** FlixBus history/trails in brand green so they never read as (or blend into) the indigo route lines. */
+function trailLineColor(operator) {
+  if (String(operator || "").trim().toUpperCase() === "FLIX") return "#73d700";
+  return TRAIL_STROKE.color;
+}
+
 /** Break trails only on real GPS teleports — not normal sparse AVL pings (rural Staffs runs often skip 2–4 km). */
 const TRAIL_BREAK_GAP_M = 4500;
 const TRAIL_BREAK_HARD_M = 12000;
@@ -3387,7 +3393,7 @@ function makeTrailPair(path, layer, opts = {}) {
   const breakOpts = trailPairBreakOpts(opts);
   const latlngs = asTrailLatLngs(path, breakOpts);
   // Single stroke only — a casing + stroke read as a double line on the map.
-  const line = L.polyline(latlngs, { ...TRAIL_STROKE }).addTo(layer);
+  const line = L.polyline(latlngs, { ...TRAIL_STROKE, color: trailLineColor(breakOpts.operator) }).addTo(layer);
   const gps = opts.gpsPoints || opts.gpsPath || null;
   const arrows = opts.deferArrows
     ? []
@@ -4621,7 +4627,7 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
     });
     try {
       pair.line.setStyle({
-        color: PLAYBACK_LINE_COLOR,
+        color: trailLineColor(alignBreak?.operator),
         weight: 4,
         opacity: 0.96,
         lineJoin: "round",
@@ -5016,7 +5022,7 @@ async function startRoutePlayback({
         if (!pinned?.line) continue;
         try {
           pinned.line.setStyle({
-            color: PLAYBACK_LINE_COLOR,
+            color: trailLineColor(operator),
             weight: 4,
             opacity: 0.96,
             lineJoin: "round",
@@ -5046,7 +5052,7 @@ async function startRoutePlayback({
       if (pinned?.line) {
         try {
           pinned.line.setStyle({
-            color: PLAYBACK_LINE_COLOR,
+            color: trailLineColor(operator),
             weight: 4,
             opacity: 0.96,
             lineJoin: "round",
