@@ -4293,11 +4293,11 @@ export function createFleetBrowser({
                 <h2 class="fleet-section-title">Services · ${state.routeServices.length}</h2>
                 <p class="fleet-muted fleet-section-note">Filter to one operator / corridor if needed.</p>
                 <ul class="fleet-list">${state.routeServices
-                  .map((row) => {
+                  .map((row, idx) => {
                     const ops = serviceOperatorLabel(row);
                     return `<li>
                       <button type="button" class="fleet-list-btn" data-action="open-route-service" data-arg="${esc(row.id)}">
-                        <span class="fleet-list-main"><span class="fleet-route">${esc(row.line_name || line)}</span> ${esc(row.description || "")}</span>
+                        <span class="fleet-list-main"><span class="fleet-route">${esc(row.line_name || line)}</span><span class="fleet-service-num">${idx + 1}</span> ${esc(row.description || "")}</span>
                         <span class="fleet-list-sub">${esc(ops || "Operator unknown")}${row.region_id ? ` · ${esc(row.region_id)}` : ""}</span>
                       </button>
                     </li>`;
