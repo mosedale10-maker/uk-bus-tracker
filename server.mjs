@@ -743,7 +743,10 @@ const BT_SERVICES_TTL_MS = 30 * 60_000;
 app.use("/api/bt-services", async (req, res, next) => {
   if (req.method !== "GET" && req.method !== "HEAD") return next();
   const search = new URL(req.originalUrl || req.url, "http://localhost").search;
-  const key = search || "/";
+  // Preserve the sub-path so /api/bt-services/1474/ still resolves to /api/services/1474/.
+  const rest =
+    String(req.originalUrl || req.url || "").split("?")[0].slice("/api/bt-services".length) || "/";
+  const key = `${rest}${search}`;
   const hit = btServicesCache.get(key);
   if (hit && Date.now() - hit.at < BT_SERVICES_TTL_MS) {
     res.setHeader("Cache-Control", "public, max-age=60");
@@ -752,7 +755,7 @@ app.use("/api/bt-services", async (req, res, next) => {
     return;
   }
   try {
-    const upstream = await fetch(`https://bustimes.org/api/services${search}`, {
+    const upstream = await fetch(`https://bustimes.org/api/services${rest}${search}`, {
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(20_000),
     });
