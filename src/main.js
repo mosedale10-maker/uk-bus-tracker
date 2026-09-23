@@ -3594,6 +3594,17 @@ async function resolveTripIdForPlayback({ tripId = "", journeyId = "", vehicleId
   return best?.tripId || "";
 }
 
+/** True when two trail paths are identical — lets refresh skip a needless redraw. */
+function trailPathEquals(a, b) {
+  const fa = flattenTrailLatLngs(a);
+  const fb = flattenTrailLatLngs(b);
+  if (!fa.length || fa.length !== fb.length) return false;
+  for (let i = 0; i < fa.length; i += 1) {
+    if (Math.abs(fa[i][0] - fb[i][0]) > 1e-7 || Math.abs(fa[i][1] - fb[i][1]) > 1e-7) return false;
+  }
+  return true;
+}
+
 function refreshPinnedTrailLine(key) {
   const id = String(key || "");
   if (!id) return;
@@ -3650,6 +3661,10 @@ function refreshPinnedTrailLine(key) {
       makeTrailPair(immediate, liveTrailLayer, { gpsPoints, ...breakOpts }),
     );
   } else {
+    // Historical route tails never change once drawn. Re-drawing on every GPS ping
+    // reset the line to raw points, cleared/rebuilt all arrow markers and re-ran OSM
+    // road matching — visible flicker plus a request per ping. Keep the drawn tail.
+    if (trailPathEquals(existing.path, immediate)) return;
     existing.gpsPoints = gpsPoints;
     existing.breakOpts = trailPairBreakOpts({ ...(existing.breakOpts || {}), ...breakOpts });
     if (flattenTrailLatLngs(immediate).length >= 2) {
