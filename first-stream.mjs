@@ -146,6 +146,7 @@ async function connect() {
     return;
   }
   ws = sock;
+  lastFrameAt = Date.now(); // seed so a stuck socket (no frames) self-heals
   sock.on("open", () => {
     if (ws !== sock) return;
     console.log("[first-stream] open, sending configuration");
@@ -181,7 +182,7 @@ export function startFirstStream() {
   // If the gateway accepts the socket but never sends frames (stuck / rate-limited),
   // force-close it so the reconnect logic opens a fresh connection.
   setInterval(() => {
-    if (lastFrameAt && Date.now() - lastFrameAt > 45_000 && ws && ws.readyState === WebSocket.OPEN) {
+    if (Date.now() - lastFrameAt > 45_000 && ws && ws.readyState === WebSocket.OPEN) {
       console.log("[first-stream] no frames for 45s, closing socket");
       ws.close();
     }
