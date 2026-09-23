@@ -4816,9 +4816,23 @@ html.map-night .leaflet-control-container {
 }
 
 .fleet-last-tracked {
-  color: var(--muted);
-  font-weight: 650;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #334155;
+  background: #eef2f7;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-weight: 750;
   font-size: 0.82em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.fleet-last-tracked-time {
+  color: #0f172a;
+  font-weight: 800;
 }
 
 .fleet-last-route-at {

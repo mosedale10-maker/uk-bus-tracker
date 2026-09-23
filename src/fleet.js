@@ -513,10 +513,30 @@ function formatTrackedWhen(info) {
   return time || day;
 }
 
+/** Full "Wed 23 Sep 2026, 14:32" for the tooltip on the boxed date/time chip. */
+function formatTrackedFull(info) {
+  const raw = info?.trackedAt || "";
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (!Number.isFinite(d.getTime())) return "";
+  return d.toLocaleString("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: UK_TZ,
+  });
+}
+
 function lastTrackedHtml(info) {
   const label = formatTrackedWhen(info);
   if (!label) return "";
-  return `<span class="fleet-last-tracked" title="Last tracked">${esc(label)}</span>`;
+  const full = formatTrackedFull(info);
+  const tip = full ? ` title="Last seen ${esc(full)}"` : ' title="Last tracked"';
+  return `<span class="fleet-last-tracked"${tip}><span class="fleet-last-tracked-day">${esc(formatTrackedDate(info?.trackedAt || info?.date || ""))}</span> <span class="fleet-last-tracked-time">${esc(formatTrackedTime(info?.trackedAt || ""))}</span></span>`;
 }
 
 function lastRouteHtml(info) {
