@@ -705,7 +705,9 @@ function stalePingLimitMs(bus) {
   if (!bus) return STALE_PING_MS;
   const line = String(bus.service?.line_name || "").trim();
   if (!line || !isPassengerServiceLine(line)) return STALE_PING_MS;
-  if (isFirstPotteriesBus(bus) || isDgBus(bus)) return STAFFS_STALE_PING_MS;
+  // First Potteries — drop the pin after 5 min of silence like every other operator.
+  if (isFirstPotteriesBus(bus)) return STALE_PING_MS;
+  if (isDgBus(bus)) return STAFFS_STALE_PING_MS;
   const op = String(
     bus.operator?.noc || bus.operator?.id || bus.service?.operator?.noc || bus._bods?.operator || "",
   )
