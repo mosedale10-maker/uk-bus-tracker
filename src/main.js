@@ -6689,6 +6689,49 @@ async function fetchFirstStopTimes(atco) {
   }
 }
 
+// Bustimes trip times are bare "HH:MM" wall clocks in Europe/London (proven: a bus sitting at
+// its 17:10-timed stop while the true instant was 16:10Z), while First's board publishes true
+// UTC ("…T16:10:00Z"). Binding needs both on one axis.
+const LONDON_CLOCK_FMT = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/London",
+  hour12: false,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
+
+function londonWallParts(ms) {
+  const out = {};
+  for (const p of LONDON_CLOCK_FMT.formatToParts(new Date(ms))) {
+    if (p.type !== "literal") out[p.type] = Number(p.value);
+  }
+  if (out.hour === 24) out.hour = 0;
+  return out;
+}
+
+function londonOffsetMinutes(ms) {
+  const w = londonWallParts(ms);
+  const wall = Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute, w.second);
+  return Math.round((wall - ms) / 60000);
+}
+
+/** "17:10" (London local) or an ISO instant → epoch ms of that moment (DST-safe). */
+function tripAimedMs(aimed, refMs = Date.now()) {
+  const s = String(aimed || "").trim();
+  if (!s) return NaN;
+  if (s.includes("T")) return Date.parse(s);
+  const m = /^(\d{1,2}):(\d{2})/.exec(s);
+  if (!m) return NaN;
+  const p = londonWallParts(refMs);
+  const guess = Date.UTC(p.year, p.month - 1, p.day, Number(m[1]), Number(m[2]));
+  // Two passes settle the instant if the first guess straddles a DST change.
+  const utc1 = guess - londonOffsetMinutes(guess) * 60000;
+  return guess - londonOffsetMinutes(utc1) * 60000;
+}
+
 function matchFirstDeparture(data, bus, stopIso = "") {
   const times = data?.times || data?.departures || [];
   const rows = Array.isArray(times)
@@ -6714,7 +6757,7 @@ function matchFirstDeparture(data, bus, stopIso = "") {
 
   // Pin the row to THIS trip: the row whose scheduled time matches this stop's own
   // timetable time. Without this, a fuller/later bus on the same line could be shown.
-  const t0 = Date.parse(String(stopIso || ""));
+  const t0 = tripAimedMs(stopIso);
   if (Number.isFinite(t0)) {
     const near = [];
     for (const row of pool) {
@@ -6739,14 +6782,16 @@ function matchFirstDeparture(data, bus, stopIso = "") {
 async function firstOccupancyFor(bus, extra, lat, lng) {
   if (!(isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))) return null;
   // Live seats come from the First Bus app's departure board (?live=true) — server-cached.
-  // Only stops this bus hasn't served yet: their boards still carry THIS trip's row
-  // (matched by the stop's own aimed time — see matchFirstDeparture).
-  const stops = extra.stops || [];
-  const upcoming = upcomingStops(stops, lat, lng);
-  const ordered = [...upcoming, ...stops];
+  // Unserved stops only (their boards still carry THIS trip's row — served stops' rows are
+  // gone, and borrowing a later trip there was the wrong-bus bug); each row is pinned to this
+  // trip by its own aimed time in matchFirstDeparture.
+  const upcoming = upcomingStops(extra.stops || [], lat, lng);
+  const list = (upcoming.length ? upcoming : extra.stops || []).filter(
+    (stop) => stop?.atco && !stop.done,
+  );
   const seen = new Set();
-  for (const stop of ordered) {
-    if (!stop?.atco || stop.done || seen.has(stop.atco)) continue;
+  for (const stop of list) {
+    if (seen.has(stop.atco)) continue;
     seen.add(stop.atco);
     if (seen.size > 8) break;
     const data = await fetchFirstStopTimes(stop.atco);
