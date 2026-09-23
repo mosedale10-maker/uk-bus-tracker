@@ -9,6 +9,7 @@
  * the server polls upstream (≈2 req/min/stop) instead of every browser.
  */
 import fs from "node:fs";
+import { startFirstStream, streamOccupancyFor } from "./first-stream.mjs";
 
 const BASE = "https://api.firstbus.co.uk/gofirst-transport/api";
 const TOKEN_TTL_MS = 50 * 60_000; // tokens are valid 60 min
@@ -44,7 +45,8 @@ export function firstStopTimesPlugin(key = "") {
   };
 }
 
-function appKey() {
+/** Vite passes the key from loadEnv; the server falls back to process.env, then .env. */
+export function appKey() {
   if (configuredKey) return configuredKey;
   const fromProcess = String(process.env.FIRST_APP_KEY || "").trim();
   if (fromProcess) return fromProcess;
@@ -62,7 +64,7 @@ function appKey() {
   return envFileKey;
 }
 
-async function gatewayToken(key) {
+export async function gatewayToken(key) {
   if (token.value && Date.now() - token.at < TOKEN_TTL_MS) return token.value;
   if (tokenInflight) return tokenInflight;
   tokenInflight = (async () => {
@@ -126,6 +128,39 @@ function cachedStop(atco) {
   return job;
 }
 
+/**
+ * Fill rows the REST board left without a reading from the app's websocket stream
+ * (first-stream.mjs): the stream carries per-vehicle occupancy continuously, while
+ * `occupancy.types` only appears on a board row once its bus is near THAT stop.
+ * Rows that already have a non-empty reading are untouched — the board's own value is
+ * trip-exact for this stop. Matching is line + direction + this ATCO within ±20 min of
+ * the row's scheduled time (same pinning idea as the client's matchFirstDeparture);
+ * ambiguous candidates return nothing rather than another trip's counts.
+ * Exported for tests.
+ */
+export function enrichTimesWithStream(times, atco) {
+  if (!Array.isArray(times) || !times.length || !atco) return times;
+  let touched = false;
+  const out = times.map((row) => {
+    if (!row || typeof row !== "object") return row;
+    const existing = row.occupancy?.types;
+    if (Array.isArray(existing) && existing.length) return row;
+    const line = row.line || row.line_name || row.ServiceNumber || row["line-name"] || "";
+    const dir = row.lineDirection || row["line-direction"] || row.dir || "";
+    const scheduled = row.scheduledTime || row["departure-time"] || row.scheduled_time || "";
+    const hit = streamOccupancyFor({ line, dir, atco, scheduled });
+    if (!hit?.occupancy?.types?.length) return row;
+    touched = true;
+    return {
+      ...row,
+      occupancy: hit.occupancy,
+      occupancy_source: "stream",
+      stream: { vehicle_id: hit.vehicle_id, recorded_at_time: hit.recorded_at_time },
+    };
+  });
+  return touched ? out : times;
+}
+
 export async function handleFirstStopTimes(req, res) {
   if (req.method !== "GET") {
     res.statusCode = 405;
@@ -140,7 +175,8 @@ export async function handleFirstStopTimes(req, res) {
   }
   try {
     const body = await cachedStop(stop);
-    json(res, 200, { ok: true, ...body });
+    startFirstStream(); // lazy, idempotent — websocket fills rows without board readings
+    json(res, 200, { ok: true, ...body, times: enrichTimesWithStream(body.times, stop) });
   } catch (error) {
     const missingKey = String(error?.message || "").includes("first_app_key_missing");
     json(res, missingKey ? 503 : 502, {
