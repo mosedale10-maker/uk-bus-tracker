@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv } from "vite";
 import { bodsOccupancyPlugin, fetchBodsVehiclesJson } from "./bods-occupancy.js";
 import { dgAtTimetablePlugin } from "./dg-at-timetable.js";
+import { firstStopTimesPlugin } from "./first-departures.js";
 
 function dgProxy() {
   return {
@@ -83,6 +84,7 @@ export default defineConfig(({ mode }) => {
       bodsVehiclesPlugin(env.BODS_API_KEY),
       bodsOccupancyPlugin(env.BODS_API_KEY),
       dgAtTimetablePlugin(),
+      firstStopTimesPlugin(env.FIRST_APP_KEY),
     ],
     build: {
       target: "es2022",

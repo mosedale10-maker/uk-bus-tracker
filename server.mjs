@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleBodsOccupancy, handleBodsVehicles, fetchBodsVehiclesJson } from "./bods-occupancy.js";
 import { handleDgAtTimetable } from "./dg-at-timetable.js";
+import { handleFirstStopTimes } from "./first-departures.js";
 import {
   initAuthStore,
   hasDatabase,
@@ -429,24 +430,8 @@ app.get("/api/health", (_req, res) => {
 app.get("/api/bods-occupancy", (req, res) => handleBodsOccupancy(req, res, bodsKey));
 app.get("/api/dg-at-timetable", (req, res) => handleDgAtTimetable(req, res));
 app.get("/api/bods-vehicles", (req, res) => handleBodsVehicles(req, res, bodsKey));
-
-app.use(
-  "/api/first-vehicles",
-  proxy({
-    target: "https://www.firstbus.co.uk",
-    pathRewrite: (path, req) => {
-      const raw = req?.originalUrl || req?.url || "";
-      const q = raw.includes("?") ? raw.slice(raw.indexOf("?")) : "";
-      return `/api/vehicles${q}`;
-    },
-    headers: {
-      "User-Agent": UA,
-      Origin: "https://www.firstbus.co.uk",
-      Referer: "https://www.firstbus.co.uk/",
-      Accept: "application/json",
-    },
-  }),
-);
+// Live First Bus seat / wheelchair counts (cached gateway proxy — see first-departures.js).
+app.get("/api/first-stop-times", (req, res) => handleFirstStopTimes(req, res));
 
 /** Whole-UK live vehicle count (BODS SIRI-VM), refreshed about every 30s. */
 const UK_LIVE_BBOX = { xmin: -8.2, ymin: 49.8, xmax: 1.85, ymax: 60.9 };

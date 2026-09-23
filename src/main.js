@@ -6593,9 +6593,24 @@ function seatsBlock(bus, extra = {}) {
     leftLabel = `${info.remaining} left`;
     cls = info.remaining <= 8 ? "is-low" : "is-ok";
   }
+  // Live wheelchair-space count — only First Bus publishes a real reading.
+  const wheelFree =
+    info.source === "First Bus" &&
+    info.wheelchairLeft != null &&
+    Number.isFinite(Number(info.wheelchairLeft))
+      ? Math.round(Number(info.wheelchairLeft))
+      : null;
+  const wheelTotal =
+    info.wheelchair != null && Number.isFinite(Number(info.wheelchair))
+      ? Math.round(Number(info.wheelchair))
+      : null;
+  const wheel =
+    wheelFree != null
+      ? ` · ♿ ${wheelTotal != null ? `${wheelFree}/${wheelTotal}` : wheelFree} free`
+      : "";
   return `
     <div class="popup-seats ${cls}">
-      <div class="popup-seats-main">${esc(`${seatLabel} · ${leftLabel}`)}</div>
+      <div class="popup-seats-main">${esc(`${seatLabel} · ${leftLabel}${wheel}`)}</div>
     </div>
   `;
 }
@@ -6656,149 +6671,14 @@ function parseFirstOccupancy(row) {
   };
 }
 
-const firstVehicleCache = new Map();
-
-async function fetchFirstServiceVehicles(line, operator = "FPOT", { force = false } = {}) {
-  const code = String(line || "").trim().toUpperCase();
-  const noc = String(operator || "FPOT").trim().toUpperCase() || "FPOT";
-  if (!code) return [];
-  const cacheKey = `${noc}:${code}`;
-  const hit = firstVehicleCache.get(cacheKey);
-  if (!force && hit && Date.now() - hit.at < 8000) return hit.vehicles;
-  try {
-    const res = await fetch(
-      `/api/first-vehicles?operator=${encodeURIComponent(noc)}&service=${encodeURIComponent(code)}&_=${Date.now()}`,
-    );
-    const data = res.ok ? await res.json() : null;
-    const vehicles = Array.isArray(data?.vehicles) ? data.vehicles : [];
-    firstVehicleCache.set(cacheKey, { at: Date.now(), vehicles });
-    if (firstVehicleCache.size > 40) firstVehicleCache.delete(firstVehicleCache.keys().next().value);
-    return vehicles;
-  } catch {
-    return hit?.vehicles || [];
-  }
-}
-
-function firstServiceCodes(line) {
-  const code = String(line || "").trim().toUpperCase();
-  if (!code) return [];
-  const codes = [code];
-  const base = code.match(/^(\d+)[A-Z]$/)?.[1] || "";
-  if (base && base !== code) codes.push(base);
-  return codes;
-}
-
-const firstFeedPrefetching = new Set();
-
-async function prefetchFirstServiceFeeds(buses) {
-  const jobs = new Map();
-  for (const bus of buses || []) {
-    if (!(isFirstPotteriesBus(bus) || isFirstBus(bus))) continue;
-    const line = String(bus?.service?.line_name || "").trim();
-    const operator = String(bus?.operator?.noc || bus?.operator?.id || "FPOT").trim().toUpperCase();
-    if (!line || !operator) continue;
-    for (const code of firstServiceCodes(line)) jobs.set(`${operator}:${code}`, { code, operator });
-  }
-  const pending = [...jobs.values()].filter((job) => {
-    const key = `${job.operator}:${job.code}`;
-    if (firstFeedPrefetching.has(key)) return false;
-    firstFeedPrefetching.add(key);
-    return true;
-  });
-  let cursor = 0;
-  const worker = async () => {
-    while (cursor < pending.length) {
-      const job = pending[cursor++];
-      const key = `${job.operator}:${job.code}`;
-      try {
-        await fetchFirstServiceVehicles(job.code, job.operator);
-      } catch {
-        /* card selection can retry the feed */
-      } finally {
-        firstFeedPrefetching.delete(key);
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(4, pending.length) }, () => worker()));
-}
-
-function fleetNumberFromBus(bus = {}, extra = {}) {
-  const raws = [
-    extra.vehicle?.fleet_code,
-    extra.vehicle?.fleet_number,
-    extra.btVehicle?.fleet_code,
-    bus.vehicle?.fleet_code,
-    bus.vehicle?.fleet_number,
-    bus.vehicle?.name,
-    extra.vehicle?.name,
-  ];
-  for (const raw of raws) {
-    const text = String(raw || "").trim();
-    if (!text) continue;
-    // "63362 - SM65 WMF" / "63362"
-    const head = text.match(/^(\d{4,6})\b/);
-    if (head) return head[1];
-    const only = compactQuery(text);
-    if (/^\d{4,6}$/.test(only)) return only;
-  }
-  return "";
-}
-
-function matchFirstLiveVehicle(vehicles, bus, extra, lat, lng) {
-  const list = Array.isArray(vehicles) ? vehicles.filter((row) => parseFirstOccupancy(row)) : [];
-  if (!list.length) return null;
-  const line = String(bus?.service?.line_name || extra?.line || "")
-    .trim()
-    .toUpperCase();
-  const fleet = fleetNumberFromBus(bus, extra);
-
-  // 1) Exact fleet match (same bus as First Bus app) — required for correct seat counts.
-  if (fleet) {
-    const fleetHits = list.filter((row) => String(row.fleet || "") === fleet);
-    if (fleetHits.length === 1) return fleetHits[0];
-    if (fleetHits.length > 1 && Number.isFinite(lat) && Number.isFinite(lng)) {
-      let best = null;
-      for (const row of fleetHits) {
-        if (!Number.isFinite(row.lat) || !Number.isFinite(row.lng)) continue;
-        const d = haversineMeters(lat, lng, row.lat, row.lng);
-        if (!best || d < best.d) best = { row, d };
-      }
-      if (best) return best.row;
-      return fleetHits[0];
-    }
-    if (fleetHits.length) return fleetHits[0];
-    // Fleet known but not in First feed yet — do not invent seats from another bus.
-    return null;
-  }
-
-  // 2) No fleet on the map bus: only accept a uniquely nearest live First vehicle.
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-  const nearby = [];
-  for (const row of list) {
-    if (line && row.line && !sameServiceLine(row.line, line)) continue;
-    if (!Number.isFinite(row.lat) || !Number.isFinite(row.lng)) continue;
-    const d = haversineMeters(lat, lng, row.lat, row.lng);
-    if (d <= 500) nearby.push({ row, d });
-  }
-  nearby.sort((a, b) => a.d - b.d);
-  if (!nearby.length) return null;
-  // Ambiguous if a second First bus is also close.
-  if (nearby.length >= 2 && nearby[1].d - nearby[0].d < 60) return null;
-  return nearby[0].row;
-}
-
 async function fetchFirstStopTimes(atco) {
   if (!atco) return null;
   const hit = firstStopCache.get(atco);
   if (hit && Date.now() - hit.at < 20000) return hit.data;
   try {
-    // Prefer TransportAPI-backed endpoint (includes live seat / wheelchair counts).
-    let res = await fetch(`/api/first-stop-times?stop=${encodeURIComponent(atco)}`);
-    let data = res.ok ? await res.json() : null;
-    if (!data?.times?.length) {
-      const fallback = await fetch(`/api/first-next-bus?stop=${encodeURIComponent(atco)}`);
-      if (fallback.ok) data = await fallback.json();
-    }
+    // Server-side cached gateway call — includes live seat / wheelchair counts (?live=true).
+    const res = await fetch(`/api/first-stop-times?stop=${encodeURIComponent(atco)}`);
+    const data = res.ok ? await res.json() : null;
     firstStopCache.set(atco, { at: Date.now(), data });
     if (firstStopCache.size > 80) firstStopCache.delete(firstStopCache.keys().next().value);
     return data;
@@ -6837,49 +6717,9 @@ function matchFirstDeparture(data, bus) {
   return withOcc[0] || pool.find((row) => parseFirstOccupancy(row)) || pool[0];
 }
 
-async function firstOccupancyFor(bus, extra, lat, lng, { force = false } = {}) {
+async function firstOccupancyFor(bus, extra, lat, lng) {
   if (!(isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))) return null;
-  const line = String(bus?.service?.line_name || extra?.line || "").trim();
-  const nocRaw = String(
-    bus?.operator?.noc ||
-      bus?.operator?.id ||
-      extra?.vehicle?.operator?.noc ||
-      extra?.operator ||
-      "FPOT",
-  )
-    .trim()
-    .toUpperCase();
-  // Potteries (and other First Bus) live seats use the First Group FPOT/… NOC on TransportAPI.
-  const noc = /FIRST|FPOT|FBRI|FSYO|FSCE|FGHL|FHUD|FWYO|FGLA|FCYM|FESX|FWAR|FMAN/i.test(
-    `${nocRaw} ${operatorName(bus, extra)}`,
-  )
-    ? /FPOT|Potteries/i.test(`${nocRaw} ${operatorName(bus, extra)}`)
-      ? "FPOT"
-      : nocRaw.startsWith("F") && nocRaw.length <= 4
-        ? nocRaw
-        : "FPOT"
-    : "FPOT";
-
-  // Primary: live buses-on-a-map feed (same as First Bus app seat counts).
-  if (line) {
-    const codes = firstServiceCodes(line);
-    let hit = null;
-    for (const code of codes) {
-      const vehicles = await fetchFirstServiceVehicles(code, noc, { force });
-      hit = matchFirstLiveVehicle(vehicles, bus, extra, lat, lng);
-      if (parseFirstOccupancy(hit)) break;
-    }
-    const fromLive = parseFirstOccupancy(hit);
-    if (fromLive) {
-      fromLive.fleet = hit?.fleet || fleetNumberFromBus(bus, extra) || "";
-      fromLive.vehicleId = hit?.vehicleId || "";
-      return fromLive;
-    }
-    // Fleet known but First feed has no matching bus — don't steal another bus's seats.
-    if (fleetNumberFromBus(bus, extra)) return null;
-  }
-
-  // Fallback only when we cannot identify the fleet yet (rare).
+  // Live seats come from the First Bus app's departure board (?live=true) — server-cached.
   const stops = extra.stops || [];
   const upcoming = upcomingStops(stops, lat, lng);
   const atcos = [...upcoming, ...stops].map((stop) => stop.atco).filter(Boolean);
@@ -6889,6 +6729,45 @@ async function firstOccupancyFor(bus, extra, lat, lng, { force = false } = {}) {
     if (occ) return occ;
   }
   return null;
+}
+
+const FIRST_OCCUPANCY_REFRESH_MS = 60_000;
+
+/** Re-fetch live seats for an open First Bus card and repaint when the numbers change. */
+async function refreshFirstOccupancy(marker, gen) {
+  if (!marker?.bus) return;
+  marker.extra ||= {};
+  const ll = marker.getLatLng?.() || {};
+  const occ = await firstOccupancyFor(marker.bus, marker.extra, ll.lat, ll.lng);
+  if ((marker._enrichGen || 0) !== gen) return; // card re-selected mid-fetch
+  const prev = marker.extra.firstOccupancy || null;
+  const same =
+    (prev?.seats ?? null) === (occ?.seats ?? null) &&
+    (prev?.remaining ?? null) === (occ?.remaining ?? null) &&
+    (prev?.occupied ?? null) === (occ?.occupied ?? null) &&
+    (prev?.wheelchairLeft ?? null) === (occ?.wheelchairLeft ?? null);
+  marker.extra.firstOccupancy = occ;
+  if (same) return;
+  refreshPopup(marker, { force: true }); // seats sit outside the structure key
+}
+
+/** Called from refreshPopup — polls First seats at most once a minute while the card is open. */
+function refreshFirstOccupancyIfDue(marker) {
+  const bus = marker?.bus;
+  if (!bus || !marker.extra?.stops?.length) return;
+  if (!(isFirstPotteriesBus(bus, marker.extra) || isFirstBus(bus, marker.extra))) return;
+  if (!(selectedMapMarker === marker || marker.isPopupOpen?.())) return;
+  const now = Date.now();
+  if (marker._occAt && now - marker._occAt < FIRST_OCCUPANCY_REFRESH_MS) return;
+  if (marker._occBusy) return;
+  marker._occAt = now;
+  marker._occBusy = true;
+  const gen = marker._enrichGen || 0;
+  refreshFirstOccupancy(marker, gen)
+    .catch(() => {})
+    .finally(() => {
+      marker._occBusy = false;
+    });
 }
 
 function normaliseOccupancyBand(value) {
@@ -8507,6 +8386,7 @@ function patchPopupLive(marker) {
 /** Rebuild open popup / left panel only when HTML structure changed; keep scroll + fold state. */
 function refreshPopup(marker, { force = false } = {}) {
   if (!marker) return;
+  refreshFirstOccupancyIfDue(marker);
   if (selectedMapMarker === marker && journeyPanelEl && !journeyPanelEl.hidden) {
     rememberNextStop(marker);
     const html = markerPopupHtml(marker);
