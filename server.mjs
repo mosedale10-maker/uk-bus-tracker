@@ -727,10 +727,50 @@ function mountBtStub(path, handler) {
   });
 }
 
-mountBtStub("/api/bt-services", stubBtList);
 mountBtStub("/api/bt-operators", stubBtList);
 mountBtStub("/api/bt-stops", stubBtGone);
 mountBtStub("/api/stop-times", stubBtGone);
+
+/**
+ * Bustimes service (route) catalogue — powers Fleet · Routes, route chips and
+ * service pages. Was stubbed to an empty list, which left every operator's Routes
+ * section permanently blank. Cached per query so opening pages does not hammer
+ * upstream (bustimes.org rate-limits unauthenticated reads).
+ */
+const btServicesCache = new Map();
+const BT_SERVICES_TTL_MS = 30 * 60_000;
+
+app.use("/api/bt-services", async (req, res, next) => {
+  if (req.method !== "GET" && req.method !== "HEAD") return next();
+  const search = new URL(req.originalUrl || req.url, "http://localhost").search;
+  const key = search || "/";
+  const hit = btServicesCache.get(key);
+  if (hit && Date.now() - hit.at < BT_SERVICES_TTL_MS) {
+    res.setHeader("Cache-Control", "public, max-age=60");
+    res.setHeader("X-Data-Source", "bustimes-cache");
+    res.type("json").send(hit.body);
+    return;
+  }
+  try {
+    const upstream = await fetch(`https://bustimes.org/api/services${search}`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(20_000),
+    });
+    const body = await upstream.text();
+    res.setHeader("Cache-Control", "public, max-age=60");
+    res.setHeader("X-Data-Source", "bustimes");
+    res.status(upstream.status).type("json").send(body);
+    if (upstream.ok) btServicesCache.set(key, { at: Date.now(), body });
+  } catch (err) {
+    // Stale cache beats an empty list if bustimes is briefly unreachable.
+    if (hit) {
+      res.setHeader("X-Data-Source", "bustimes-stale");
+      res.type("json").send(hit.body);
+      return;
+    }
+    next(err);
+  }
+});
 
 /** Bustimes trip geometry — Map · trail from timetable (no local GPS tails). */
 app.use(
