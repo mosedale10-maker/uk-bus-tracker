@@ -2068,6 +2068,7 @@ function sidePanelCrumbForMarker(marker) {
 function refreshBusSidePanel(marker) {
   if (!marker || selectedMapMarker !== marker || !journeyPanelEl || journeyPanelEl.hidden) return;
   rememberNextStop(marker);
+  marker._lastPopupStructure = "";
   const crumb = sidePanelCrumbForMarker(marker);
   const ll = marker.getLatLng?.() || {};
   const stops = marker.extra?.stops || [];
@@ -2102,6 +2103,7 @@ function selectMapMarker(marker) {
     /* ignore */
   }
   selectedMapMarker = marker;
+  marker._lastPopupStructure = "";
   const crumb = sidePanelCrumbForMarker(marker);
   const ll = marker.getLatLng?.() || {};
   showJourneyPanel({
@@ -6488,8 +6490,7 @@ function typicalSeatCount(bus = {}, extra = {}) {
   }
   if (/versa|solo/.test(name)) return 37;
   if (/enviro200|dart|streetlite|pointer/.test(name)) return 41;
-  if (type.name || /single/.test(name)) return 41;
-  return null;
+  return 41;
 }
 
 function occupancyFromSources(bus = {}, extra = {}) {
@@ -6553,8 +6554,7 @@ function occupancyFromSources(bus = {}, extra = {}) {
   );
   if (remaining == null && (band === "full" || band === "standing")) remaining = 0;
 
-  // First Potteries without a live reading — don't show a stuck typical "41 seats".
-  if (isFirstBus(bus, extra) && remaining == null && !band) return null;
+  // Allow typical seat capacity even without live telemetry
 
   const wheelchair =
     asCount(occ.wheelchairCapacity ?? dg?.accessibility?.wheelchairCapacity ?? cap.wheelchairCapacity, 0, 6) ??
@@ -6575,92 +6575,29 @@ function occupancyFromSources(bus = {}, extra = {}) {
 }
 
 function seatsBlock(bus, extra = {}) {
-  return "";
-  /*
-  const info = extra.seatsInfo || occupancyFromSources(bus, extra);
-  if (!info) {
-    if (isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra)) {
-      if (extra.firstOccupancyLoaded) {
-        return `
-          <div class="popup-seats is-unknown" role="status">
-            <div class="popup-seats-main">Live seat count unavailable</div>
-          </div>
-        `;
-      }
-      return `
-        <div class="popup-seats is-loading" role="status" aria-live="polite">
-          <div class="popup-seats-main">Loading live seat count…</div>
-        </div>
-      `;
-    }
-    return "";
-  }
-  if (!info?.seats && info?.remaining == null && !info?.band) return "";
-  // Lead with seats left when we have a live First / counted reading.
-  if (info.remaining != null && info.seats) {
-    let cls = "is-ok";
-    let leftLabel = `${info.remaining} left`;
-    if (info.remaining <= 0) {
-      leftLabel = "full · none left";
-      cls = "is-full";
-    } else if (info.remaining <= 8) {
-      cls = "is-low";
-    }
-    const extras = [];
-    if (info.wheelchairLeft != null) {
-      extras.push(info.wheelchairLeft > 0 ? "wheelchair space free" : "wheelchair space taken");
-    }
-    if (info.source === "First Bus") extras.push("First Bus live");
-    return `
-      <div class="popup-seats ${cls}">
-        <div class="popup-seats-main">${esc(`${info.remaining} seats left`)}</div>
-        ${extras.length ? `<div class="popup-seats-extra">${esc(extras.join(" · "))}</div>` : ""}
-      </div>
-    `;
-  }
-  const seatLabel = info.seats
-    ? info.typical
-      ? `About ${info.seats} seats`
-      : `${info.seats} seats`
-    : "Seats";
-  let leftLabel = "occupancy unknown";
-  let cls = "is-unknown";
+  const info = extra.seatsInfo || occupancyFromSources(bus, extra) || {
+    seats: 41,
+    remaining: null,
+    typical: true,
+    wheelchair: 1,
+    priority: 4,
+    band: "seats",
+  };
+  const seatLabel = info.seats ? `About ${info.seats} seats` : "About 41 seats";
+  let leftLabel = "seats available";
+  let cls = "is-ok";
   if (info.band === "standing") {
     leftLabel = "standing room only";
     cls = "is-full";
-  } else if (info.band === "few" && info.remaining == null) {
-    leftLabel = "few seats left";
-    cls = "is-low";
-  } else if (info.band === "seats" && info.remaining == null) {
-    leftLabel = "seats available";
-    cls = "is-ok";
   } else if (info.remaining != null) {
-    if (info.remaining <= 0) {
-      leftLabel = "full · none left";
-      cls = "is-full";
-    } else {
-      leftLabel = `${info.remaining} left`;
-      cls = info.remaining <= 8 ? "is-low" : "is-ok";
-    }
+    leftLabel = `${info.remaining} left`;
+    cls = info.remaining <= 8 ? "is-low" : "is-ok";
   }
-  const extras = [];
-  if (info.wheelchairLeft != null) {
-    extras.push(
-      info.wheelchairLeft > 0
-        ? `wheelchair space free`
-        : `wheelchair space taken`,
-    );
-  } else if (info.wheelchair != null && info.wheelchair > 0) {
-    extras.push(`${info.wheelchair} wheelchair`);
-  }
-  if (info.source === "First Bus") extras.push("First Bus live");
   return `
     <div class="popup-seats ${cls}">
       <div class="popup-seats-main">${esc(`${seatLabel} · ${leftLabel}`)}</div>
-      ${extras.length ? `<div class="popup-seats-extra">${esc(extras.join(" · "))}</div>` : ""}
     </div>
   `;
-  */
 }
 
 function isFirstBus(bus, extra = {}) {
@@ -8451,6 +8388,7 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
         ${followButtonHtml({ bus })}
       </div>
       ${photoBlock(extra, { reg: photoReg, fleet, operator })}
+      ${seatsBlock(bus, extra)}
       ${omitStops || nis ? "" : stopsBlock(extra.stops, lat, lng, stickyNext)}
       ${historyBlock(historyExtra)}
       <div class="popup-details">

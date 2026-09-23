@@ -430,6 +430,33 @@ app.get("/api/bods-occupancy", (req, res) => handleBodsOccupancy(req, res, bodsK
 app.get("/api/dg-at-timetable", (req, res) => handleDgAtTimetable(req, res));
 app.get("/api/bods-vehicles", (req, res) => handleBodsVehicles(req, res, bodsKey));
 
+app.get("/api/first-vehicles", async (req, res) => {
+  try {
+    const operator = String(req.query.operator || "FPOT").trim().toUpperCase();
+    const service = String(req.query.service || "").trim().toUpperCase();
+    const qs = `?operator=${encodeURIComponent(operator)}${service ? `&service=${encodeURIComponent(service)}` : ""}`;
+    const result = await fetchVehiclesUpstream(qs);
+    let buses = [];
+    try {
+      buses = JSON.parse(result.body.toString("utf8") || "[]");
+    } catch {
+      buses = [];
+    }
+    const vehicles = buses.map((bus) => ({
+      fleet: bus.vehicle?.fleet_code || bus.vehicle?.name || bus._bods?.vehicleRef || "",
+      line: bus.service?.line_name || "",
+      lat: bus.coordinates?.[1],
+      lng: bus.coordinates?.[0],
+      occupancy: bus.bodsOccupancy || null,
+      ...bus,
+    }));
+    res.setHeader("Cache-Control", "public, max-age=5");
+    res.json({ vehicles });
+  } catch (error) {
+    res.json({ vehicles: [], error: error.message });
+  }
+});
+
 /** Whole-UK live vehicle count (BODS SIRI-VM), refreshed about every 30s. */
 const UK_LIVE_BBOX = { xmin: -8.2, ymin: 49.8, xmax: 1.85, ymax: 60.9 };
 let ukLiveCountCache = { at: 0, count: null };
