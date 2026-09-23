@@ -2107,6 +2107,8 @@ function selectMapMarker(marker) {
   }
   selectedMapMarker = marker;
   marker._lastPopupStructure = "";
+  marker._occAt = 0;      // bypass the 60s cooldown on selection
+  marker._occBusy = false;
   const crumb = sidePanelCrumbForMarker(marker);
   const ll = marker.getLatLng?.() || {};
   showJourneyPanel({
@@ -6822,14 +6824,17 @@ async function refreshFirstOccupancy(marker, gen) {
   refreshPopup(marker, { force: true }); // seats sit outside the structure key
 }
 
-/** Called from refreshPopup — polls First seats at most once a minute while the card is open. */
+/** Called from refreshPopup — polls First seats at most once a minute while the card is open,
+ *  but loads immediately the first time a bus is selected (no prior data yet). */
 function refreshFirstOccupancyIfDue(marker) {
   const bus = marker?.bus;
   if (!bus || !marker.extra?.stops?.length) return;
   if (!(isFirstPotteriesBus(bus, marker.extra) || isFirstBus(bus, marker.extra))) return;
   if (!(selectedMapMarker === marker || marker.isPopupOpen?.())) return;
   const now = Date.now();
-  if (marker._occAt && now - marker._occAt < FIRST_OCCUPANCY_REFRESH_MS) return;
+  // Load immediately when there is no prior occupancy data (first click).
+  const hasPriorData = marker.extra?.firstOccupancy != null;
+  if (hasPriorData && marker._occAt && now - marker._occAt < FIRST_OCCUPANCY_REFRESH_MS) return;
   if (marker._occBusy) return;
   marker._occAt = now;
   marker._occBusy = true;
