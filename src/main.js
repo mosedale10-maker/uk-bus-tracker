@@ -9530,12 +9530,11 @@ map.on("moveend", () => {
   if (followPanning || followTarget) {
     return;
   }
-  // Panning out of History · Map / tails restores live buses (Staffs was stuck blank).
-  if (historyMapFocus()?.hideAll) {
-    exitHistoryMapMode({ reload: true });
-    scheduleMapStops();
-    return;
-  }
+  // Panning/zooming must NOT clear History · Map / tails — the user is still looking at that
+  // journey, and the trails live in their own layers. This used to call exitHistoryMapMode(),
+  // which stopped playback and wiped every pinned trail on the first pan (Staffs "stuck blank").
+  // Restoring live buses only needs a reload: loadBuses() consults historyMapFocus() itself and
+  // the history layers (playbackLayer / pinned trail lines) are untouched by a bus reload.
   clearTimeout(map._loadTimer);
   map._loadTimer = setTimeout(() => {
     loadBuses({ replace: true });
