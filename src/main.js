@@ -290,9 +290,9 @@ function roadNoticeIcon(notice, { compact = false } = {}) {
         <span class="road-notice-point"></span>
       </div>
     </div>`,
-    iconSize: compact ? [36, 44] : [260, 150],
-    iconAnchor: compact ? [18, 44] : [130, 150],
-    popupAnchor: compact ? [0, -40] : [0, -140],
+    iconSize: compact ? [30, 34] : [196, 112],
+    iconAnchor: compact ? [15, 34] : [98, 112],
+    popupAnchor: compact ? [0, -30] : [0, -104],
   });
 }
 

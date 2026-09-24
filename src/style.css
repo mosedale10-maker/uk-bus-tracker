@@ -1200,38 +1200,38 @@ html[data-plus="1"] .plus-tag {
   display: grid;
   justify-items: center;
   align-content: end;
-  gap: 3px;
-  width: 200px;
+  gap: 2px;
+  width: 152px;
   pointer-events: auto;
-  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.35));
+  filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.32));
 }
 
 .road-notice-box {
   position: relative;
   box-sizing: border-box;
   width: 100%;
-  padding: 7px 26px 7px 9px;
-  border-radius: 8px;
-  border: 1.5px solid #c2410c;
+  padding: 5px 20px 5px 7px;
+  border-radius: 7px;
+  border: 1.25px solid #c2410c;
   background: #fff7ed;
   color: #7c2d12;
   text-align: left;
-  line-height: 1.3;
+  line-height: 1.25;
 }
 
 .road-notice-close {
   position: absolute;
-  top: 2px;
-  right: 2px;
-  width: 22px;
-  height: 22px;
+  top: 1px;
+  right: 1px;
+  width: 18px;
+  height: 18px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: 5px;
   background: transparent;
   color: #9a3412;
   font: inherit;
-  font-size: 1.05rem;
+  font-size: 0.9rem;
   font-weight: 800;
   line-height: 1;
   cursor: pointer;
@@ -1243,9 +1243,9 @@ html[data-plus="1"] .plus-tag {
 
 .road-notice-box strong {
   display: block;
-  margin: 0 0 3px;
-  padding-right: 4px;
-  font-size: 0.72rem;
+  margin: 0 0 2px;
+  padding-right: 3px;
+  font-size: 0.66rem;
   font-weight: 800;
   color: #9a3412;
 }
@@ -1253,8 +1253,18 @@ html[data-plus="1"] .plus-tag {
 .road-notice-box p,
 .road-notice-popup p {
   margin: 0;
-  font-size: 0.66rem;
+  font-size: 0.6rem;
   font-weight: 650;
+}
+
+/* Keep the pin a fixed, modest size — long notices clamp instead of sprawling.
+   Tapping the pin still opens the popup with the full text. */
+.road-notice-box p {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .road-notice-popup strong {
@@ -1272,23 +1282,23 @@ html[data-plus="1"] .plus-tag {
 .road-notice-dot {
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 19px;
+  height: 19px;
   border-radius: 999px;
   background: #c2410c;
   color: #fff7ed;
-  font-size: 0.85rem;
+  font-size: 0.7rem;
   font-weight: 900;
-  border: 2px solid #fff7ed;
+  border: 1.5px solid #fff7ed;
 }
 
 .road-notice-point {
   width: 0;
   height: 0;
-  border-left: 7px solid transparent;
-  border-right: 7px solid transparent;
-  border-top: 10px solid #c2410c;
-  margin-top: -2px;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 8px solid #c2410c;
+  margin-top: -1px;
 }
 
 .road-notice-line {
@@ -1296,7 +1306,7 @@ html[data-plus="1"] .plus-tag {
 }
 
 .road-notice-pin.is-compact {
-  width: 32px;
+  width: 26px;
 }
 
 .road-notice-pin.is-compact .road-notice-box {
@@ -1305,15 +1315,15 @@ html[data-plus="1"] .plus-tag {
 
 @media (max-width: 640px) {
   .road-notice-pin {
-    width: 170px;
+    width: 132px;
   }
 
   .road-notice-box {
-    padding: 6px 24px 6px 8px;
+    padding: 5px 18px 5px 6px;
   }
 
   .road-notice-box p {
-    font-size: 0.62rem;
+    font-size: 0.57rem;
   }
 }
 
