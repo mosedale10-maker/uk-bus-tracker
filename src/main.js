@@ -3449,6 +3449,30 @@ function canJoinRecordedReplayRuns(previous, next, { line = "", direction = "", 
   if (wantedDirection && nextDirection && nextDirection !== wantedDirection) return false;
   if (previousDirection && nextDirection && previousDirection !== nextDirection) return false;
 
+  // A journey/trip ID change at a terminus is a new directional run, not an
+  // ID flap to repair. First Potteries commonly omits direction metadata, so
+  // destination metadata is the reliable boundary signal here. If direction is
+  // unavailable, fail closed rather than gluing two opposite journeys together.
+  const previousJourney = String(previous.find((p) => p?.journeyId)?.journeyId || "").trim();
+  const nextJourney = String(next.find((p) => p?.journeyId)?.journeyId || "").trim();
+  const previousTrip = String(previous.find((p) => p?.tripId)?.tripId || "").trim();
+  const nextTrip = String(next.find((p) => p?.tripId)?.tripId || "").trim();
+  const identityChanged =
+    Boolean(previousJourney) !== Boolean(nextJourney) ||
+    Boolean(previousTrip) !== Boolean(nextTrip) ||
+    (previousJourney && nextJourney && previousJourney !== nextJourney) ||
+    (previousTrip && nextTrip && previousTrip !== nextTrip);
+  if (identityChanged) {
+    const previousDestination = normalizeTrailDestination(
+      previous[previous.length - 1]?.destination || previous.find((p) => p?.destination)?.destination,
+    );
+    const nextDestination = normalizeTrailDestination(
+      next[0]?.destination || next.find((p) => p?.destination)?.destination,
+    );
+    if (previousDestination && nextDestination && previousDestination !== nextDestination) return false;
+    if (!wantedDirection && !previousDirection && !nextDirection) return false;
+  }
+
   const jump = haversineMeters(
     Number(previousEnd.lat),
     Number(previousEnd.lng),
@@ -5581,19 +5605,24 @@ function resolvePlaybackVehiclePing({ vehicleId = "", trailKey = "", reg = "", t
       source: "staff",
     };
   }
-  const pts = normalizeGpsTrailPoints(trackedGps);
-  if (pts.length) {
-    const last = pts[pts.length - 1];
-    return {
-      lat: last.lat,
-      lng: last.lng,
-      heading: Number(last.heading),
-      t: Number.isFinite(last.t) ? last.t : Date.now(),
-      speedMph: Number.isFinite(last.speedMph) ? last.speedMph : null,
-      source: "trail",
-    };
-  }
-  return null;
+  return recordedTrailEndPing(trackedGps);
+}
+
+/** Use the recorded run's own endpoint for history; a current marker may be on a later return leg. */
+function recordedTrailEndPing(gpsPoints) {
+  const points = normalizeGpsTrailPoints(gpsPoints)
+    .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng))
+    .sort((a, b) => (Number(a.t) || 0) - (Number(b.t) || 0));
+  const last = points[points.length - 1];
+  if (!last) return null;
+  return {
+    lat: last.lat,
+    lng: last.lng,
+    heading: Number(last.heading),
+    t: Number.isFinite(last.t) ? last.t : Date.now(),
+    speedMph: Number.isFinite(last.speedMph) ? last.speedMph : null,
+    source: "trail",
+  };
 }
 
 /** Build GPS samples for trail arrows: prefer real pings, else last ping projected along the road path. */
@@ -5986,6 +6015,7 @@ async function startRoutePlayback({
   // Fleet rows are then expanded below when a feed changes IDs mid-run.
   let trackedGps = [];
   let trackedRunIndex = -1;
+  let exactJourneyUnavailable = false;
   if (resolvedTripId || safeJourneyId || safeDirection || aroundMs) {
     const wantTrip = String(resolvedTripId || tripId || "").trim();
     const wantJny = String(safeJourneyId || "").trim();
@@ -5997,6 +6027,13 @@ async function startRoutePlayback({
     if (match) {
       trackedGps = match;
       trackedRunIndex = tripSegments.indexOf(match);
+    } else if (wantJny && allGps.filter((p) => String(p.journeyId || "") === wantJny).length < 2) {
+      // Never substitute a nearby return leg when the selected Fleet journey
+      // has no usable GPS of its own. A planned route may be used as a labelled
+      // fallback below, but it must not masquerade as this journey's tail.
+      exactJourneyUnavailable = true;
+      trackedGps = [];
+      trackedRunIndex = -1;
     } else {
       trackedGps = clipPointsToSingleDirectionRun(allGps, {
         direction: safeDirection,
@@ -6008,7 +6045,7 @@ async function startRoutePlayback({
     trackedGps = tripSegments[0];
     trackedRunIndex = 0;
   }
-  if (trackedGps.length < 2 && allGps.length >= 2) {
+  if (!exactJourneyUnavailable && trackedGps.length < 2 && allGps.length >= 2) {
     trackedGps = clipPointsToSingleDirectionRun(allGps, {
       direction: safeDirection,
       aroundMs: aroundMs || Number(allGps[0].t) || 0,
@@ -6142,7 +6179,10 @@ async function startRoutePlayback({
   // for every visible tail; a planned/recorded route must never run past it.
   const isHistorical = preserveRecordedRun;
   const lastPing =
-    currentLivePing || resolvePlaybackVehiclePing({ vehicleId, trailKey, reg, trackedGps });
+    currentLivePing ||
+    (preserveRecordedRun
+      ? recordedTrailEndPing(trackedGps)
+      : resolvePlaybackVehiclePing({ vehicleId, trailKey, reg, trackedGps }));
   const clipPing = lastPing;
 
   showMessage(usingTracked ? "Matching GPS to roads…" : "Matching route to roads…");
