@@ -4964,11 +4964,20 @@ async function showFleetRouteTails({
       datetime: vWhen,
       direction: "",
     });
-    const gps = collectTrailGpsForKeys(vKeys.length ? vKeys : [...keys], {
+    let gps = collectTrailGpsForKeys(vKeys.length ? vKeys : [...keys], {
       line: vLine || code,
       fromMs: window.fromMs,
       toMs: window.toMs,
     });
+    // A single-vehicle Map·tails action may carry the selected journey ID.
+    // Do not fall back to every recent run for that vehicle: that creates
+    // several extra tails on the map. Route-wide tails without an ID still
+    // intentionally show all recorded trips.
+    if (vJourney) {
+      gps = gps.filter((point) => String(point.journeyId || "") === vJourney);
+    } else if (vTrip) {
+      gps = gps.filter((point) => String(point.tripId || "") === vTrip);
+    }
     const staffsGap =
       isStaffsTrailOperator(opCode) ||
       isAltonLine(vLine || code) ||
@@ -4999,7 +5008,11 @@ async function showFleetRouteTails({
   }
 
   // Line-wide fallback: segment whatever keys we found for the route.
-  if (!drawn.length && keys.size) {
+  const requestedSingleJourney = Boolean(
+    String(targets[0]?.journey_id || targets[0]?.journeyId || journeyId || "").trim() ||
+      String(targets[0]?.trip_id || targets[0]?.tripId || tripId || "").trim(),
+  );
+  if (!drawn.length && keys.size && !requestedSingleJourney) {
     const gps = collectTrailGpsForKeys([...keys], { line: code });
     const pinned = pinSeparateTripTails(segmentTrailIntoTrips(gps), {
       baseKey: code || "route",
