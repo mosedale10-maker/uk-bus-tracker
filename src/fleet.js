@@ -3728,6 +3728,17 @@ export function createFleetBrowser({
     persistSavedVehicles(state.savedVehicles);
   }
 
+  function compareRouteSummaryRows(a, b) {
+    const aTime = Date.parse(a?.lastAt || "");
+    const bTime = Date.parse(b?.lastAt || "");
+    if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime) {
+      return bTime - aTime;
+    }
+    if (Number.isFinite(aTime) && !Number.isFinite(bTime)) return -1;
+    if (!Number.isFinite(aTime) && Number.isFinite(bTime)) return 1;
+    return compareLineNames(a?.line, b?.line);
+  }
+
   /** Union two route-summary lists (keyed by line) so a save is additive. */
   function mergeRouteSummary(a, b) {
     const map = new Map();
@@ -3744,7 +3755,7 @@ export function createFleetBrowser({
       }
       map.set(key, cur);
     }
-    return [...map.values()].sort((x, y) => compareLineNames(x.line, y.line));
+    return [...map.values()].sort(compareRouteSummaryRows);
   }
 
   function upsertSavedVehicle(vehicle, routes = null) {
@@ -4649,43 +4660,70 @@ export function createFleetBrowser({
   function renderVehicleReplayRuns(v) {
     const runs = Array.isArray(state.replayRuns) ? state.replayRuns : [];
     const count = runs.length;
+    const groups = new Map();
+    for (const row of runs) {
+      const rawLine = String(row.route_name || "").trim().toUpperCase();
+      const key = rawLine && rawLine !== "?" ? rawLine : "OTHER";
+      const group = groups.get(key) || { key, rows: [], latestMs: 0 };
+      group.rows.push(row);
+      const whenMs = Date.parse(row.datetime || "");
+      if (Number.isFinite(whenMs)) group.latestMs = Math.max(group.latestMs, whenMs);
+      groups.set(key, group);
+    }
+    const orderedGroups = [...groups.values()]
+      .map((group) => ({
+        ...group,
+        rows: group.rows.sort((a, b) => String(b.datetime || "").localeCompare(String(a.datetime || ""))),
+      }))
+      .sort((a, b) => b.latestMs - a.latestMs || compareLineNames(a.key, b.key));
+
+    const renderReplayRow = (row) => {
+      const line = row.route_name && row.route_name !== "?" ? row.route_name : "GPS run";
+      const when = formatTrackedWhen({ trackedAt: row.datetime, date: row.date });
+      const direction = normalizeFleetDirection(row.direction);
+      const directionLabel = direction === "in" ? "Inbound" : direction === "out" ? "Outbound" : "";
+      const destination = row.destination || "Recorded GPS route";
+      const replayAttrs = fleetMapDataAttrs({
+        tripId: row.trip_id || row.tripId || "",
+        journeyId: row.journey_id || row.journeyId || "",
+        vehicleId: v.id || row.vehicleId || "",
+        trailKey: row.replayTrailKey || row.trailKey || v.id || "",
+        reg: v.reg || row.reg || "",
+        line: row.route_name && row.route_name !== "?" ? row.route_name : "",
+        operator: v.operator?.noc || v.operator?.id || "",
+        direction: row.direction || "",
+        dest: row.destination || "",
+        datetime: row.datetime || "",
+      });
+      return `<li class="fleet-list-row fleet-replay-row">
+        <div class="fleet-list-btn fleet-replay-info">
+          <span class="fleet-list-main"><span class="fleet-route">${esc(line)}</span>${when ? `<span class="fleet-last-tracked">${esc(when)}</span>` : ""}</span>
+          <span class="fleet-list-sub">${esc(destination)}${directionLabel ? ` · ${esc(directionLabel)}` : ""}</span>
+        </div>
+        <button type="button" class="fleet-link-btn fleet-list-replay" data-action="play-journey" data-replay="1" data-replay-recorded="1" ${replayAttrs}>▶ Replay</button>
+      </li>`;
+    };
+
     const body = state.replayRunsLoading && !count
       ? `<p class="fleet-muted">Loading recorded GPS replays…</p>`
       : state.replayRunsError
         ? `<p class="fleet-error">${esc(state.replayRunsError)}</p>`
         : count
-          ? `<ul class="fleet-list fleet-replay-list">${runs
-              .map((row) => {
-                const line = row.route_name && row.route_name !== "?" ? row.route_name : "GPS run";
-                const when = formatTrackedWhen({ trackedAt: row.datetime, date: row.date });
-                const direction = normalizeFleetDirection(row.direction);
-                const directionLabel = direction === "in" ? "Inbound" : direction === "out" ? "Outbound" : "";
-                const destination = row.destination || "Recorded GPS route";
-                const replayAttrs = fleetMapDataAttrs({
-                  tripId: row.trip_id || row.tripId || "",
-                  journeyId: row.journey_id || row.journeyId || "",
-                  vehicleId: v.id || row.vehicleId || "",
-                  trailKey: row.replayTrailKey || row.trailKey || v.id || "",
-                  reg: v.reg || row.reg || "",
-                  line: row.route_name && row.route_name !== "?" ? row.route_name : "",
-                  operator: v.operator?.noc || v.operator?.id || "",
-                  direction: row.direction || "",
-                  dest: row.destination || "",
-                  datetime: row.datetime || "",
-                });
-                return `<li class="fleet-list-row fleet-replay-row">
-                  <div class="fleet-list-btn fleet-replay-info">
-                    <span class="fleet-list-main"><span class="fleet-route">${esc(line)}</span>${when ? `<span class="fleet-last-tracked">${esc(when)}</span>` : ""}</span>
-                    <span class="fleet-list-sub">${esc(destination)}${directionLabel ? ` · ${esc(directionLabel)}` : ""}</span>
-                  </div>
-                  <button type="button" class="fleet-link-btn fleet-list-replay" data-action="play-journey" data-replay="1" data-replay-recorded="1" ${replayAttrs}>▶ Replay</button>
-                </li>`;
+          ? `<ul class="fleet-list fleet-replay-list">${orderedGroups
+              .map((group) => {
+                const latest = group.rows[0];
+                const latestWhen = formatTrackedWhen({ trackedAt: latest?.datetime, date: latest?.date });
+                const label = group.key === "OTHER" ? "Other GPS" : group.key;
+                return `<li class="fleet-replay-group-header">
+                  <span class="fleet-list-main"><span class="fleet-route">${esc(label)}</span></span>
+                  <span class="fleet-list-sub">${group.rows.length} replay${group.rows.length === 1 ? "" : "s"}${latestWhen ? ` · latest ${esc(latestWhen)}` : ""}</span>
+                </li>${group.rows.map(renderReplayRow).join("")}`;
               })
               .join("")}</ul>`
           : `<p class="fleet-muted">No GPS replay recorded for this bus in the last 7 days.</p>`;
     return `<section class="fleet-section fleet-vehicle-replays">
       <h2 class="fleet-section-title">Replay · last 7 days${count ? ` · ${count}` : ""}</h2>
-      <p class="fleet-muted fleet-section-note">Recorded GPS runs for this bus, newest first. Replay uses the roads and positions actually recorded; older runs are removed after 7 days.</p>
+      <p class="fleet-muted fleet-section-note">Grouped by route, with the newest replay for each route first. Replay uses the roads and positions actually recorded; older runs are removed after 7 days.</p>
       ${state.replayRunsLoading && count ? `<p class="fleet-muted">Refreshing recorded replays…</p>` : ""}
       ${body}
     </section>`;
@@ -4980,9 +5018,16 @@ export function createFleetBrowser({
           lastAt: row.datetime || row.date || "",
           dest: row.destination || "",
         });
+      } else {
+        const current = map.get(key);
+        const rowWhen = row.datetime || row.date || "";
+        if (String(rowWhen) > String(current.lastAt || "")) {
+          current.lastAt = rowWhen;
+          current.dest = row.destination || current.dest || "";
+        }
       }
     }
-    return [...map.values()].sort((a, b) => compareLineNames(a.line, b.line));
+    return [...map.values()].sort(compareRouteSummaryRows);
   }
 
   async function loadVehicleReplayRuns(vehicle, token = vehicleLoadToken) {

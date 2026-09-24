@@ -4732,6 +4732,19 @@ html.map-night .leaflet-control-container {
   white-space: nowrap;
 }
 
+.fleet-replay-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 14px;
+  background: rgba(196, 181, 253, 0.08);
+}
+
+.fleet-replay-group-header .fleet-list-sub {
+  text-align: right;
+}
+
 .fleet-replay-info {
   cursor: default;
 }
