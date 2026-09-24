@@ -81,13 +81,31 @@ function compactReg(value) {
     .replace(/[^A-Z0-9]/g, "");
 }
 
-function shouldKeep(key, lat, lng, t, { coach = false, at = false } = {}) {
+function pointMetaScore(point) {
+  return (
+    (point?.journeyId ? 4 : 0) +
+    (point?.tripId ? 2 : 0) +
+    (point?.direction ? 2 : 0) +
+    (point?.destination ? 1 : 0) +
+    (point?.line ? 1 : 0) +
+    (point?.operator ? 1 : 0)
+  );
+}
+
+function shouldKeep(key, point, { coach = false, at = false } = {}) {
+  const lat = Number(point?.lat);
+  const lng = Number(point?.lng);
+  const t = Number(point?.t);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(t)) return false;
   const prev = lastByKey.get(key);
   if (!prev) return true;
   const dt = t - prev.t;
   const minGap = coach ? COACH_MIN_GAP_MS : at ? 5_000 : MIN_GAP_MS;
   const minMove = coach ? COACH_MIN_MOVE_M : at ? 3 : MIN_MOVE_M;
-  if (dt < minGap) return false;
+  // BODS and Bustimes are polled separately. If the second source arrives within
+  // the normal cadence but carries journey/direction metadata, retain it so a
+  // sparse directionless sample cannot permanently blank the run identity.
+  if (dt < minGap) return pointMetaScore(point) > pointMetaScore(prev);
   // Keep a sample at least every ~20s (local) / ~90s (coach) so stop-start still builds a trail.
   // AT employee AVL is sparse — force a keep every 15s even when barely moving.
   if (dt >= (coach ? 90_000 : at ? 15_000 : 20_000)) return true;
@@ -96,8 +114,13 @@ function shouldKeep(key, lat, lng, t, { coach = false, at = false } = {}) {
   return true;
 }
 
-function remember(key, lat, lng, t) {
-  lastByKey.set(key, { lat, lng, t });
+function remember(key, point) {
+  lastByKey.set(key, {
+    ...point,
+    lat: Number(point.lat),
+    lng: Number(point.lng),
+    t: Number(point.t),
+  });
   if (lastByKey.size > 8_000) {
     const drop = lastByKey.keys().next().value;
     lastByKey.delete(drop);
@@ -261,8 +284,45 @@ function stabilizeRoutePoint(primary, point, { coach = false } = {}) {
       Number.isFinite(gap) &&
       gap > journeySwitchMs,
   );
+  const previousDestination = String(prev?.destination || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  const currentDestination = String(rawDest || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  const destinationChanged = Boolean(
+    previousDestination &&
+      currentDestination &&
+      previousDestination !== currentDestination,
+  );
+  const identityChanged = Boolean(
+    (rawJourney && rawJourney !== prev?.journeyId) ||
+      (rawTrip && rawTrip !== prev?.tripId),
+  );
+  const nearPrevious = Boolean(
+    prev &&
+      Number.isFinite(prev.lastLat) &&
+      Number.isFinite(prev.lastLng) &&
+      haversineMeters(prev.lastLat, prev.lastLng, point.lat, point.lng) <= (coach ? 1_000 : 250),
+  );
+  // A terminal turnaround often changes destination and journey id within a
+  // few seconds, long before the generic eight-minute journey-id threshold.
+  // Split that boundary even when SIRI/Bustimes omitted direction metadata.
+  const terminalTurn = Boolean(
+    !coach &&
+      prev &&
+      (prev.n || 0) >= 4 &&
+      destinationChanged &&
+      identityChanged &&
+      nearPrevious &&
+      Number.isFinite(gap) &&
+      gap >= 0 &&
+      gap <= 10 * 60_000,
+  );
 
-  if (!prev || lineChanged || directionChanged || longGap || journeySwitched) {
+  if (!prev || lineChanged || directionChanged || longGap || journeySwitched || terminalTurn) {
     const next = {
       line: line || prev?.line || "",
       journeyId: rawJourney,
@@ -274,6 +334,7 @@ function stabilizeRoutePoint(primary, point, { coach = false } = {}) {
       lastT: point.t,
       lastLat: point.lat,
       lastLng: point.lng,
+      n: 1,
       operator: String(point.operator || "").trim().toUpperCase(),
       coach: Boolean(coach),
     };
@@ -309,6 +370,11 @@ function stabilizeRoutePoint(primary, point, { coach = false } = {}) {
   if (direction && !prev.direction) prev.direction = direction;
   if (rawDest && !prev.destination) prev.destination = rawDest;
   if (coach && rawJourney) prev.latestJourneyId = rawJourney;
+  const moved = Number.isFinite(prev.lastLat) && Number.isFinite(prev.lastLng)
+    ? haversineMeters(prev.lastLat, prev.lastLng, point.lat, point.lng)
+    : Infinity;
+  if (moved >= (coach ? COACH_MIN_MOVE_M : MIN_MOVE_M)) prev.lastMoveAt = point.t;
+  prev.n = (prev.n || 0) + 1;
   prev.lastT = point.t;
   prev.lastLat = point.lat;
   prev.lastLng = point.lng;
@@ -556,8 +622,8 @@ async function recordBuses(buses, { coach = false } = {}) {
       for (const key of allKeys) lastByKey.delete(key);
     }
     for (const key of allKeys) {
-      if (!shouldKeep(key, point.lat, point.lng, point.t, { coach, at: isAt })) continue;
-      remember(key, point.lat, point.lng, point.t);
+      if (!shouldKeep(key, point, { coach, at: isAt })) continue;
+      remember(key, point);
       const list = byKey.get(key) || [];
       list.push(point);
       byKey.set(key, list);

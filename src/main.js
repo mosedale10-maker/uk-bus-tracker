@@ -3908,31 +3908,38 @@ function formatTrailArrowTime(ms) {
 
 /** Turn an on-road geometry into timestamped replay points without reintroducing raw GPS chords. */
 function roadPathToReplayPoints(roadPath, sourceGps, breakOpts = {}) {
-  const segments = asTrailLatLngs(roadPath, breakOpts)
-    .filter((seg) => seg.length >= 2)
-    .sort((a, b) => pathLengthMeters(b) - pathLengthMeters(a));
-  const road = segments[0] || [];
+  // Keep the road matcher's chronological fragments. Selecting only the
+  // longest fragment silently dropped legitimate replay legs (especially at
+  // a terminal or a GPS gap) and made a return journey look like the outbound.
+  const segments = asTrailLatLngs(roadPath, breakOpts).filter((seg) => seg.length >= 2);
   const source = normalizeGpsTrailPoints(sourceGps);
+  const road = segments.flat();
   if (road.length < 2 || source.length < 2) return [];
+  const totalLength = segments.reduce((sum, segment) => sum + pathLengthMeters(segment), 0);
+  let consumedLength = 0;
   const out = [];
-  for (let i = 0; i < road.length; i += 1) {
-    const frac = road.length === 1 ? 0 : i / (road.length - 1);
-    const t = gpsTimeAtPathFraction(source, frac);
-    if (!Number.isFinite(t)) continue;
-    const prev = road[Math.max(0, i - 1)];
-    const next = road[Math.min(road.length - 1, i + 1)];
-    const near = source[Math.min(source.length - 1, Math.round(frac * (source.length - 1)))];
-    out.push({
-      lat: road[i][0],
-      lng: road[i][1],
-      t,
-      heading:
-        i === road.length - 1
-          ? segmentBearing(prev, next)
-          : segmentBearing(road[i], next),
-      direction: near?.direction || "",
-      speedMph: near?.speedMph ?? null,
-    });
+  for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
+    const segment = segments[segmentIndex];
+    const segmentLength = pathLengthMeters(segment);
+    for (let i = 0; i < segment.length; i += 1) {
+      const within = segment.length <= 1 ? 0 : i / (segment.length - 1);
+      const travelled = consumedLength + segmentLength * within;
+      const frac = totalLength > 0 ? travelled / totalLength : 0;
+      const t = gpsTimeAtPathFraction(source, frac);
+      if (!Number.isFinite(t)) continue;
+      const prev = segment[Math.max(0, i - 1)];
+      const next = segment[Math.min(segment.length - 1, i + 1)];
+      const near = source[Math.min(source.length - 1, Math.round(frac * (source.length - 1)))];
+      out.push({
+        lat: segment[i][0],
+        lng: segment[i][1],
+        t,
+        heading: segmentBearing(prev, next),
+        direction: near?.direction || "",
+        speedMph: near?.speedMph ?? null,
+      });
+    }
+    consumedLength += segmentLength;
   }
   return out;
 }
@@ -6183,7 +6190,10 @@ async function startRoutePlayback({
     (preserveRecordedRun
       ? recordedTrailEndPing(trackedGps)
       : resolvePlaybackVehiclePing({ vehicleId, trailKey, reg, trackedGps }));
-  const clipPing = lastPing;
+  // A recorded/history run owns its full extent. Only live playback clips to
+  // the current bus marker; using a later marker's position here would append
+  // the next return leg to an older journey.
+  const clipPing = preserveRecordedRun ? null : lastPing;
 
   showMessage(usingTracked ? "Matching GPS to roads…" : "Matching route to roads…");
   let drawPath = path;
@@ -6223,12 +6233,14 @@ async function startRoutePlayback({
         );
         if (want.length >= 2) segs = [want];
       }
-      // Historical Map rows may still have a current live marker. Clip every
-      // pinned segment to that marker before drawing it; never leave a second
-      // full-route stroke ahead of the bus.
-      segs = lastPing
-        ? segs.map((seg) => clipGpsPointsAtPing(seg, lastPing)).filter((seg) => seg.length >= 2)
-        : [];
+      // Historical/recorded runs are complete directional records. Do not
+      // clip them to a current marker, which may already be on the return leg.
+      // Live rows still clip below so their stroke can never run ahead.
+      segs = isHistorical
+        ? segs.filter((seg) => seg.length >= 2)
+        : lastPing
+          ? segs.map((seg) => clipGpsPointsAtPing(seg, lastPing)).filter((seg) => seg.length >= 2)
+          : [];
       pinSeparateTripTails(segs, {
         baseKey: liveKey || resolvedTripId || tripId || safeJourneyId || "hist",
         line: lineName,
@@ -6299,7 +6311,9 @@ async function startRoutePlayback({
   const fastBase = preferRoadMatchedTrail(path, [], alignBreak);
   const fastPath =
     flattenTrailLatLngs(fastBase).length >= 2
-      ? clipTrailPathAtPing(fastBase, clipPing, { failClosed: true })
+      ? isHistorical
+        ? fastBase
+        : clipTrailPathAtPing(fastBase, clipPing, { failClosed: true })
       : [];
   const scene = {
     trackedGps,

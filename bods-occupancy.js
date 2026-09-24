@@ -254,6 +254,7 @@ export function siriItemToBus(item) {
   const lineRaw = published || lineRef;
   const tmCode = normalizeAvlText(item.ticketMachineServiceCode || "");
   const destination = normalizeAvlText(item.destination || "");
+  const direction = String(item.direction || "").trim();
   // Dead run even when DestinationName is empty — Ticketer often only sets line / TM code.
   const deadRun =
     isDeadRunLineText(published) ||
@@ -282,6 +283,8 @@ export function siriItemToBus(item) {
     heading: item.bearing,
     datetime: item.recordedAt || new Date().toISOString(),
     destination,
+    direction: direction || undefined,
+    directionRef: direction || undefined,
     origin,
     ...(Number.isFinite(item.delaySec) ? { delay: item.delaySec } : {}),
     journey_id: item.journeyRef || "",
@@ -318,6 +321,7 @@ export function siriItemToBus(item) {
       operator: op,
       line: lineRaw,
       lineRef: lineRef || undefined,
+      directionRef: direction || undefined,
       ticketMachineServiceCode: tmCode || undefined,
       destinationAimedArrival: item.destinationAimedArrival || undefined,
       // Omit when missing — JSON null was becoming Number(null)→0 → "Stopped" on cards.

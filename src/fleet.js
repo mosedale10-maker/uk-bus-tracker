@@ -832,10 +832,18 @@ export function mergeLiveHistoryRow(journeys, liveRow) {
       break;
     }
     const rowMs = new Date(row.datetime).getTime();
+    const rowDest = String(row.destination || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const liveDest = String(liveRow.destination || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const rowDir = normalizeFleetDirection(row.direction);
+    const liveDir = normalizeFleetDirection(liveRow.direction);
+    const destinationCompatible = !rowDest || !liveDest || rowDest === liveDest;
+    const directionCompatible = !rowDir || !liveDir || rowDir === liveDir;
     if (
       Number.isFinite(liveMs) &&
       Number.isFinite(rowMs) &&
       Math.abs(rowMs - liveMs) < 45 * 60_000 &&
+      destinationCompatible &&
+      directionCompatible &&
       (sameServiceLine(row.route_name, liveRow.route_name) ||
         sameServiceLine(row.extracted_route, liveRow.route_name) ||
         row.diverted ||
@@ -851,6 +859,7 @@ export function mergeLiveHistoryRow(journeys, liveRow) {
       ...row,
       route_name: liveRow.route_name || row.route_name || row.extracted_route || "",
       destination: liveRow.destination || row.destination || "",
+      direction: row.direction || liveRow.direction || "",
       diverted: Boolean(row.diverted || liveRow.diverted),
       extracted_route: liveRow.extracted_route || row.extracted_route || "",
       live: true,
@@ -1902,10 +1911,16 @@ export function mergeAtHistoryRows(journeys, atRows) {
     const dup = list.some((existing) => {
       if (!sameServiceLine(existing.route_name, row.route_name)) return false;
       const existingMs = new Date(existing.datetime).getTime();
+      const existingDest = String(existing.destination || "").trim().toLowerCase().replace(/\s+/g, " ");
+      const rowDest = String(row.destination || "").trim().toLowerCase().replace(/\s+/g, " ");
+      const existingDir = normalizeFleetDirection(existing.direction);
+      const rowDir = normalizeFleetDirection(row.direction);
       return (
         Number.isFinite(rowMs) &&
         Number.isFinite(existingMs) &&
-        Math.abs(existingMs - rowMs) < 25 * 60_000
+        Math.abs(existingMs - rowMs) < 25 * 60_000 &&
+        (!existingDest || !rowDest || existingDest === rowDest) &&
+        (!existingDir || !rowDir || existingDir === rowDir)
       );
     });
     if (dup) continue;
