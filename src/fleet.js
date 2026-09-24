@@ -6267,6 +6267,7 @@ export function createFleetBrowser({
         direction: btn.dataset.direction,
         dest: btn.dataset.dest,
         datetime: btn.dataset.datetime,
+        diverted: btn.dataset.diverted === "1",
         autoReplay: btn.dataset.replay === "1",
         recordedReplay: btn.dataset.replayRecorded === "1",
       });
