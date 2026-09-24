@@ -5631,6 +5631,7 @@ export function createFleetBrowser({
     const routeSummaryPromise = state.vehicle?.id
       ? loadVehicleRouteSummary(state.vehicle)
       : Promise.resolve();
+    void routeSummaryPromise.catch(() => {});
 
     try {
       // Vehicle detail + live AVL in parallel (skip serial lastRoute / duplicate live fetch).
