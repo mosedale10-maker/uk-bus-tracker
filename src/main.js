@@ -3584,7 +3584,6 @@ function collectTrailGpsForKeys(keys, filter = {}) {
 function pinSeparateTripTails(segments, { baseKey = "bus", line = "", operator = "", actualRoute = false } = {}) {
   // A new selection must not inherit arrows from a previous route selection.
   clearTrailArtifacts(liveTrailLayer);
-  clearTrailDomArtifacts();
   const drawn = [];
   const base = String(baseKey || "bus")
     .replace(/[^A-Za-z0-9:_-]+/g, "_")
@@ -5272,11 +5271,13 @@ function clearTrailArtifacts(layer) {
     const title = String(child?.options?.title || "");
     const element = child?.getElement?.();
     const elementClass = String(element?.className || "");
+    const iconClass = String(child?.options?.icon?.options?.className || "");
     const isTrailLine = className.includes("trail-line") || elementClass.includes("trail-line");
     const isTrailArrow =
       title.startsWith("Bus here at") ||
       title === "Tracked position" ||
       elementClass.includes("trail-arrow-icon") ||
+      iconClass.includes("trail-arrow-icon") ||
       Boolean(element?.querySelector?.(".trail-arrow-chevron"));
     if (isTrailLine || isTrailArrow) layer.removeLayer(child);
   });
@@ -5294,7 +5295,6 @@ function clearTrailArtifacts(layer) {
 function clearPinnedTrails() {
   for (const pair of pinnedTrailLines.values()) removeTrailPair(pair, liveTrailLayer);
   clearTrailArtifacts(liveTrailLayer);
-  clearTrailDomArtifacts();
   pinnedTrailLines.clear();
   pinnedTrailKeys.clear();
   pinnedTrailFilters.clear();
@@ -5469,14 +5469,8 @@ window.addEventListener("pagehide", () => {
   flushTrailUpload().catch(() => {});
 });
 
-function clearTrailDomArtifacts() {
-  const root = document.querySelector(".map-wrap") || document.getElementById("map");
-  root?.querySelectorAll(".trail-arrow-icon, .trail-line, .trail-line-casing").forEach((el) => el.remove());
-}
-
 function clearPlaybackLayers() {
   playbackLayer.clearLayers();
-  clearTrailDomArtifacts();
 }
 
 function updatePlaybackChrome() {
