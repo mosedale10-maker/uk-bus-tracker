@@ -6265,11 +6265,10 @@ async function startRoutePlayback({
   // Bustimes-style instant tail: locally road-snapped path, clipped at the bus's current
   // position — no OSRM wait, so the route paints immediately.
   const fastBase = preferRoadMatchedTrail(path, [], alignBreak);
-  const fastPath = clipTrailPathAtPing(
-    flattenTrailLatLngs(fastBase).length >= 2 ? fastBase : path,
-    clipPing,
-    { failClosed: true },
-  );
+  const fastPath =
+    flattenTrailLatLngs(fastBase).length >= 2
+      ? clipTrailPathAtPing(fastBase, clipPing, { failClosed: true })
+      : [];
   const scene = {
     trackedGps,
     lastPing,
