@@ -1553,6 +1553,7 @@ app.get("/api/trails", async (req, res) => {
       .map((k) => k.trim())
       .filter(Boolean);
     const days = Math.min(TRAIL_KEEP_DAYS, Math.max(1, Number(req.query.days) || TRAIL_KEEP_DAYS));
+    const trailLimit = Math.min(4_000, Math.max(200, Number(req.query.limit) || 4_000));
     const fromMs = Number(req.query.from) || 0;
     const toMs = Number(req.query.to) || 0;
     if (!keys.length) {
@@ -1561,11 +1562,11 @@ app.get("/api/trails", async (req, res) => {
         res.status(400).json({ ok: false, error: "missing_keys" });
         return;
       }
-      const points = await getTrailPoints(key, { fromMs, toMs, days });
+      const points = await getTrailPoints(key, { fromMs, toMs, days, limit: trailLimit });
       res.json({ ok: true, days: TRAIL_KEEP_DAYS, trails: { [key]: points } });
       return;
     }
-    const trails = await getTrailsForKeys(keys, { fromMs, toMs, days });
+    const trails = await getTrailsForKeys(keys, { fromMs, toMs, days, limit: trailLimit });
     res.json({ ok: true, days: TRAIL_KEEP_DAYS, trails });
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message || "trails_failed" });

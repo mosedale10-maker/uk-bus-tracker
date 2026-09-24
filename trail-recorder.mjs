@@ -1,6 +1,6 @@
 /** Continuously record live vehicle GPS into the 7-day trail store (no browser needed). */
 
-import { appendTrailPoints, trailsEnabled, initTrailStore } from "./trail-store.mjs";
+import { appendTrailPointsBatch, trailsEnabled, initTrailStore } from "./trail-store.mjs";
 
 /** Staffordshire county bbox — xmax pushed east so Alton Towers (AT1–AT3) stays inside. */
 const DEFAULT_BBOX = {
@@ -208,7 +208,7 @@ function keysForBus(bus, point = null) {
   const direction = normalizeDirection(point?.direction || bus?._direction || "");
   const t = Number.isFinite(point?.t) ? point.t : Date.now();
   const runDay = String(point?._runDay || "").trim() || ukDateKey(t);
-  const primary = sticky || (hasPlate ? `reg:${reg}` : busId);
+  const primary = sticky || (AT_LINES.has(line) ? (busId || (hasPlate ? `reg:${reg}` : "")) : hasPlate ? `reg:${reg}` : busId);
   if (primary) keys.push(primary);
 
   // Anonymous coaches use the sticky coach key; plate-backed vehicles use reg:*
@@ -563,14 +563,8 @@ async function recordBuses(buses, { coach = false } = {}) {
       byKey.set(key, list);
     }
   }
-  let n = 0;
-  for (const [key, points] of byKey) {
-    const result = await appendTrailPoints(key, points);
-    if (result.ok) written += result.inserted || 0;
-    // Yield every few keys so map/API HTTP is not frozen during Staffs trail writes.
-    n += 1;
-    if (n % 4 === 0) await new Promise((r) => setImmediate(r));
-  }
+  const result = await appendTrailPointsBatch([...byKey.entries()]);
+  if (result.ok) written += result.inserted || 0;
   return written;
 }
 

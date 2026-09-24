@@ -1763,21 +1763,25 @@ export async function fetchAtHistoryFromTrails({
   const primary = bases.find((k) => k.startsWith("staff-")) || bases[0];
   const lines =
     wantLine && AT_LINE_SET.has(wantLine) ? [wantLine] : AT_ROUTES.map((row) => row.line);
-  const keys = [primary];
-  // Stay within /api/trails 12-key cap: primary + directed AT segment keys (and legacy undirected).
-  for (const atLine of lines) {
-    const segs = atTrailSegmentKeys(primary, atLine, {
-      days: wantDate ? 1 : Math.min(keepDays, 2),
-      date: wantDate,
-    });
-    for (const key of segs) {
-      // Prefer at: keys; run: duplicates the same points under another prefix.
-      if (String(key).startsWith("run:")) continue;
-      keys.push(key);
+  const keys = [];
+  // The recorder may key an AT vehicle by its staff reference, BODS id, or reg.
+  // Build directed segment keys for each identity rather than assuming one alias.
+  for (const base of [primary, ...bases.filter((base) => base !== primary)].slice(0, 3)) {
+    if (!base || keys.includes(base)) continue;
+    keys.push(base);
+    if (keys.length >= 10) continue;
+    for (const atLine of lines) {
+      const segs = atTrailSegmentKeys(base, atLine, {
+        days: wantDate ? 1 : Math.min(keepDays, 2),
+        date: wantDate,
+      });
+      for (const key of segs) {
+        if (String(key).startsWith("run:")) continue;
+        keys.push(key);
+        if (keys.length >= 12) break;
+      }
+      if (keys.length >= 12) break;
     }
-  }
-  for (const base of bases) {
-    if (base !== primary) keys.push(base);
   }
   const unique = [...new Set(keys.filter(Boolean))].slice(0, 12);
   if (!unique.length) return [];
@@ -1785,6 +1789,7 @@ export async function fetchAtHistoryFromTrails({
     const params = new URLSearchParams({
       keys: unique.join(","),
       days: String(keepDays),
+      limit: "2500",
     });
     const res = await fetch(`/api/trails?${params}`);
     if (!res.ok) return [];
@@ -1936,6 +1941,7 @@ export async function fetchCoachHistoryFromTrails({
     const params = new URLSearchParams({
       keys: unique.join(","),
       days: String(keepDays),
+      limit: "2500",
     });
     const res = await fetch(`/api/trails?${params}`);
     if (!res.ok) return [];

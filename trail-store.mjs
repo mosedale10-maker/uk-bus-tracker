@@ -443,6 +443,78 @@ function rowToPoint(row) {
   };
 }
 
+export async function appendTrailPointsBatch(entries) {
+  await initTrailStore();
+  if (!db) return { ok: false, reason: "no-store" };
+  const batches = [];
+  for (const [rawKey, rawPoints] of entries || []) {
+    const key = normalizeKey(rawKey);
+    if (!key) continue;
+    const list = (Array.isArray(rawPoints) ? rawPoints : [])
+      .map(normalizePoint)
+      .filter(Boolean)
+      .slice(0, MAX_BATCH);
+    if (list.length) batches.push({ key, list });
+  }
+  if (!batches.length) return { ok: true, inserted: 0 };
+
+  const insert = db.prepare(`
+    INSERT INTO vehicle_trail_points
+      (trail_key, t, lat, lng, heading, journey_id, trip_id, line, operator, direction, destination)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const trim = db.prepare(`
+    DELETE FROM vehicle_trail_points
+     WHERE id IN (
+       SELECT id FROM vehicle_trail_points
+       WHERE trail_key = ?
+       ORDER BY t DESC
+       LIMIT -1 OFFSET ?
+     )
+  `);
+  let inserted = 0;
+  const write = () => {
+    for (const { key, list } of batches) {
+      for (const p of list) {
+        insert.run(
+          key,
+          p.t,
+          p.lat,
+          p.lng,
+          p.heading,
+          p.journeyId,
+          p.tripId,
+          p.line,
+          p.operator,
+          p.direction,
+          p.destination,
+        );
+        inserted += 1;
+      }
+      trim.run(key, MAX_POINTS_PER_KEY);
+    }
+  };
+
+  if (backend === "node:sqlite") {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      write();
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        /* ignore */
+      }
+      throw error;
+    }
+  } else {
+    db.transaction(write)();
+  }
+  checkpointWal();
+  return { ok: true, inserted };
+}
+
 export async function getTrailPoints(
   trailKey,
   { fromMs = 0, toMs = 0, days = TRAIL_KEEP_DAYS, limit = MAX_POINTS_PER_KEY } = {},
@@ -466,10 +538,14 @@ export async function getTrailPoints(
   params.push(Math.min(MAX_POINTS_PER_KEY, Math.max(50, Number(limit) || MAX_POINTS_PER_KEY)));
   const rows = sqlAll(
     `SELECT t, lat, lng, heading, journey_id, trip_id, line, operator, direction, destination
-     FROM vehicle_trail_points
-     WHERE ${where}
-     ORDER BY t ASC
-     LIMIT ?`,
+     FROM (
+       SELECT t, lat, lng, heading, journey_id, trip_id, line, operator, direction, destination
+       FROM vehicle_trail_points
+       WHERE ${where}
+       ORDER BY t DESC
+       LIMIT ?
+     ) AS recent
+     ORDER BY t ASC`,
     params,
   );
   return rows.map(rowToPoint);
