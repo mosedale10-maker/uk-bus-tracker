@@ -96,6 +96,7 @@ async function loadStopTimes(atco) {
       "Ocp-Apim-Subscription-Key": key,
       Accept: "application/json",
     },
+    signal: AbortSignal.timeout(8_000),
   });
   if (!res.ok) throw new Error(`first_departure_${res.status}`);
   const data = await res.json().catch(() => null);
@@ -256,7 +257,7 @@ export async function firstOccupancyNearBus({ line = "", destination = "", direc
     const candidates = nearby
       .map((row) => String(row?.["atco-code"] || row?.atco || row?.id || "").trim())
       .filter(Boolean)
-      .slice(0, 8);
+      .slice(0, 6);
     const results = await Promise.allSettled(
       candidates.map(async (atco) => {
         const body = await loadStopTimes(atco);

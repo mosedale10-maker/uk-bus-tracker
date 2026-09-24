@@ -469,11 +469,11 @@ app.get("/api/first-occupancy", async (req, res) => {
   };
   let hit = streamOccupancyForBus(query);
   if (!hit) {
-    try {
-      hit = await firstOccupancyNearBus(query);
-    } catch {
-      hit = null;
-    }
+    const nearby = firstOccupancyNearBus(query).catch(() => null);
+    hit = await Promise.race([
+      nearby,
+      new Promise((resolve) => setTimeout(() => resolve(null), 2_500)),
+    ]);
   }
   res.setHeader("Cache-Control", "no-store");
   res.json({
