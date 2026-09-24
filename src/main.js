@@ -5053,16 +5053,10 @@ async function showFleetRouteTails({
     for (const key of expanded) keys.add(key);
   }
 
-  const plannedRoutePromise = fetchPlannedRoutePath({
-    targets,
-    code,
-    opCode,
-    plannedTripId,
-    plannedServiceId,
-    plannedDate,
-  });
+  // Route-wide Map · tails intentionally remain recorded GPS tails. Bustimes
+  // alignment is used only for an explicit 36A Replay.
   await fetchServerTrailsChunked([...keys], { force: true });
-  const plannedRoutePath = await plannedRoutePromise;
+  const plannedRoutePath = [];
 
   clearPinnedTrails();
   const focusRegs = new Set(
@@ -6129,7 +6123,7 @@ async function startRoutePlayback({
     );
   // A diverted service normally uses recorded GPS. Route 36A is the explicit
   // exception requested for the published A50 alignment.
-  const plannedRouteOverride = usesPlannedRouteOverride(line, operator);
+  const plannedRouteOverride = usesPlannedRouteOverride(line, operator) && autoReplay;
   const actualRouteRequired = Boolean(
     !plannedRouteOverride && (diverted || isDivertedText(dest, line, operator)),
   );
