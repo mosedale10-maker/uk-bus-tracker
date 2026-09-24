@@ -410,24 +410,7 @@ let liveIndex = null;
 let liveIndexAt = 0;
 
 const messageEl = document.getElementById("message");
-const backgroundWorkNoticeEl = document.getElementById("background-work-notice");
-const backgroundWorkCloseEl = document.getElementById("background-work-close");
 
-try {
-  if (sessionStorage.getItem("uk-bus-background-work-notice-dismissed") === "1") {
-    backgroundWorkNoticeEl.hidden = true;
-  }
-} catch {
-  /* private browsing may block session storage */
-}
-backgroundWorkCloseEl?.addEventListener("click", () => {
-  backgroundWorkNoticeEl.hidden = true;
-  try {
-    sessionStorage.setItem("uk-bus-background-work-notice-dismissed", "1");
-  } catch {
-    /* keep the dismissal in memory */
-  }
-});
 const clockEl = document.getElementById("uk-clock");
 const clockDateEl = document.getElementById("uk-clock-date");
 const clockTimeEl = document.getElementById("uk-clock-time");
