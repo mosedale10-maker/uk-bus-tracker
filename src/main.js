@@ -4105,6 +4105,10 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
 function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
   const roadFlat = flattenTrailLatLngs(roadPath);
   if (roadFlat.length >= 2) return roadPath;
+  // A local nearest-road stitch can choose the opposite carriageway at a
+  // motorway junction and draw a convincing-looking loop. Coaches therefore
+  // wait for the validated OSRM geometry instead of showing that fallback.
+  if (breakOpts.coach || isCoachTrailOperator(breakOpts.operator)) return [];
   const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
   if (flattenTrailLatLngs(local).length >= 2) return local;
   return [];
@@ -13182,8 +13186,12 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
         segs = [];
       }
       if (!segs.length) {
-        // Local OFM snap — still roads, never raw GPS chords.
-        segs = trailSegmentsOf(alignTrailToRoadsLocal(latlngs, alignOpts), alignOpts);
+        // Local OFM snap is useful for ordinary bus/staff roads, but its
+        // nearest-road bridge can pick the wrong motorway carriageway. Keep
+        // failed coach alignment hidden until a validated road path exists.
+        if (!coach) {
+          segs = trailSegmentsOf(alignTrailToRoadsLocal(latlngs, alignOpts), alignOpts);
+        }
       } else {
         segs = segs.map((seg) => dedupeNearTrailPoints(seg, 2)).filter((seg) => seg.length >= 2);
       }
