@@ -5623,18 +5623,10 @@ export function createFleetBrowser({
       noc === "FLIX" ||
       /flix/i.test(`${vehicle.operator?.slug || ""} ${vehicle.operator?.name || ""}`);
     if (!isFlix) return;
-    const regKey = compactQuery(vehicle.reg);
-    const trailKeys = [
-      String(vehicle.id || ""),
-      /^\d+$/.test(String(vehicle.id || "")) ? `jny:${vehicle.id}` : "",
-      regKey && /^[A-Z0-9]+$/.test(regKey) ? `reg:${regKey}` : "",
-    ].filter(Boolean);
     try {
-      const coachRows = await fetchCoachHistoryFromTrails({
-        trailKeys,
-        line: String(lineFilter || "").trim(),
-        days: 7,
-        operator: "FLIX",
+      const coachRows = await cachedVehicleReplayRuns({
+        ...vehicle,
+        operator: vehicle.operator || { noc: "FLIX", id: "FLIX" },
       });
       if (token !== vehicleLoadToken || String(state.vehicle?.id) !== String(vehicle.id)) return;
       const filtered = date
@@ -5669,24 +5661,11 @@ export function createFleetBrowser({
     if (!isStaffs) return;
     const regKey = compactQuery(vehicle.reg);
     const idKey = String(vehicle.id || "").trim();
-    // Trail store keys: reg:YY16YLX and the raw BODS id bods-FPOT-FPOT-YY16_YLX.
-    const bodsKey =
-      regKey && /^[A-Z]{2}\d{2}[A-Z]{3}$/.test(regKey)
-        ? `bods-${noc}-${noc}-${regKey.slice(0, 4)}_${regKey.slice(4)}`
-        : "";
-    const trailKeys = [
-      idKey,
-      regKey && /^[A-Z0-9]+$/.test(regKey) ? `reg:${regKey}` : "",
-      bodsKey,
-    ].filter(Boolean);
-    if (!trailKeys.length) return;
+    if (!idKey && !regKey) return;
     try {
-      const coachRows = await fetchCoachHistoryFromTrails({
-        trailKeys,
-        line: String(lineFilter || "").trim(),
-        days: 7,
-        operator: noc,
-        busMode: true,
+      const coachRows = await cachedVehicleReplayRuns({
+        ...vehicle,
+        operator: vehicle.operator || { noc, id: noc },
       });
       if (token !== vehicleLoadToken || String(state.vehicle?.id) !== String(vehicle.id)) return;
       const filtered = date
