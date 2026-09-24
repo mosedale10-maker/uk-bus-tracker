@@ -6427,7 +6427,12 @@ async function startRoutePlayback({
   const coachOp = coachPlayback;
   // Route 36A explicitly displays the published A50 alignment instead of the
   // recorded Longton diversion. Other journeys still prefer recorded GPS.
-  let plannedPath = plannedRouteOverride && tripPath.length >= 2 ? tripPath : [];
+  const plannedPathBlocked =
+    plannedRouteOverride &&
+    tripPath.length >= 2 &&
+    trackedGps.length >= 2 &&
+    pathCrossesActiveRoadNotice(tripPath);
+  let plannedPath = plannedRouteOverride && tripPath.length >= 2 && !plannedPathBlocked ? tripPath : [];
   // Prefer the recorded GPS whenever this journey has a usable recorded run,
   // including historical Fleet rows. A scheduled/timetable path is only a
   // fallback when no GPS was captured; otherwise the row can silently show a
@@ -6659,7 +6664,9 @@ async function startRoutePlayback({
     (headsign ? " → " + headsign : "") +
     (plannedPath.length >= 2
       ? " · A50 route"
-      : actualRouteRequired
+      : plannedPathBlocked
+        ? " · diverted GPS route"
+        : actualRouteRequired
         ? " · actual GPS route"
         : usingTracked
           ? " · GPS path"
@@ -9886,6 +9893,23 @@ function tripPathFromTimes(times) {
     if (loc) push(Number(loc[1]), Number(loc[0]));
   }
   return path;
+}
+
+function pathCrossesActiveRoadNotice(path) {
+  const flat = Array.isArray(path?.[0]?.[0]) ? path.flat() : path;
+  if (!Array.isArray(flat) || flat.length < 2) return false;
+  const now = Date.now();
+  for (const notice of ROAD_NOTICES || []) {
+    if (!roadNoticeIsActive(notice, now) || !Array.isArray(notice.path) || notice.path.length < 2) continue;
+    for (let i = 0; i < flat.length; i += 1) {
+      const point = flat[i];
+      if (!Array.isArray(point) || !Number.isFinite(point[0]) || !Number.isFinite(point[1])) continue;
+      for (let j = 1; j < notice.path.length; j += 1) {
+        if (distPointToSegmentMeters(point, notice.path[j - 1], notice.path[j]) <= 90) return true;
+      }
+    }
+  }
+  return false;
 }
 
 function plannedPathReplayPoints(path, { startMs = Date.now(), endMs = 0, direction = "" } = {}) {
