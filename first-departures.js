@@ -23,6 +23,9 @@ let token = { at: 0, value: "" };
 let tokenInflight = null;
 const stopCache = new Map(); // atco -> { at, body }
 const stopInflight = new Map(); // atco -> Promise<body>
+const FIRST_STOP_MAX_CONCURRENT = 3;
+let activeStopFetches = 0;
+const stopFetchWaiters = [];
 
 function json(res, status, body) {
   res.statusCode = status;
@@ -114,12 +117,25 @@ async function loadStopTimes(atco) {
   };
 }
 
+async function withFirstStopSlot(job) {
+  if (activeStopFetches >= FIRST_STOP_MAX_CONCURRENT) {
+    await new Promise((resolve) => stopFetchWaiters.push(resolve));
+  }
+  activeStopFetches += 1;
+  try {
+    return await job();
+  } finally {
+    activeStopFetches -= 1;
+    stopFetchWaiters.shift()?.();
+  }
+}
+
 function cachedStop(atco) {
   const hit = stopCache.get(atco);
   if (hit && Date.now() - hit.at < STOP_TTL_MS) return Promise.resolve(hit.body);
   const pending = stopInflight.get(atco);
   if (pending) return pending;
-  const job = loadStopTimes(atco)
+  const job = withFirstStopSlot(() => loadStopTimes(atco))
     .then((body) => {
       stopCache.set(atco, { at: Date.now(), body });
       if (stopCache.size > 60) stopCache.delete(stopCache.keys().next().value);

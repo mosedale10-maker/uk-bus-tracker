@@ -42,6 +42,7 @@ const STAFFS_FORCE_OPS = ["FPOT", "DAGC", "CRDR", "SLBS", "BANG", "SOST"];
 
 const MAP_VIEW_STORAGE_KEY = "uk-bus-map-view-v1";
 const DEFAULT_MAP_VIEW = { lat: 54.2, lng: -2.5, zoom: 7 };
+let appTab = "home";
 
 function savedMapView() {
   try {
@@ -226,7 +227,7 @@ L.control
   .layers(
     { Streets: streetsLayer, Satellite: satelliteLayer },
     {},
-    { position: "topright", collapsed: false },
+    { position: "bottomright", collapsed: false },
   )
   .addTo(map);
 
@@ -765,11 +766,18 @@ map.on("zoomend", () => {
 let inflight = null;
 let timer = null;
 let coastTimer = null;
+let liveScheduleRunning = false;
 let busesBusy = false;
 let busesGen = 0;
 /** Last bustimes paint rows — reused on BODS position polls so pins stay light/fast. */
 let lastPaintBuses = [];
+let lastCoachPaintBuses = [];
 let lastPaintAt = 0;
+let lastPaintRequestAt = 0;
+let lastPaintViewKey = "";
+const PAINT_REFRESH_MS = 60_000;
+const PAINT_MOVE_REFRESH_MS = 15_000;
+const PAINT_STAFF_RETRY_MS = 30_000;
 const BUS_POLL_MS = 6000;
 const STALE_PING_MS = 5 * 60 * 1000;
 /** Staffs Ticketer buses often sit quietly at termini on overnight routes — keep them a bit longer. */
@@ -820,6 +828,23 @@ function pruneStaleMarkers() {
 let ukLiveBusCount = null;
 let ukLiveBusCountAt = 0;
 let ukLiveBusCountPromise = null;
+let liveCountTimer = null;
+
+function syncHomeLiveCountPolling() {
+  if (liveCountTimer) {
+    clearInterval(liveCountTimer);
+    liveCountTimer = null;
+  }
+  if (appTab !== "home" || document.hidden) return;
+  refreshUkLiveBusCount()
+    .then(() => updateLiveBusCount())
+    .catch(() => {});
+  liveCountTimer = setInterval(() => {
+    refreshUkLiveBusCount()
+      .then(() => updateLiveBusCount())
+      .catch(() => {});
+  }, 30_000);
+}
 
 async function refreshUkLiveBusCount({ force = false } = {}) {
   if (!force && ukLiveBusCount != null && Date.now() - ukLiveBusCountAt < 25_000) {
@@ -1550,6 +1575,7 @@ function recordStaffTrail(marker, lat, lng, heading, meta = {}) {
     "";
   const trailMeta = {
     ...meta,
+    _force: marker === selectedMapMarker || isFollowingMarker(marker),
     reg,
     line,
     journeyId: journeyId ? String(journeyId) : meta.journeyId || "",
@@ -2598,6 +2624,10 @@ const TRAIL_MAX_POINTS = 8000;
 const TRAIL_MAX_VEHICLES = 60;
 /** Server + local GPS tails are always kept for this many days (independent of Plus history chips). */
 const TRAIL_KEEP_DAYS = 7;
+// The server-side recorder is the canonical seven-day store. Uploading every
+// viewer's duplicate local trail stream adds POSTs and JSON work without adding
+// history; keep the client queue available as an explicit fallback switch.
+const CLIENT_TRAIL_UPLOADS_ENABLED = false;
 const trailMem = new Map();
 const trailPersistIds = new Set();
 let trailPersistTimer = null;
@@ -2728,6 +2758,7 @@ function mergeTrailPoints(existing, incoming) {
 }
 
 function queueTrailUpload(key, point) {
+  if (!CLIENT_TRAIL_UPLOADS_ENABLED) return;
   if (!key || !point) return;
   const id = String(key);
   let list = trailUploadQueue.get(id);
@@ -2948,9 +2979,25 @@ function trailKeysForVehicle({
   return keys;
 }
 
+function shouldRecordClientTrail(key, meta = {}) {
+  if (meta._force || meta._segmented) return true;
+  const id = String(key || "");
+  if (!id) return false;
+  if (pinnedTrailKeys.has(id) || String(liveTrailKey) === id) return true;
+  const selected = selectedMapMarker;
+  if (selected?.bus) {
+    if (id === String(selected.bus.id || "")) return true;
+    if (id === String(selected.extra?.trailKey || "")) return true;
+  }
+  if (selected?.staff && id === staffTrailKey(selected.staff)) return true;
+  if (followTarget?.kind === "bus" && id === String(followTarget.id || "")) return true;
+  return false;
+}
+
 function recordVehicleTrail(key, lat, lng, heading, meta = {}) {
   if (!key || !Number.isFinite(lat) || !Number.isFinite(lng)) return;
   const id = String(key);
+  if (!shouldRecordClientTrail(id, meta)) return;
   let points = trailMem.get(id);
   if (!points) {
     points = [];
@@ -5038,8 +5085,13 @@ loadTrailStore();
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") {
     saveMapView();
+    stopLiveSchedule();
+    syncHomeLiveCountPolling();
     flushTrailStore();
     flushTrailUpload().catch(() => {});
+  } else {
+    syncLiveSchedule();
+    syncHomeLiveCountPolling();
   }
 });
 window.addEventListener("pagehide", () => {
@@ -9734,7 +9786,8 @@ async function enrichBustimes(eventOrMarker) {
   const gen = (marker._enrichGen = (marker._enrichGen || 0) + 1);
   marker.extra ||= {};
   marker.extra.historyDays ||= historyDays;
-  loadHistoryIntoMarker(marker).catch(() => {});
+  // Historical rows are loaded only when a history/replay control is opened.
+  // The normal live card only needs current vehicle and trip enrichment.
   rememberTrailVehicle(bus.id);
   // Load saved GPS tail so History · Map / Follow arrows work for locals and coaches.
   marker.extra.trailKey = marker.extra.trailKey || String(bus.id || "");
@@ -9931,7 +9984,7 @@ async function enrichStaff(eventOrMarker) {
   if (gen !== marker._enrichGen) return;
   if (btVehicle) marker.extra.btVehicle = btVehicle;
   marker.extra.liveryName = btVehicle?.livery?.name || marker.extra.liveryName || "";
-  loadHistoryIntoMarker(marker);
+  // Historical rows are fetched on demand by the history/replay controls.
   fetchLimitNear(ll.lat, ll.lng, marker.extra.limitMph).then((limit) => {
     if (gen !== marker._enrichGen) return;
     if (!Number.isFinite(limit) || limit <= 0) return;
@@ -10120,10 +10173,17 @@ function upsertLiveBus(bus, snapped) {
   const recordLng = Number.isFinite(Number(rawLng)) ? Number(rawLng) : snapped.lng;
   // Store the feed's real position, never the short forward coast used to smooth
   // the moving marker; coasting must not make the recorded tail run ahead.
-  recordVehicleTrail(bus.id, recordLat, recordLng, snapped.heading, trailMeta);
-  const btId = bus.btId ?? bus.vehicle?.id;
-  if (btId != null && String(btId) !== String(bus.id) && /^\d+$/.test(String(btId))) {
-    recordVehicleTrail(String(btId), recordLat, recordLng, snapped.heading, trailMeta);
+  // Ordinary viewers only retain the selected/followed/pinned vehicle; the
+  // server recorder owns the full seven-day history.
+  if (shouldRecordClientTrail(bus.id, trailMeta)) {
+    recordVehicleTrail(bus.id, recordLat, recordLng, snapped.heading, trailMeta);
+    const btId = bus.btId ?? bus.vehicle?.id;
+    if (btId != null && String(btId) !== String(bus.id) && /^\d+$/.test(String(btId))) {
+      recordVehicleTrail(String(btId), recordLat, recordLng, snapped.heading, {
+        ...trailMeta,
+        _force: true,
+      });
+    }
   }
   if (existing) {
     existing.bus = bus;
@@ -10183,6 +10243,7 @@ function upsertLiveBus(bus, snapped) {
 }
 
 async function loadBuses({ replace = false } = {}) {
+  if (!liveMapActive()) return;
   const zoom = map.getZoom();
   const overStaffs = mapOverlapsStaffordshire();
   const histFocus = historyMapFocus();
@@ -10232,6 +10293,11 @@ async function loadBuses({ replace = false } = {}) {
     xmax: bounds.getEast().toFixed(5),
     ymax: bounds.getNorth().toFixed(5),
   });
+  const paintViewKey = `${map.getZoom()}|${bounds
+    .getWest()
+    .toFixed(2)}|${bounds.getSouth().toFixed(2)}|${bounds.getEast().toFixed(2)}|${bounds
+    .getNorth()
+    .toFixed(2)}`;
 
   try {
     showMessage("");
@@ -10239,9 +10305,12 @@ async function loadBuses({ replace = false } = {}) {
     // extras only fill overnight / sparse AVL gaps — never replace bbox paint.
     const staffsPaintOps = overStaffs ? ["FPOT", "DAGC", "CRDR", "SLBS"] : [];
     const coachPaintOps = ["NATX", "FLIX"];
-    // Refresh paint on map move/replace, when cache is empty/stale, or when
-    // Staffs buses still lack bustimes numeric livery ids.
+    // Paint is a slow-changing dataset. Keep the first load immediate, then
+    // debounce map moves/repeated polls so one viewport does not fan out into
+    // several paint requests every six seconds.
     const paintAgeMs = lastPaintAt ? Date.now() - lastPaintAt : Infinity;
+    const paintRequestAgeMs = lastPaintRequestAt ? Date.now() - lastPaintRequestAt : Infinity;
+    const paintViewChanged = paintViewKey !== lastPaintViewKey;
     const staffsNeedPaint =
       overStaffs &&
       [...markers.values()].some(
@@ -10252,8 +10321,19 @@ async function loadBuses({ replace = false } = {}) {
           ) &&
           !hasNumericBustimesLivery(m.bus),
       );
+    const paintDue =
+      !lastPaintBuses.length ||
+      paintAgeMs >= PAINT_REFRESH_MS ||
+      (paintViewChanged && paintAgeMs >= PAINT_MOVE_REFRESH_MS);
+    const paintRetryAllowed =
+      !Number.isFinite(paintRequestAgeMs) ||
+      paintRequestAgeMs >= (paintViewChanged ? 10_000 : 30_000);
     const wantPaint =
-      replace || !lastPaintBuses.length || paintAgeMs > 45_000 || staffsNeedPaint;
+      paintRetryAllowed && (paintDue || (staffsNeedPaint && paintAgeMs >= PAINT_STAFF_RETRY_MS));
+    if (wantPaint) {
+      lastPaintRequestAt = Date.now();
+      lastPaintViewKey = paintViewKey;
+    }
     const safeJson = async (res) => {
       if (!res || !res.ok) return [];
       try {
@@ -10268,14 +10348,11 @@ async function loadBuses({ replace = false } = {}) {
     const safeFetch = (url) => fetch(url, { signal }).catch(() => null);
     const paintFetch = (url) => fetch(url).catch(() => null);
 
-    const [localRes, flixBuses, natxBuses, bodsLive, staffsOpFeeds, paintRes, ...extraPaintRes] =
+    const [localRes, flixBuses, natxBuses, staffsOpFeeds, paintRes, ...extraPaintRes] =
       await Promise.all([
         showLocal ? safeFetch(`/api/vehicles?${params}`) : Promise.resolve(null),
         showCoach ? fetchFlixBuses(signal) : Promise.resolve([]),
         showCoach ? fetchNatxBuses(signal) : Promise.resolve([]),
-        showLocal
-          ? fetchBodsVehicles(params, signal)
-          : Promise.resolve({ vehicles: [], ok: false }),
         staffsOpList.length
           ? Promise.all(
               staffsOpList.map((op) =>
@@ -10305,10 +10382,13 @@ async function loadBuses({ replace = false } = {}) {
     if (signal.aborted || gen !== busesGen) return;
     if (showLocal && (!localRes || !localRes.ok)) return;
     let localBuses = await safeJson(localRes);
-    if (bodsLive?.ok) attachFeedSpeedFromBods(localBuses, bodsLive.vehicles);
+    // /api/vehicles already returns the same parsed BODS snapshot for normal
+    // operators, including SIRI velocity. Reuse it for the OOS fallback rather
+    // than downloading and parsing the identical bbox a second time.
+    const bodsLive = { vehicles: localBuses, ok: Boolean(localRes?.ok) };
 
     let paintBuses = lastPaintBuses;
-    let coachPaintBuses = [];
+    let coachPaintBuses = lastCoachPaintBuses;
     if (wantPaint) {
       const paintById = new Map();
       // Keep prior paint on partial failure so liveries don't flash off.
@@ -10334,6 +10414,9 @@ async function loadBuses({ replace = false } = {}) {
       }
 
       const coachById = new Map();
+      for (const row of lastCoachPaintBuses) {
+        if (row?.id != null) coachById.set(row.id, row);
+      }
       for (const res of coachPaintRes) {
         if (!res?.ok) continue;
         try {
@@ -10346,7 +10429,11 @@ async function loadBuses({ replace = false } = {}) {
           /* ignore */
         }
       }
-      coachPaintBuses = [...coachById.values()];
+      const nextCoachPaint = [...coachById.values()];
+      if (nextCoachPaint.length || !lastCoachPaintBuses.length) {
+        lastCoachPaintBuses = nextCoachPaint;
+      }
+      coachPaintBuses = lastCoachPaintBuses;
     }
 
     const byId = new Map();
@@ -10545,21 +10632,55 @@ async function loadBuses({ replace = false } = {}) {
 }
 
 function refreshAltonIfRelevant() {
+  if (!liveMapActive()) return;
   if (!mapOverlapsStaffordshire() && !staffMarkers.size) return;
   loadAltonTowers().catch(() => {});
 }
 
+function liveMapActive() {
+  return appTab === "map" && !document.hidden;
+}
+
+function stopLiveSchedule() {
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+  if (coastTimer) {
+    clearInterval(coastTimer);
+    coastTimer = null;
+  }
+  if (inflight) {
+    inflight.abort();
+    inflight = null;
+  }
+  busesGen += 1;
+  busesBusy = false;
+  liveScheduleRunning = false;
+}
+
 function schedule() {
-  clearInterval(timer);
-  clearInterval(coastTimer);
-  loadBuses({ replace: true });
+  if (!liveMapActive() || liveScheduleRunning) return;
+  liveScheduleRunning = true;
+  loadBuses({ replace: true }).catch(() => {});
   refreshAltonIfRelevant();
   timer = setInterval(() => {
+    if (!liveMapActive()) {
+      stopLiveSchedule();
+      return;
+    }
     pruneStaleMarkers();
-    loadBuses();
+    loadBuses().catch(() => {});
     refreshAltonIfRelevant();
   }, BUS_POLL_MS);
-  coastTimer = setInterval(advanceLiveMarkers, 1000);
+  // Coasting is currently disabled because replacing feed objects discarded its
+  // state and caused marker snap-back. Do not pay for a no-op 1 Hz loop.
+  if (COAST_MAX_M > 0) coastTimer = setInterval(advanceLiveMarkers, 1000);
+}
+
+function syncLiveSchedule() {
+  if (liveMapActive()) schedule();
+  else stopLiveSchedule();
 }
 
 map.on("moveend", () => {
@@ -11430,10 +11551,9 @@ let snapRoadsAt = 0;
 const motion = new Map();
 
 function roadsForSnap() {
-  if (!decodedTileCache.size) return snapRoads;
-  const roads = [];
-  for (const tile of decodedTileCache.values()) roads.push(...tile);
-  return roads.length ? roads : snapRoads;
+  // ensureSnapRoads() already decodes only the current viewport. Reusing that
+  // array avoids rebuilding/scanning every cached tile on each marker update.
+  return snapRoads;
 }
 
 function lngLatToTile(lng, lat, z) {
@@ -11739,6 +11859,7 @@ function placeOnRoad(marker, snapped) {
       direction: marker.bus.direction || marker.bus.directionRef || "",
       destination: marker.bus.destination || marker.extra?.to || "",
       reg: busRegistration(marker.bus, marker.extra || {}),
+      _force: marker === selectedMapMarker || isFollowingMarker(marker),
     });
   }
   const prev = marker._roadHeading;
@@ -12623,7 +12744,6 @@ const aboutScreenEl = document.getElementById("about-screen");
 const moreBtnEl = document.getElementById("more-btn");
 const topbarEl = document.querySelector(".topbar");
 const topbarToolsEl = document.getElementById("topbar-tools");
-let appTab = "home";
 
 function closeTopMenu() {
   if (!moreBtnEl || !topbarEl || !topbarToolsEl) return;
@@ -12667,6 +12787,8 @@ function setAppTab(tab) {
       }
     });
   }
+  syncLiveSchedule();
+  syncHomeLiveCountPolling();
   closeTopMenu();
 }
 
@@ -12975,14 +13097,11 @@ document.getElementById("search-form").addEventListener("submit", async (event) 
 
 updateUkClock();
 setInterval(updateUkClock, 1000);
-refreshUkLiveBusCount({ force: true }).then(() => updateLiveBusCount());
-setInterval(() => {
-  refreshUkLiveBusCount().then(() => updateLiveBusCount());
-}, 30_000);
+syncHomeLiveCountPolling();
 
 map.whenReady(() => {
   map.invalidateSize();
-  schedule();
+  syncLiveSchedule();
 });
 
 const youIcon = L.divIcon({

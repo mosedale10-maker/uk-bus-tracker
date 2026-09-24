@@ -332,6 +332,9 @@ const FEED_TTL_MS = 5000;
 /** Cap the upstream wait — wide Staffs boxes can take 6–15s, which stalls the map. */
 const BODS_FEED_TIMEOUT_MS = 8000;
 const feedCache = new Map();
+const parsedFeedCache = new Map();
+const parsedFeedInflight = new Map();
+const PARSED_FEED_CACHE_MAX = 32;
 
 function feedCacheKey({ bbox = "", operatorRef = "" } = {}) {
   return `${operatorRef || "*"}|${bbox || "*"}`;
@@ -405,11 +408,29 @@ function operatorFromQuery(url) {
 }
 
 async function loadBodsItems(apiKey, { bbox = "", operatorRef = "" } = {}) {
-  const { response, xml } = await bodsDatafeed(apiKey, { bbox, operatorRef });
-  if (!response.ok) {
-    return { ok: false, status: response.status, items: [] };
+  const key = feedCacheKey({ bbox, operatorRef });
+  const cached = parsedFeedCache.get(key);
+  if (cached && Date.now() - cached.at < FEED_TTL_MS) {
+    return { ok: true, status: 200, items: cached.items, fromCache: true };
   }
-  return { ok: true, status: 200, items: parseSiriVehicles(xml) };
+  const alreadyInflight = parsedFeedInflight.get(key);
+  if (alreadyInflight) return alreadyInflight;
+
+  const job = (async () => {
+    const { response, xml } = await bodsDatafeed(apiKey, { bbox, operatorRef });
+    if (!response.ok) {
+      return { ok: false, status: response.status, items: [] };
+    }
+    const result = { ok: true, status: 200, items: parseSiriVehicles(xml) };
+    parsedFeedCache.set(key, { at: Date.now(), items: result.items });
+    if (parsedFeedCache.size > PARSED_FEED_CACHE_MAX) {
+      const oldest = [...parsedFeedCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+      if (oldest) parsedFeedCache.delete(oldest[0]);
+    }
+    return result;
+  })().finally(() => parsedFeedInflight.delete(key));
+  parsedFeedInflight.set(key, job);
+  return job;
 }
 
 /** Approximate GB bbox when only operator=/id= is requested. */
