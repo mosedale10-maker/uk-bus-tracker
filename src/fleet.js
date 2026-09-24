@@ -4854,7 +4854,6 @@ export function createFleetBrowser({
           openLine: true,
         })}
       </section>
-      ${renderVehicleReplayRuns(v)}
       <label class="fleet-date">
         <span class="sr-only">Date</span>
         <select id="fleet-date">${Array.from({ length: 14 }, (_, i) => {
@@ -6054,7 +6053,6 @@ export function createFleetBrowser({
       // Paint today's bustimes journeys immediately — do not wait on 7-day AT trails.
       applyJourneysToState(vehicle, journeys, state.lineFilter);
       void loadVehicleRouteSummary(vehicle);
-      void loadVehicleReplayRuns(vehicle, token);
 
       void mergeAtHistoryDeferred({
         token,
