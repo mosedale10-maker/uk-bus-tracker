@@ -2022,6 +2022,8 @@ const GPS_REPLAY_SPEEDS = [1, 15, 60, 240];
 const REPLAY_ARROW_SPACING_ZOOMED_M = 52;
 const REPLAY_ARROW_SPACING_M = 28;
 const REPLAY_ARROW_LIMIT = 480;
+const REPLAY_PREVIEW_FRACTION = 0.02;
+const REPLAY_PREVIEW_MAX_MS = 120_000;
 
 function setGpsReplayActive(active) {
   mapWrapEl?.classList.toggle("gps-replay-active", Boolean(active));
@@ -2045,6 +2047,12 @@ const REPLAY_TAIL_COLOR = "#5b51e3";
 const REPLAY_TAIL_WEIGHT = 7;
 const REPLAY_TAIL_CASING_COLOR = "#f8fafc";
 const REPLAY_TAIL_CASING_WEIGHT = 10;
+
+function replayPreviewPosition(replay) {
+  const span = Math.max(0, Number(replay?.t1) - Number(replay?.t0));
+  if (!Number.isFinite(span) || span <= 0) return 0;
+  return Math.min(span * REPLAY_PREVIEW_FRACTION, REPLAY_PREVIEW_MAX_MS, span - 1);
+}
 
 function replayArrowSpacingM() {
   const zoom = map.getZoom();
@@ -2314,6 +2322,10 @@ function updateReplayBusMarkerAt(p) {
 
 function gpsReplayStart() {
   if (!gpsReplay?.pts?.length) return;
+  if (!gpsReplay.hasStarted) {
+    gpsReplay.pos = Math.max(gpsReplay.pos, replayPreviewPosition(gpsReplay));
+    gpsReplay.hasStarted = true;
+  }
   setGpsReplayActive(true);
   gpsReplay.playing = true;
   gpsReplay.raf = 0;
@@ -2414,6 +2426,7 @@ function gpsReplaySetup(pts) {
     travelledPath: null,
     travelledEndIndex: -1,
     travelledT: Number.NaN,
+    hasStarted: false,
     directionArrows: [],
     arrowScanIndex: 0,
     arrowLastPoint: clean[0],
@@ -2423,9 +2436,11 @@ function gpsReplaySetup(pts) {
       pathLengthMeters(pathFromGpsPoints(clean)) / REPLAY_ARROW_LIMIT,
     ),
   };
-  // Start with no travelled line; it grows only as the replay marker advances.
+  // Start with a short recorded tail so Replay is visibly a replay immediately;
+  // the line still ends at the current cursor and never exposes future points.
+  gpsReplay.pos = replayPreviewPosition(gpsReplay);
   gpsReplayTravelledLine();
-  gpsReplayUpdateTravelled(gpsReplay.t0);
+  gpsReplayUpdateTravelled(gpsReplay.t0 + gpsReplay.pos);
   gpsReplayControls(true);
 }
 const journeyPanelEl = document.getElementById("journey-panel");
@@ -13080,6 +13095,7 @@ playbackReplayEl?.addEventListener("click", () => {
   if (gpsReplay.playing) gpsReplayPause();
   else if (gpsReplay.pos >= gpsReplay.t1 - gpsReplay.t0) {
     gpsReplay.pos = 0;
+    gpsReplay.hasStarted = false;
     gpsReplayStart();
   } else gpsReplayStart();
 });
