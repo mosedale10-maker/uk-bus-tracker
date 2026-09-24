@@ -6282,6 +6282,12 @@ async function startRoutePlayback({
     direction: "",
   };
   let allGps = collectTrailGpsForKeys(keys, trackOpts);
+  if (allGps.length < 2 && reg) {
+    const regKey = regTrailKey(reg);
+    if (regKey && !keys.includes(regKey)) keys.push(regKey);
+    await fetchServerTrails([regKey], { fromMs, toMs, force: true });
+    allGps = collectTrailGpsForKeys(keys, trackOpts);
+  }
   if (coachPlayback && allGps.length < 2) {
     await fetchServerTrailsChunked(keys, { force: true });
     if (requestId !== playbackRequestSeq) return;
