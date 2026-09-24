@@ -3414,6 +3414,105 @@ function clipPointsToSingleDirectionRun(points, { direction = "", aroundMs = 0 }
   return best;
 }
 
+/**
+ * First Potteries and other local feeds can change journey/trip IDs at an
+ * intermediate stop or terminus while the same physical run continues. A
+ * Fleet replay row represents that run, so join those short, same-line pieces
+ * instead of stopping at the first ID. Direction/line changes and real gaps
+ * still start a separate replay.
+ */
+const RECORDED_REPLAY_JOIN_GAP_MS = 22 * 60_000;
+const RECORDED_REPLAY_MAX_JUMP_M = 8_000;
+
+function recordedReplayRunDirection(run) {
+  return inferTrailDirection(run) || normalizeTrailDirection(run?.find((p) => p?.direction)?.direction);
+}
+
+function canJoinRecordedReplayRuns(previous, next, { line = "", direction = "", maxGapMs = RECORDED_REPLAY_JOIN_GAP_MS } = {}) {
+  if (!previous?.length || !next?.length) return false;
+  const previousEnd = previous[previous.length - 1];
+  const nextStart = next[0];
+  const gap = Number(nextStart.t) - Number(previousEnd.t);
+  if (!Number.isFinite(gap) || gap < 0 || gap > maxGapMs) return false;
+
+  const previousLine = String(previous.find((p) => p?.line)?.line || "").trim().toUpperCase();
+  const nextLine = String(next.find((p) => p?.line)?.line || "").trim().toUpperCase();
+  const wantedLine = String(line || "").trim().toUpperCase();
+  if (previousLine && nextLine && !sameServiceLine(previousLine, nextLine)) return false;
+  if (wantedLine && previousLine && !sameServiceLine(previousLine, wantedLine)) return false;
+  if (wantedLine && nextLine && !sameServiceLine(nextLine, wantedLine)) return false;
+
+  const wantedDirection = normalizeTrailDirection(direction);
+  const previousDirection = recordedReplayRunDirection(previous);
+  const nextDirection = recordedReplayRunDirection(next);
+  if (wantedDirection && previousDirection && previousDirection !== wantedDirection) return false;
+  if (wantedDirection && nextDirection && nextDirection !== wantedDirection) return false;
+  if (previousDirection && nextDirection && previousDirection !== nextDirection) return false;
+
+  const jump = haversineMeters(
+    Number(previousEnd.lat),
+    Number(previousEnd.lng),
+    Number(nextStart.lat),
+    Number(nextStart.lng),
+  );
+  return Number.isFinite(jump) && jump <= RECORDED_REPLAY_MAX_JUMP_M;
+}
+
+function mergeRecordedReplayRuns(runs, startIndex, opts = {}) {
+  if (!Array.isArray(runs) || !runs.length) return [];
+  let first = Math.max(0, Math.min(Number(startIndex) || 0, runs.length - 1));
+  let last = first;
+  while (
+    first > 0 &&
+    canJoinRecordedReplayRuns(runs[first - 1], runs[first], opts)
+  ) {
+    first -= 1;
+  }
+  while (
+    last + 1 < runs.length &&
+    canJoinRecordedReplayRuns(runs[last], runs[last + 1], opts)
+  ) {
+    last += 1;
+  }
+  const out = [];
+  for (let i = first; i <= last; i += 1) {
+    for (const point of runs[i]) {
+      const previous = out[out.length - 1];
+      if (
+        previous &&
+        Math.abs(Number(previous.t) - Number(point.t)) < 500 &&
+        haversineMeters(previous.lat, previous.lng, point.lat, point.lng) < 2
+      ) {
+        continue;
+      }
+      out.push(point);
+    }
+  }
+  return out;
+}
+
+function findTrailRunIndex(runs, points, aroundMs = 0) {
+  if (!runs.length || !points?.length) return -1;
+  const firstT = Number(points[0]?.t);
+  const lastT = Number(points[points.length - 1]?.t);
+  let bestIndex = 0;
+  let bestScore = Infinity;
+  for (let i = 0; i < runs.length; i += 1) {
+    const start = Number(runs[i][0]?.t);
+    const end = Number(runs[i][runs[i].length - 1]?.t);
+    const overlap = Math.min(lastT, end) - Math.max(firstT, start);
+    const distance = aroundMs
+      ? Math.min(Math.abs(aroundMs - start), Math.abs(aroundMs - end))
+      : Math.abs(aroundMs - (start + end) / 2);
+    const score = overlap >= 0 ? -overlap : distance;
+    if (score < bestScore) {
+      bestScore = score;
+      bestIndex = i;
+    }
+  }
+  return bestIndex;
+}
+
 /** Merge points from several keys (dedupe by time) for trip segmentation. */
 function collectTrailGpsForKeys(keys, filter = {}) {
   const byT = new Map();
@@ -5839,8 +5938,10 @@ async function startRoutePlayback({
   }
   const tripSegments = segmentTrailIntoTrips(allGps, { gapMs: coachGapMs });
 
-  // Playback highlight: the one trip matching journey/trip/direction/time — not the whole there-and-back.
+  // Playback highlight: start with the trip matching journey/trip/time. Recorded
+  // Fleet rows are then expanded below when a feed changes IDs mid-run.
   let trackedGps = [];
+  let trackedRunIndex = -1;
   if (resolvedTripId || safeJourneyId || safeDirection || aroundMs) {
     const wantTrip = String(resolvedTripId || tripId || "").trim();
     const wantJny = String(safeJourneyId || "").trim();
@@ -5851,36 +5952,30 @@ async function startRoutePlayback({
     });
     if (match) {
       trackedGps = match;
-      // Journey/trip ids often flap at intermediate stops — if this slice is short, prefer the
-      // longer continuous same-direction run around that time (through to the final destination).
-      if (match.length < 16 && allGps.length > match.length) {
-        const midT =
-          aroundMs ||
-          Number(match[Math.floor(match.length / 2)]?.t) ||
-          Number(match[0]?.t) ||
-          0;
-        const expanded = clipPointsToSingleDirectionRun(allGps, {
-          direction:
-            safeDirection ||
-            inferTrailDirection(match) ||
-            normalizeTrailDirection(match.find((p) => p.direction)?.direction),
-          aroundMs: midT,
-        });
-        if (expanded.length > trackedGps.length) trackedGps = expanded;
-      }
+      trackedRunIndex = tripSegments.indexOf(match);
     } else {
       trackedGps = clipPointsToSingleDirectionRun(allGps, {
         direction: safeDirection,
         aroundMs: aroundMs || (allGps[0] ? Number(allGps[0].t) : 0),
       });
+      trackedRunIndex = findTrailRunIndex(tripSegments, trackedGps, aroundMs);
     }
   } else if (tripSegments.length) {
     trackedGps = tripSegments[0];
+    trackedRunIndex = 0;
   }
   if (trackedGps.length < 2 && allGps.length >= 2) {
     trackedGps = clipPointsToSingleDirectionRun(allGps, {
       direction: safeDirection,
       aroundMs: aroundMs || Number(allGps[0].t) || 0,
+    });
+    trackedRunIndex = findTrailRunIndex(tripSegments, trackedGps, aroundMs);
+  }
+  if (preserveRecordedRun && trackedRunIndex >= 0 && tripSegments.length > 1) {
+    trackedGps = mergeRecordedReplayRuns(tripSegments, trackedRunIndex, {
+      line: line || trackedGps.find((p) => p?.line)?.line || "",
+      direction: safeDirection || recordedReplayRunDirection(trackedGps),
+      maxGapMs: coachPlayback ? COACH_TRAIL_BREAK_GAP_MS : RECORDED_REPLAY_JOIN_GAP_MS,
     });
   }
   if (replayRecordedRun) {
