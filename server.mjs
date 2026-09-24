@@ -431,6 +431,26 @@ app.get("/api/health", (_req, res) => {
 app.get("/api/bods-occupancy", (req, res) => handleBodsOccupancy(req, res, bodsKey));
 app.get("/api/dg-at-timetable", (req, res) => handleDgAtTimetable(req, res));
 app.get("/api/bods-vehicles", (req, res) => handleBodsVehicles(req, res, bodsKey));
+
+/**
+ * Current build id — the client polls this and reloads when it changes, so an
+ * open tab picks up a deploy without a manual refresh. Cached per-process (a
+ * restart is what changes it) but sent no-store so the poll is never cached.
+ */
+const BUILD_ID = (() => {
+  try {
+    const html = fs.readFileSync(path.join(distDir, "index.html"), "utf8");
+    const asset = String(html.match(/assets\/index-[A-Za-z0-9_.-]+\.js/) || [""])[0];
+    return asset || Date.now().toString(36);
+  } catch {
+    return "unknown";
+  }
+})();
+app.get("/api/build", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.type("json").send(JSON.stringify({ build: BUILD_ID }));
+});
 // Live First Bus seat / wheelchair counts (cached gateway proxy — see first-departures.js).
 app.get("/api/first-stop-times", (req, res) => handleFirstStopTimes(req, res));
 

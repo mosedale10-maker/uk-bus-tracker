@@ -410,6 +410,58 @@ let liveIndexAt = 0;
 
 const messageEl = document.getElementById("message");
 
+/**
+ * Auto-update: poll the server's build id and reload when it changes, so a deploy
+ * reaches open tabs without a manual refresh. Assets are content-hashed, so a plain
+ * reload always pulls the new bundle. Pauses while the tab is hidden and skips the
+ * first check so a just-loaded page never bounces.
+ */
+function watchForNewBuild() {
+  const POLL_MS = 60_000;
+  let current = "";
+  let timer = null;
+  const start = () => {
+    if (timer) return;
+    timer = setInterval(check, POLL_MS);
+  };
+  const stop = () => {
+    clearInterval(timer);
+    timer = null;
+  };
+  async function check() {
+    if (document.hidden) return;
+    try {
+      const res = await fetch("/api/build", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const build = String(data?.build || "");
+      if (!build) return;
+      if (!current) {
+        current = build;
+        return;
+      }
+      if (build !== current) {
+        stop();
+        location.reload();
+      }
+    } catch {
+      /* offline or transient — try again next tick */
+    }
+  }
+  // Establish the baseline immediately, then poll.
+  check();
+  start();
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stop();
+    else {
+      check();
+      start();
+    }
+  });
+}
+
+watchForNewBuild();
+
 const clockEl = document.getElementById("uk-clock");
 const clockDateEl = document.getElementById("uk-clock-date");
 const clockTimeEl = document.getElementById("uk-clock-time");
