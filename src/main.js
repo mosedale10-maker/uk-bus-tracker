@@ -4567,7 +4567,13 @@ function clipGpsPointsAtPing(gpsPoints, ping) {
       nearestIndex = i;
     }
   }
-  if (nearestIndex >= 0 && nearestDistance <= 350) out = out.slice(0, nearestIndex + 1);
+  if (nearestIndex < 0 || nearestDistance > 350) {
+    // The live marker is on another journey or the GPS is too sparse to prove
+    // it belongs to this tail. Never append that remote coach/bus position:
+    // an OSRM road route can otherwise stretch the tail past the vehicle.
+    return out;
+  }
+  out = out.slice(0, nearestIndex + 1);
 
   const last = out[out.length - 1];
   const shouldJoin =
@@ -5793,8 +5799,10 @@ function clipTrailPathAtPing(path, ping, { failClosed = false } = {}) {
       }
     }
   }
-  // Ping must sit on this path (±350m) — otherwise it belongs to another leg; don't clip.
-  if (bestSeg < 0 || bestIdx < 1 || bestD > 350) return failClosed ? [] : path;
+  // Ping must sit on this path (±350m) — otherwise it belongs to another leg.
+  // Never fall back to the full path here: doing so lets a live coach tail run
+  // beyond the vehicle whenever identity matching briefly fails.
+  if (bestSeg < 0 || bestIdx < 1 || bestD > 350) return [];
   const out = segs.slice(0, bestSeg).map((seg) => seg.slice());
   const tail = segs[bestSeg].slice(0, bestIdx + 1);
   tail.push([ping.lat, ping.lng]);
