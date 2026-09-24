@@ -2035,10 +2035,11 @@ function gpsReplayControls(show) {
   if (!playbackReplayEl) return;
   const hasPts = Boolean(gpsReplay?.pts?.length >= 2);
   const on = show && hasPts;
-  playbackReplayEl.hidden = !on || gpsReplay?.playing === true;
-  playbackScrubEl.hidden = !on;
-  playbackClockEl.hidden = !on;
-  playbackSpeedEl.hidden = !on;
+  const active = Boolean(gpsReplay?.hasStarted || gpsReplay?.playing);
+  playbackReplayEl.hidden = !on;
+  playbackScrubEl.hidden = !on || !active;
+  playbackClockEl.hidden = !on || !active;
+  playbackSpeedEl.hidden = !on || !active;
 }
 
 /** Bustimes-style travelled-so-far overlay: a green stroke revealed by the replay cursor. */
@@ -2178,7 +2179,9 @@ function gpsReplayUpdateDirectionArrows(t) {
 /** Grow the replay tail only up to the replay cursor. */
 function gpsReplayUpdateTravelled(t) {
   const replay = gpsReplay;
-  if (!replay?.pts?.length || !replay.travelledLine) return;
+  if (!replay?.pts?.length) return;
+  if (!replay.travelledLine) gpsReplayTravelledLine();
+  if (!replay.travelledLine) return;
   const pts = replay.pts;
   let endIndex = -1;
   while (endIndex + 1 < pts.length && pts[endIndex + 1].t <= t) endIndex += 1;
@@ -2392,6 +2395,8 @@ function gpsReplayStart() {
   gpsReplay.raf = 0;
   gpsReplay.lastFrameAt = 0;
   startGpsReplayWatchdog();
+  gpsReplayTravelledLine();
+  gpsReplayControls(true);
   playbackReplayEl.textContent = "⏸ Pause";
   playbackReplayEl.hidden = false;
   // Reset the travelled stroke immediately when a completed replay is replayed
@@ -2404,6 +2409,7 @@ function gpsReplayPause() {
   if (!gpsReplay) return;
   gpsReplay.playing = false;
   stopGpsReplayWatchdog();
+  gpsReplayControls(true);
   if (playbackReplayEl) playbackReplayEl.textContent = "▶ Replay";
 }
 
@@ -2495,11 +2501,9 @@ function gpsReplaySetup(pts) {
       pathLengthMeters(pathFromGpsPoints(clean)) / REPLAY_ARROW_LIMIT,
     ),
   };
-  // Start with a short recorded tail so Replay is visibly a replay immediately;
-  // the line still ends at the current cursor and never exposes future points.
-  gpsReplay.pos = replayPreviewPosition(gpsReplay);
-  gpsReplayTravelledLine();
-  gpsReplayUpdateTravelled(gpsReplay.t0 + gpsReplay.pos);
+  // Do not paint replay-only arrows/tail until Replay is pressed. Map mode keeps
+  // its own bus-clipped scene; otherwise the preview could sit ahead of the bus.
+  gpsReplay.pos = 0;
   gpsReplayControls(true);
 }
 const journeyPanelEl = document.getElementById("journey-panel");
@@ -13167,6 +13171,8 @@ playbackSpeedEl?.addEventListener("click", () => {
 playbackScrubEl?.addEventListener("input", () => {
   if (!gpsReplay) return;
   setGpsReplayActive(true);
+  gpsReplay.hasStarted = true;
+  gpsReplayControls(true);
   const frac = Number(playbackScrubEl.value) / 1000;
   gpsReplay.pos = (gpsReplay.t1 - gpsReplay.t0) * Math.min(1, Math.max(0, frac));
   const t = gpsReplay.t0 + gpsReplay.pos;
