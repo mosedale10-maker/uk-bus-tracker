@@ -4952,6 +4952,8 @@ async function showFleetRouteTails({
   // One tail polyline per trip — never glue Hanley→Newcastle with Newcastle→Hanley.
   for (const v of targets) {
     const vLine = String(v.line || v.route_name || code || "").trim();
+    const vJourney = String(v.journey_id || v.journeyId || journeyId || "").trim();
+    const vTrip = String(v.trip_id || v.tripId || tripId || "").trim();
     const vWhen = v.datetime || v.recordedAtTime || v.trackedAt || datetime || "";
     const window = trailTimeWindow(vWhen, { coach: isCoachTrailOperator(opCode) });
     const vKeys = trailKeysForVehicle({
@@ -4977,6 +4979,15 @@ async function showFleetRouteTails({
       gps = gps.filter((point) => String(point.journeyId || "") === vJourney);
     } else if (vTrip) {
       gps = gps.filter((point) => String(point.tripId || "") === vTrip);
+    } else if (targets.length === 1 && isAltonLine(vLine || code) && vWhen) {
+      // AT employee AVL journey IDs are intentionally ignored by the recorder.
+      // Select the single recorded stint nearest this Fleet row's start time
+      // instead of drawing every AT1/AT2/AT3 run in the surrounding window.
+      const selected = clipPointsToSingleDirectionRun(gps, {
+        direction: normalizeTrailDirection(v.direction || direction || ""),
+        aroundMs: new Date(vWhen).getTime(),
+      });
+      gps = selected.length >= 2 ? selected : [];
     }
     const staffsGap =
       isStaffsTrailOperator(opCode) ||
