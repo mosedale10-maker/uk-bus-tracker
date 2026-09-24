@@ -40,6 +40,38 @@ const STAFFS_LIVE_OPS = ["FPOT", "DAGC", "CRDR", "SLBS", "BANG", "HIPK", "TBTN",
  */
 const STAFFS_FORCE_OPS = ["FPOT", "DAGC", "CRDR", "SLBS", "BANG", "SOST"];
 
+const MAP_VIEW_STORAGE_KEY = "uk-bus-map-view-v1";
+const DEFAULT_MAP_VIEW = { lat: 54.2, lng: -2.5, zoom: 7 };
+
+function savedMapView() {
+  try {
+    const raw = localStorage.getItem(MAP_VIEW_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_MAP_VIEW };
+    const value = JSON.parse(raw);
+    const lat = Number(value?.lat);
+    const lng = Number(value?.lng);
+    const zoom = Number(value?.zoom);
+    if (
+      !Number.isFinite(lat) ||
+      !Number.isFinite(lng) ||
+      !Number.isFinite(zoom) ||
+      lat < -90 ||
+      lat > 90 ||
+      lng < -180 ||
+      lng > 180 ||
+      zoom < 2 ||
+      zoom > 19
+    ) {
+      return { ...DEFAULT_MAP_VIEW };
+    }
+    return { lat, lng, zoom };
+  } catch {
+    return { ...DEFAULT_MAP_VIEW };
+  }
+}
+
+const initialMapView = savedMapView();
+
 function mapOverlapsStaffordshire(bounds = map.getBounds()) {
   try {
     const b = bounds || map.getBounds();
@@ -64,7 +96,31 @@ function exitHistoryMapMode({ reload = false } = {}) {
   return had;
 }
 
-const map = L.map("map", { zoomControl: true }).setView([54.2, -2.5], 7);
+const map = L.map("map", { zoomControl: true }).setView(
+  [initialMapView.lat, initialMapView.lng],
+  initialMapView.zoom,
+);
+
+function saveMapView() {
+  try {
+    const center = map.getCenter();
+    const zoom = map.getZoom();
+    if (
+      !center ||
+      !Number.isFinite(center.lat) ||
+      !Number.isFinite(center.lng) ||
+      !Number.isFinite(zoom)
+    ) {
+      return;
+    }
+    localStorage.setItem(
+      MAP_VIEW_STORAGE_KEY,
+      JSON.stringify({ lat: center.lat, lng: center.lng, zoom }),
+    );
+  } catch {
+    // Storage can be disabled in private browsing; the map still works normally.
+  }
+}
 
 /** Day / night street basemap — OSM tiles (no API key). Night look via CSS filter on the tile pane.
  *  Carto free URLs now watermark “API KEY REQUIRED” and blank the map. */
@@ -4981,11 +5037,13 @@ function refreshObservedStopTimes(marker, { force = false } = {}) {
 loadTrailStore();
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") {
+    saveMapView();
     flushTrailStore();
     flushTrailUpload().catch(() => {});
   }
 });
 window.addEventListener("pagehide", () => {
+  saveMapView();
   flushTrailStore();
   flushTrailUpload().catch(() => {});
 });
@@ -10505,6 +10563,7 @@ function schedule() {
 }
 
 map.on("moveend", () => {
+  saveMapView();
   applyMapDayNight();
   // Follow pans must not thrash vehicle reloads — that rebuilds the open bus card.
   if (followPanning || followTarget) {
