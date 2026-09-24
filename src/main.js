@@ -4154,6 +4154,7 @@ function trailPairBreakOpts(opts = {}, fallback = {}) {
     operator: opts.operator || fallback.operator || "",
     coach: !!(opts.coach ?? fallback.coach),
     staffs: !!(opts.staffs ?? fallback.staffs),
+    actualRoute: !!(opts.actualRoute ?? fallback.actualRoute),
   };
 }
 
@@ -4176,11 +4177,12 @@ function setTrailPairPath(pair, path, opts = {}) {
   const breakOpts = trailPairBreakOpts(
     {
       ...(pair.breakOpts || {}),
-      ...(opts.operator != null || opts.coach != null || opts.staffs != null
+      ...(opts.operator != null || opts.coach != null || opts.staffs != null || opts.actualRoute != null
         ? {
             operator: opts.operator ?? pair.breakOpts?.operator,
             coach: opts.coach ?? pair.breakOpts?.coach,
             staffs: opts.staffs ?? pair.breakOpts?.staffs,
+            actualRoute: opts.actualRoute ?? pair.breakOpts?.actualRoute,
           }
         : {}),
     },
