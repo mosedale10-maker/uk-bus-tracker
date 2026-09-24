@@ -329,10 +329,8 @@ function installRoadNotices() {
     );
     marker._roadNotice = notice;
     marker.addTo(noticesLayer);
-    // At street zoom, open the message so it is obvious.
-    if (!compact) {
-      marker.openPopup();
-    }
+    // Do NOT auto-open the popup — it rendered as a large dark box over the map.
+    // The pin itself carries the title, and tapping it still opens the full message.
   }
 }
 
