@@ -4108,7 +4108,12 @@ function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
   // A local nearest-road stitch can choose the opposite carriageway at a
   // motorway junction and draw a convincing-looking loop. Coaches therefore
   // wait for the validated OSRM geometry instead of showing that fallback.
-  if (breakOpts.coach || isCoachTrailOperator(breakOpts.operator)) return [];
+  if (
+    breakOpts.coach ||
+    isCoachTrailOperator(breakOpts.operator) ||
+    breakOpts.staffs ||
+    isStaffsTrailOperator(breakOpts.operator)
+  ) return [];
   const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
   if (flattenTrailLatLngs(local).length >= 2) return local;
   return [];
@@ -12946,7 +12951,7 @@ async function stitchTrailViaOsrmRoutes(latlngs, signal, breakOpts = {}) {
   const alignedSegs = [];
   // Coaches: wider sample spacing so long motorway legs stay fast + on-road.
   // Staffs rural: slightly wider than urban so sparse AVL still gets a road bridge.
-  const thinGap = coach ? 180 : staffs ? 70 : 28;
+  const thinGap = coach ? 180 : staffs ? 140 : 28;
   const bridgeBatch = coach ? 8 : staffs ? 6 : 4;
   for (const source of sourceSegs) {
     const thinned = thinTrailPoints(source, thinGap);
@@ -13207,7 +13212,7 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
         } else if (staffs) {
           // Rural Staffs / AT / FPOT / D&G: sparse AVL often fails tight map-match —
           // stitch driving routes first so the trail sticks to roads, then match.
-          const thinned = thinTrailPoints(flat, 55);
+          const thinned = thinTrailPoints(flat, 140);
           aligned = await stitchTrailViaOsrmRoutes(
             thinned.length >= 2 ? thinned : flat,
             signal,
@@ -13233,7 +13238,7 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
         // Local OFM snap is useful for ordinary bus/staff roads, but its
         // nearest-road bridge can pick the wrong motorway carriageway. Keep
         // failed coach alignment hidden until a validated road path exists.
-        if (!coach) {
+        if (!coach && !staffs) {
           segs = trailSegmentsOf(alignTrailToRoadsLocal(latlngs, alignOpts), alignOpts);
         }
       } else {
