@@ -6420,7 +6420,15 @@ async function startRoutePlayback({
   const coachOp = coachPlayback;
   // Route 36A explicitly displays the published A50 alignment instead of the
   // recorded Longton diversion. Other journeys still prefer recorded GPS.
-  const plannedPath = plannedRouteOverride && tripPath.length >= 2 ? tripPath : [];
+  let plannedPath = plannedRouteOverride && tripPath.length >= 2 ? tripPath : [];
+  // Prefer the recorded GPS whenever this journey has a usable recorded run,
+  // including historical Fleet rows. A scheduled/timetable path is only a
+  // fallback when no GPS was captured; otherwise the row can silently show a
+  // planned line instead of the route the bus actually drove.
+  const hasRecordedGps = tracked.length >= 2;
+  if (!plannedPath.length && usesPlannedRouteOverride(line, operator) && !hasRecordedGps && tripPath.length >= 2) {
+    plannedPath = tripPath;
+  }
   const plannedReplayPoints = plannedPath.length >= 2
     ? plannedPathReplayPoints(plannedPath, {
         startMs: trip?.startMs || aroundMs || Date.now(),
@@ -6428,11 +6436,6 @@ async function startRoutePlayback({
         direction: safeDirection,
       })
     : [];
-  // Prefer the recorded GPS whenever this journey has a usable recorded run,
-  // including historical Fleet rows. A scheduled/timetable path is only a
-  // fallback when no GPS was captured; otherwise the row can silently show a
-  // planned line instead of the route the bus actually drove.
-  const hasRecordedGps = tracked.length >= 2;
   let usingTracked = hasRecordedGps && !plannedPath;
   if (coachOp && hasRecordedGps && !plannedPath) {
     // Coaches: always show the roads actually driven — never substitute the full timetable.
