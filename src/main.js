@@ -5290,6 +5290,7 @@ function clearTrailArtifacts(layer) {
 function clearPinnedTrails() {
   for (const pair of pinnedTrailLines.values()) removeTrailPair(pair, liveTrailLayer);
   clearTrailArtifacts(liveTrailLayer);
+  clearTrailDomArtifacts();
   pinnedTrailLines.clear();
   pinnedTrailKeys.clear();
   pinnedTrailFilters.clear();
@@ -5464,8 +5465,14 @@ window.addEventListener("pagehide", () => {
   flushTrailUpload().catch(() => {});
 });
 
+function clearTrailDomArtifacts() {
+  const root = document.querySelector(".map-wrap") || document.getElementById("map");
+  root?.querySelectorAll(".trail-arrow-icon, .trail-line, .trail-line-casing").forEach((el) => el.remove());
+}
+
 function clearPlaybackLayers() {
   playbackLayer.clearLayers();
+  clearTrailDomArtifacts();
 }
 
 function updatePlaybackChrome() {
