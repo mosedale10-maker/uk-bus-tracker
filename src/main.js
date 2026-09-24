@@ -2612,6 +2612,8 @@ async function fetchServerTrails(keys, { fromMs = 0, toMs = 0, force = false } =
       const merged = mergeTrailPoints(trailMem.get(key) || [], incoming);
       trailMem.set(key, merged);
       trailPersistIds.add(key);
+      if (pinnedTrailKeys.has(String(key))) schedulePinnedTrailRefresh(String(key));
+      if (String(liveTrailKey) === String(key)) scheduleLiveTrailRefresh(String(key));
     }
     scheduleTrailPersist();
   } catch {
@@ -3824,6 +3826,175 @@ function trailPathEquals(a, b) {
   return true;
 }
 
+/** Find the current live position for a live trail filter. */
+function livePingForTrailFilter(filter = {}, fallbackPoints = []) {
+  const vehicleId = String(filter.liveVehicleId || filter.vehicleId || "").trim();
+  const trailKey = String(filter.liveTrailKey || filter.trailKey || "").trim();
+  const reg = compactReg(
+    filter.liveReg ||
+      filter.reg ||
+      (trailKey.startsWith("reg:") ? trailKey.slice(4) : ""),
+  );
+  const journeyId = String(filter.liveJourneyId || filter.journeyId || "").trim();
+  const tripId = String(filter.liveTripId || filter.tripId || "").trim();
+  const focus = {
+    hideAll: false,
+    journeyOnly: true,
+    vehicleIds: new Set(vehicleId ? [vehicleId] : []),
+    trailKeys: new Set(trailKey ? [trailKey] : []),
+    regs: new Set(reg ? [reg] : []),
+  };
+  const hasIdentity = vehicleId || trailKey || reg;
+  const candidates = [];
+
+  for (const marker of markers.values()) {
+    const bus = marker?.bus;
+    if (!bus) continue;
+    if (journeyId && bus.journey_id && String(bus.journey_id) !== journeyId) continue;
+    if (tripId && bus.trip_id && String(bus.trip_id) !== tripId) continue;
+    let markerKeys = [];
+    if (hasIdentity) {
+      markerKeys = trailKeysForVehicle({
+        vehicleId: historyVehicleId(bus, marker.extra || {}),
+        trailKey: marker.extra?.trailKey || String(bus.id || ""),
+        journeyId: bus.journey_id,
+        tripId: bus.trip_id,
+        line: bus.service?.line_name || marker.extra?.line || "",
+        datetime: bus.datetime || new Date().toISOString(),
+        reg: busRegistration(bus, marker.extra || {}),
+      });
+      const keyMatch = trailKey && markerKeys.includes(trailKey);
+      if (!keyMatch && !busMatchesHistoryFocus(bus, marker.extra || {}, focus)) continue;
+    }
+    let ll = null;
+    try {
+      ll = marker.getLatLng?.() || null;
+    } catch {
+      /* marker may have been removed */
+    }
+    const lat = Number(ll?.lat ?? bus.coordinates?.[1]);
+    const lng = Number(ll?.lng ?? bus.coordinates?.[0]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    const parsed = bus.datetime ? new Date(bus.datetime).getTime() : NaN;
+    const at = Number.isFinite(parsed) ? parsed : Date.now();
+    let score = 0;
+    if (tripId && String(bus.trip_id || "") === tripId) score += 100;
+    if (journeyId && String(bus.journey_id || "") === journeyId) score += 80;
+    if (trailKey && markerKeys.includes(trailKey)) score += 50;
+    if (selectedMapMarker === marker) score += 10;
+    candidates.push({
+      lat,
+      lng,
+      t: at,
+      heading: Number(bus.heading),
+      speedMph: Number(bus.speedMph),
+      source: "live-marker",
+      score,
+    });
+  }
+
+  for (const marker of staffMarkers.values()) {
+    const item = marker?.staff;
+    if (!item) continue;
+    const key = staffTrailKey(item);
+    const staffReg = compactReg(parseFleetReg(item.vehicle?.ref).reg || key.replace(/^staff-/, ""));
+    if (hasIdentity && key !== trailKey && staffReg !== reg) continue;
+    const snapped = staffWhere(item);
+    if (!Number.isFinite(snapped.lat) || !Number.isFinite(snapped.lng)) continue;
+    const parsed = item.recordedAtTime ? new Date(item.recordedAtTime).getTime() : NaN;
+    candidates.push({
+      lat: snapped.lat,
+      lng: snapped.lng,
+      t: Number.isFinite(parsed) ? parsed : Date.now(),
+      heading: Number(snapped.heading),
+      speedMph: Number(item.speedMph),
+      source: "staff-marker",
+      score: selectedMapMarker === marker ? 10 : 0,
+    });
+  }
+  candidates.sort((a, b) => b.score - a.score || b.t - a.t);
+  if (candidates.length) return candidates[0];
+
+  const points = normalizeGpsTrailPoints(fallbackPoints);
+  const last = points[points.length - 1];
+  return last
+    ? {
+        lat: last.lat,
+        lng: last.lng,
+        t: last.t,
+        heading: last.heading,
+        speedMph: last.speedMph,
+        source: "trail",
+      }
+    : null;
+}
+
+/** Keep only recorded points at or before the bus's current ping, then join to the bus. */
+function clipGpsPointsAtPing(gpsPoints, ping) {
+  const points = (Array.isArray(gpsPoints) ? gpsPoints : [])
+    .map((point) => {
+      const t = observedPointTimestamp(point);
+      const lat = Number(Array.isArray(point) ? point[0] : point?.lat);
+      const lng = Number(Array.isArray(point) ? point[1] : point?.lng);
+      if (!Number.isFinite(t) || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      return { ...(Array.isArray(point) ? {} : point), t, lat, lng };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.t - b.t);
+  if (!ping || !Number.isFinite(Number(ping.lat)) || !Number.isFinite(Number(ping.lng))) {
+    return points;
+  }
+  const pingT = Number(ping.t);
+  if (!Number.isFinite(pingT)) return points;
+  let out = [];
+  for (const point of points) {
+    if (point.t <= pingT) {
+      out.push(point);
+      continue;
+    }
+    const previous = out[out.length - 1];
+    if (previous && pingT > previous.t) {
+      const fraction = (pingT - previous.t) / Math.max(1, point.t - previous.t);
+      out.push({
+        ...previous,
+        lat: previous.lat + (point.lat - previous.lat) * fraction,
+        lng: previous.lng + (point.lng - previous.lng) * fraction,
+        t: pingT,
+      });
+    }
+    break;
+  }
+  // If the bus is spatially near an earlier point (GPS can be a little behind the
+  // marker), discard any later points so the visible stroke cannot run ahead of it.
+  let nearestIndex = -1;
+  let nearestDistance = Infinity;
+  for (let i = 0; i < out.length; i += 1) {
+    const distance = haversineMeters(out[i].lat, out[i].lng, Number(ping.lat), Number(ping.lng));
+    if (distance <= nearestDistance) {
+      nearestDistance = distance;
+      nearestIndex = i;
+    }
+  }
+  if (nearestIndex >= 0 && nearestDistance <= 350) out = out.slice(0, nearestIndex + 1);
+
+  const last = out[out.length - 1];
+  const shouldJoin =
+    !last ||
+    haversineMeters(last.lat, last.lng, Number(ping.lat), Number(ping.lng)) > 1;
+  if (shouldJoin) {
+    out.push({
+      ...(last || {}),
+      lat: Number(ping.lat),
+      lng: Number(ping.lng),
+      t: Math.max(pingT, Number(last?.t) || pingT),
+      heading: Number.isFinite(Number(ping.heading)) ? Number(ping.heading) : last?.heading,
+      speedMph: Number.isFinite(Number(ping.speedMph)) ? Number(ping.speedMph) : last?.speedMph,
+      source: ping.source || "live",
+    });
+  }
+  return out;
+}
+
 function refreshPinnedTrailLine(key) {
   const id = String(key || "");
   if (!id) return;
@@ -3841,7 +4012,11 @@ function refreshPinnedTrailLine(key) {
       String(id).startsWith("staff-") ||
       String(id).startsWith("at:"),
   };
-  const gpsPoints = trackedPointsFor(id, filter);
+  let gpsPoints = trackedPointsFor(id, filter);
+  if (filter.live || filter.follow) {
+    const ping = livePingForTrailFilter(filter, gpsPoints);
+    gpsPoints = clipGpsPointsAtPing(gpsPoints, ping);
+  }
   // Split there-and-back / multi-route GPS into separate strokes (never one continuous line).
   // tripseg: keys are already one trip from pinSeparateTripTails.
   let path;
@@ -3924,8 +4099,15 @@ async function runPinnedTrailAlign(id) {
 }
 
 function refreshLiveTrailLine(key) {
-  const breakOpts = trailBreakOptsFromFilter({}, key);
-  const gpsPoints = trackedPointsFor(key);
+  const filter = {
+    ...(pinnedTrailFilters.get(String(key)) || {}),
+    live: true,
+    liveTrailKey: String(key),
+  };
+  const breakOpts = trailBreakOptsFromFilter(filter, key);
+  let gpsPoints = trackedPointsFor(key, filter);
+  const ping = livePingForTrailFilter(filter, gpsPoints);
+  gpsPoints = clipGpsPointsAtPing(gpsPoints, ping);
   const path = pathFromGpsPoints(gpsPoints);
   if (path.length < 2) {
     if (liveTrailLine) {
@@ -4417,6 +4599,8 @@ function pinVehicleTrail({
   operator = "",
   direction = "",
   datetime = "",
+  liveFromMs = 0,
+  liveToMs = 0,
   live = false,
   liveFocus = true,
 } = {}) {
@@ -4442,11 +4626,18 @@ function pinVehicleTrail({
     direction: safeDirection,
     operator: String(operator || "").trim().toUpperCase(),
     fromMs: followLive
-      ? Date.now() - (coachLive ? COACH_TRAIL_LIVE_MS : 4 * 60 * 60 * 1000)
+      ? Number(liveFromMs) > 0
+        ? Number(liveFromMs)
+        : Date.now() - (coachLive ? COACH_TRAIL_LIVE_MS : 4 * 60 * 60 * 1000)
       : window.fromMs,
-    toMs: followLive ? 0 : window.toMs,
+    toMs: followLive ? Number(liveToMs) || 0 : window.toMs,
     live: followLive,
     follow: followLive,
+    liveVehicleId: followLive ? String(vehicleId || "") : "",
+    liveTrailKey: followLive ? String(trailKey || "") : "",
+    liveReg: followLive ? compactReg(reg) : "",
+    liveJourneyId: followLive ? String(journeyId || "") : "",
+    liveTripId: followLive ? String(tripId || "") : "",
   };
   multiTailActiveGroup = null;
   for (const key of keys) {
@@ -5245,6 +5436,25 @@ async function startRoutePlayback({
     });
   }
 
+  // A live route may already contain a few recorder pings beyond the bus's current
+  // position. Cut the selected run at the bus before building the path, timetable
+  // observations, replay, or pinned tail; historical replays keep the whole run.
+  const currentLivePing = historicalPlayback
+    ? null
+    : livePingForTrailFilter(
+        {
+          liveVehicleId: vehicleId,
+          liveTrailKey: trailKey,
+          liveReg: reg,
+          liveJourneyId: safeJourneyId,
+          liveTripId: resolvedTripId || tripId,
+        },
+        trackedGps,
+      );
+  if (currentLivePing) {
+    trackedGps = clipGpsPointsAtPing(trackedGps, currentLivePing);
+  }
+
   let tracked = pathFromGpsPoints(trackedGps);
   const tripDate = datetime ? String(datetime).slice(0, 10) : "";
   const trip = resolvedTripId
@@ -5323,7 +5533,8 @@ async function startRoutePlayback({
     staffs: isStaffsTrailOperator(operator) || isAltonLine(lineName),
   };
 
-  const lastPing = resolvePlaybackVehiclePing({ vehicleId, trailKey, reg, trackedGps });
+  const lastPing =
+    currentLivePing || resolvePlaybackVehiclePing({ vehicleId, trailKey, reg, trackedGps });
   const histAgeMs = datetime ? Date.now() - new Date(datetime).getTime() : NaN;
   const isHistorical = Number.isFinite(histAgeMs) && histAgeMs > 12 * 60_000;
   const clipPing = isHistorical ? null : lastPing;
@@ -5401,6 +5612,7 @@ async function startRoutePlayback({
         operator,
         direction: safeDirection,
         datetime,
+        liveFromMs: Number(trackedGps[0]?.t) > 0 ? Number(trackedGps[0]?.t) - 30_000 : 0,
         live: true,
         liveFocus: false,
       });
