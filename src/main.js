@@ -3582,6 +3582,9 @@ function collectTrailGpsForKeys(keys, filter = {}) {
  * Returns the synthetic keys that were drawn.
  */
 function pinSeparateTripTails(segments, { baseKey = "bus", line = "", operator = "", actualRoute = false } = {}) {
+  // A new selection must not inherit arrows from a previous route selection.
+  clearTrailArtifacts(liveTrailLayer);
+  clearTrailDomArtifacts();
   const drawn = [];
   const base = String(baseKey || "bus")
     .replace(/[^A-Za-z0-9:_-]+/g, "_")
@@ -12478,9 +12481,20 @@ function trailPathHash(latlngs) {
   if (!latlngs?.length) return "";
   const flat = Array.isArray(latlngs[0]?.[0]) ? latlngs.flat() : latlngs;
   if (!flat.length) return "";
+  // Include the complete geometry (not just the endpoints); otherwise two
+  // opposite/diverted runs with similar endpoints can share a cached alignment
+  // and paint a plausible but incorrect loop.
+  let hash = 2166136261;
+  for (const point of flat) {
+    const token = `${Number(point[0]).toFixed(5)},${Number(point[1]).toFixed(5)},${Number(point[2] ?? 0).toFixed(1)},${Number(point[3] ?? 0)};`;
+    for (let i = 0; i < token.length; i += 1) {
+      hash ^= token.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+  }
   const a = flat[0];
   const b = flat[flat.length - 1];
-  return `${flat.length}:${Number(a[0]).toFixed(5)},${Number(a[1]).toFixed(5)}:${Number(b[0]).toFixed(5)},${Number(b[1]).toFixed(5)}`;
+  return `${flat.length}:${hash >>> 0}:${Number(a[0]).toFixed(5)},${Number(a[1]).toFixed(5)}:${Number(b[0]).toFixed(5)},${Number(b[1]).toFixed(5)}`;
 }
 
 function thinTrailPoints(latlngs, minGapM = 12) {
