@@ -2112,6 +2112,7 @@ function vehicleReplayTrailKeys(vehicle = {}) {
     id,
     /^\d+$/.test(id) ? `jny:${id}` : "",
     reg ? `reg:${reg}` : "",
+    ["FLIX", "NATX"].includes(noc) && id && !id.startsWith("coach:") ? `coach:${id}` : "",
   ];
   // First/BODS recorders commonly use a normalised BODS vehicle key as well as reg:.
   if (noc && /^[A-Z]{2}\d{2}[A-Z]{3}$/.test(reg)) {

@@ -489,43 +489,54 @@ export async function getTrailsForKeys(keys, opts = {}) {
   return out;
 }
 
+function recentTrailKeysByColumn(column, values, { days = TRAIL_KEEP_DAYS, limit = 40 } = {}) {
+  const codes = [...new Set((values || []).map((v) => String(v || "").trim().toUpperCase()).filter(Boolean))].slice(0, 24);
+  if (!codes.length) return [];
+  const keepDays = Math.min(TRAIL_KEEP_DAYS, Math.max(1, Number(days) || TRAIL_KEEP_DAYS));
+  const cutoff = Date.now() - keepDays * 86400000;
+  const cap = Math.min(80, Math.max(4, Number(limit) || 40));
+  // Fleet only needs the newest few dozen identities. Reading a bounded recent
+  // window avoids a full GROUP BY across millions of duplicate alias rows.
+  const scanLimit = Math.min(30_000, Math.max(4_000, cap * 300));
+  const placeholders = codes.map(() => "?").join(",");
+  const rows = sqlAll(
+    `SELECT trail_key, line, operator, t
+     FROM vehicle_trail_points
+     WHERE ${column} IN (${placeholders}) AND t >= ?
+     ORDER BY t DESC
+     LIMIT ?`,
+    [...codes, cutoff, scanLimit],
+  );
+  const grouped = new Map();
+  for (const row of rows) {
+    const key = String(row.trail_key || "").trim();
+    if (!key) continue;
+    const current = grouped.get(key) || {
+      key,
+      line: row.line || "",
+      operator: row.operator || "",
+      points: 0,
+      lastT: 0,
+    };
+    current.points += 1;
+    current.lastT = Math.max(current.lastT, Number(row.t) || 0);
+    if (!current.line) current.line = row.line || "";
+    if (!current.operator) current.operator = row.operator || "";
+    grouped.set(key, current);
+  }
+  return [...grouped.values()]
+    .filter((row) => row.points >= 2)
+    .sort((a, b) => b.lastT - a.lastT)
+    .slice(0, cap);
+}
+
 export async function listTrailKeysForLines(
   lines,
   { days = TRAIL_KEEP_DAYS, limit = 40 } = {},
 ) {
   await initTrailStore();
   if (!db) return [];
-  const codes = [
-    ...new Set(
-      (lines || [])
-        .map((l) => String(l || "").trim().toUpperCase())
-        .filter(Boolean),
-    ),
-  ].slice(0, 24);
-  if (!codes.length) return [];
-  const keepDays = Math.min(TRAIL_KEEP_DAYS, Math.max(1, Number(days) || TRAIL_KEEP_DAYS));
-  const cutoff = Date.now() - keepDays * 86400000;
-  const cap = Math.min(80, Math.max(4, Number(limit) || 40));
-  const placeholders = codes.map(() => "?").join(",");
-  const rows = sqlAll(
-    `SELECT trail_key, MAX(line) AS line, MAX(operator) AS operator,
-            COUNT(*) AS n, MAX(t) AS last_t
-     FROM vehicle_trail_points
-     WHERE line IN (${placeholders})
-       AND t >= ?
-     GROUP BY trail_key
-     HAVING COUNT(*) >= 2
-     ORDER BY MAX(t) DESC
-     LIMIT ?`,
-    [...codes, cutoff, cap],
-  );
-  return rows.map((row) => ({
-    key: row.trail_key,
-    line: row.line || "",
-    operator: row.operator || "",
-    points: Number(row.n) || 0,
-    lastT: Number(row.last_t) || 0,
-  }));
+  return recentTrailKeysByColumn("line", lines, { days, limit });
 }
 
 export async function listTrailKeysForOperators(
@@ -534,37 +545,7 @@ export async function listTrailKeysForOperators(
 ) {
   await initTrailStore();
   if (!db) return [];
-  const codes = [
-    ...new Set(
-      (operators || [])
-        .map((o) => String(o || "").trim().toUpperCase())
-        .filter(Boolean),
-    ),
-  ].slice(0, 12);
-  if (!codes.length) return [];
-  const keepDays = Math.min(TRAIL_KEEP_DAYS, Math.max(1, Number(days) || TRAIL_KEEP_DAYS));
-  const cutoff = Date.now() - keepDays * 86400000;
-  const cap = Math.min(80, Math.max(4, Number(limit) || 40));
-  const placeholders = codes.map(() => "?").join(",");
-  const rows = sqlAll(
-    `SELECT trail_key, MAX(line) AS line, MAX(operator) AS operator,
-            COUNT(*) AS n, MAX(t) AS last_t
-     FROM vehicle_trail_points
-     WHERE operator IN (${placeholders})
-       AND t >= ?
-     GROUP BY trail_key
-     HAVING COUNT(*) >= 2
-     ORDER BY MAX(t) DESC
-     LIMIT ?`,
-    [...codes, cutoff, cap],
-  );
-  return rows.map((row) => ({
-    key: row.trail_key,
-    line: row.line || "",
-    operator: row.operator || "",
-    points: Number(row.n) || 0,
-    lastT: Number(row.last_t) || 0,
-  }));
+  return recentTrailKeysByColumn("operator", operators, { days, limit });
 }
 
 const DEAD_RUN_OPS = new Set(["FPOT", "DAGC"]);

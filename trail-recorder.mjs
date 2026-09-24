@@ -26,6 +26,9 @@ const COACH_OPERATOR_NOCS = ["FLIX", "NATX"];
 const STAFFS_OPERATOR_NOCS = ["FPOT", "DAGC", "SOST", "CRDR", "SLBS", "BANG", "HIPK", "TBTN", "DIAM", "MDCL"];
 const POLL_MS = 15_000;
 const COACH_POLL_MS = 45_000;
+/** Nationwide operator feeds do not need the local 15-second cadence. */
+const OPERATOR_POLL_MS = COACH_POLL_MS;
+let lastOperatorPollAt = 0;
 const MIN_GAP_MS = 8_000;
 const COACH_MIN_GAP_MS = 25_000;
 const MIN_MOVE_M = 6;
@@ -179,10 +182,12 @@ function pointFromBus(bus) {
 }
 
 function keysForBus(bus, point = null) {
+  // Store one canonical vehicle key per physical sample. Journey/trip metadata
+  // remains on each point, so replay grouping does not need duplicate jny/trip/run
+  // rows. AT1–AT3 keep their directed segment key because Fleet uses it to list
+  // individual staff-bus journeys.
   const keys = [];
   const sticky = String(point?._stickyPrimary || "").trim();
-  if (sticky) keys.push(sticky);
-  if (bus?.id != null && bus.id !== "") keys.push(String(bus.id));
   const namePlate = String(bus?.vehicle?.name || "")
     .toUpperCase()
     .match(/\b([A-Z]{2}\d{2}\s*[A-Z]{3})\b/) ||
@@ -190,48 +195,35 @@ function keysForBus(bus, point = null) {
       .toUpperCase()
       .match(/\b([A-Z]\d{1,3}\s*[A-Z]{3})\b/);
   const reg = compactReg(
-    bus?.vehicle?.reg || (namePlate ? namePlate[1] : "") || bus?.vehicle?.name || bus?._bods?.vehicleRef || "",
+    bus?.vehicle?.reg || (namePlate ? namePlate[1] : "") || bus?._bods?.vehicleRef || "",
   );
-  if (/^[A-Z]{1,2}\d{1,2}[A-Z]{3}$/.test(reg) || /^[A-Z]{2}\d{2}[A-Z]{3}$/.test(reg)) {
-    keys.push(`reg:${reg}`);
-  }
-  const ref = String(bus?._bods?.vehicleRef || "").trim();
-  const op = String(bus?._bods?.operator || bus?.operator?.noc || "").trim();
-  if (ref && op) keys.push(`bods-${op}-${ref}`);
-  else if (ref) keys.push(`bods-${ref}`);
-
-  // Per-journey / per-route segment keys — one continuous key for the whole A→B stint.
-  // Direction (in/out) keeps the return trip on a separate key from the outbound.
-  const journeyId = String(point?.journeyId || bus?.journey_id || bus?._bods?.journeyRef || "").trim();
-  const latestJourney = String(point?._latestJourneyId || "").trim();
-  const tripId = String(point?.tripId || bus?.trip_id || "").trim();
+  const hasPlate = /^[A-Z]{1,2}\d{1,2}[A-Z]{3}$/.test(reg) || /^[A-Z]{2}\d{2}[A-Z]{3}$/.test(reg);
+  const busId = String(bus?.id ?? "").trim();
+  const operator = String(point?.operator || bus?._trailOperator || bus?.operator?.noc || bus?._bods?.operator || "")
+    .trim()
+    .toUpperCase();
   const line = String(point?.line || bus?.service?.line_name || bus?._bods?.line || "")
     .trim()
     .toUpperCase();
   const direction = normalizeDirection(point?.direction || bus?._direction || "");
   const t = Number.isFinite(point?.t) ? point.t : Date.now();
   const runDay = String(point?._runDay || "").trim() || ukDateKey(t);
-  const primary = sticky || keys[0] || (reg ? `reg:${reg}` : "");
-  if (journeyId) keys.push(`jny:${journeyId}`);
-  // Also index the latest Flix journey id after an intermediate stop so live markers still resolve.
-  if (latestJourney && latestJourney !== journeyId) keys.push(`jny:${latestJourney}`);
-  if (tripId) keys.push(`trip:${tripId}`);
-  if (line && primary) {
-    if (direction) {
-      keys.push(`run:${primary}:${line}:${direction}:${runDay}`);
-      if (AT_LINES.has(line)) keys.push(`at:${line}:${direction}:${primary}:${runDay}`);
-    } else if (journeyId) {
-      // First Potteries / Staffs locals omit in/out — one run key per journey, not the whole day.
-      keys.push(`run:${primary}:${line}:jny:${journeyId}`);
-      // Coach continuous day key (survives journey-id changes at intermediate stops).
-      if (COACH_OPERATOR_NOCS.includes(String(point?.operator || op || "").toUpperCase())) {
-        keys.push(`run:${primary}:${line}:${runDay}`);
-      }
-    } else {
-      // Legacy undirected keys (older clients / unknown direction).
-      keys.push(`run:${primary}:${line}:${runDay}`);
-      if (AT_LINES.has(line)) keys.push(`at:${line}:${primary}:${runDay}`);
-    }
+  const primary = sticky || (hasPlate ? `reg:${reg}` : busId);
+  if (primary) keys.push(primary);
+
+  // Anonymous coaches use the sticky coach key; plate-backed vehicles use reg:*
+  // as their canonical key so Fleet can find them without guessing BODS refs.
+  if (COACH_OPERATOR_NOCS.includes(operator) && !hasPlate && !primary.startsWith("coach:")) {
+    const seed = String(point?.journeyId || bus?.journey_id || busId || reg || `${point?.lat},${point?.lng}`).trim();
+    if (seed) keys.push(`coach:${seed}`);
+  }
+
+  if (AT_LINES.has(line) && primary) {
+    keys.push(
+      direction
+        ? `at:${line}:${direction}:${primary}:${runDay}`
+        : `at:${line}:${primary}:${runDay}`,
+    );
   }
 
   return [...new Set(keys.filter(Boolean))];
@@ -654,6 +646,8 @@ async function pollOnce({ bbox, bodsKey }) {
   };
   const scfcPool = [];
   const atPool = [];
+  const operatorPollDue = Date.now() - lastOperatorPollAt >= OPERATOR_POLL_MS;
+  if (operatorPollDue) lastOperatorPollAt = Date.now();
 
   try {
     const buses = await fetchBustimesVehicles(bbox);
@@ -705,23 +699,25 @@ async function pollOnce({ bbox, bodsKey }) {
     result.errors.push(`dg: ${error.message || error}`);
   }
 
-  try {
-    const ops = await recordCoachOperators();
-    result.operators = ops.counts;
-    result.written += ops.written;
-    if (ops.errors.length) result.errors.push(...ops.errors);
-  } catch (error) {
-    result.errors.push(`operators: ${error.message || error}`);
-  }
+  if (operatorPollDue) {
+    try {
+      const ops = await recordCoachOperators();
+      result.operators = ops.counts;
+      result.written += ops.written;
+      if (ops.errors.length) result.errors.push(...ops.errors);
+    } catch (error) {
+      result.errors.push(`operators: ${error.message || error}`);
+    }
 
-  // Tag Staffs locals by NOC so trails keep FPOT/DAGC/… even when bbox AVL omits operator.
-  try {
-    const staffs = await recordStaffsOperators();
-    result.operators = { ...(result.operators || {}), ...(staffs.counts || {}) };
-    result.written += staffs.written || 0;
-    if (staffs.errors?.length) result.errors.push(...staffs.errors);
-  } catch (error) {
-    result.errors.push(`staffs-ops: ${error.message || error}`);
+    // Tag Staffs locals by NOC so trails keep FPOT/DAGC/… even when bbox AVL omits operator.
+    try {
+      const staffs = await recordStaffsOperators();
+      result.operators = { ...(result.operators || {}), ...(staffs.counts || {}) };
+      result.written += staffs.written || 0;
+      if (staffs.errors?.length) result.errors.push(...staffs.errors);
+    } catch (error) {
+      result.errors.push(`staffs-ops: ${error.message || error}`);
+    }
   }
 
   // Dedicated AT1–AT3 pass — canonical line tags; sticky route keeps each A→B stint continuous.
