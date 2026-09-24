@@ -6116,7 +6116,21 @@ async function startRoutePlayback({
     allGps = collectTrailGpsForKeys(keys, trackOpts);
   }
   if (requestId !== playbackRequestSeq) return;
-  const tripSegments = segmentTrailIntoTrips(allGps, { gapMs: coachGapMs });
+  // Scope the run before segmentation. NatEx/Flix feeds can expose two journey
+  // IDs with the same trip/direction; segmenting the combined vehicle day can
+  // otherwise splice a second coach path into the selected tail.
+  const exactJourneyGps = safeJourneyId
+    ? allGps.filter((point) => String(point.journeyId || "") === safeJourneyId)
+    : [];
+  const exactTripGps = !safeJourneyId && resolvedTripId
+    ? allGps.filter((point) => String(point.tripId || "") === String(resolvedTripId))
+    : [];
+  const scopedGps = exactJourneyGps.length >= 2
+    ? exactJourneyGps
+    : exactTripGps.length >= 2
+      ? exactTripGps
+      : allGps;
+  const tripSegments = segmentTrailIntoTrips(scopedGps, { gapMs: coachGapMs });
 
   // Playback highlight: start with the trip matching journey/trip/time. Recorded
   // Fleet rows are then expanded below when a feed changes IDs mid-run.
@@ -6142,9 +6156,9 @@ async function startRoutePlayback({
       trackedGps = [];
       trackedRunIndex = -1;
     } else {
-      trackedGps = clipPointsToSingleDirectionRun(allGps, {
+      trackedGps = clipPointsToSingleDirectionRun(scopedGps, {
         direction: safeDirection,
-        aroundMs: aroundMs || (allGps[0] ? Number(allGps[0].t) : 0),
+        aroundMs: aroundMs || (scopedGps[0] ? Number(scopedGps[0].t) : 0),
       });
       trackedRunIndex = findTrailRunIndex(tripSegments, trackedGps, aroundMs);
     }
@@ -6152,10 +6166,10 @@ async function startRoutePlayback({
     trackedGps = tripSegments[0];
     trackedRunIndex = 0;
   }
-  if (!exactJourneyUnavailable && trackedGps.length < 2 && allGps.length >= 2) {
-    trackedGps = clipPointsToSingleDirectionRun(allGps, {
+  if (!exactJourneyUnavailable && trackedGps.length < 2 && scopedGps.length >= 2) {
+    trackedGps = clipPointsToSingleDirectionRun(scopedGps, {
       direction: safeDirection,
-      aroundMs: aroundMs || Number(allGps[0].t) || 0,
+      aroundMs: aroundMs || Number(scopedGps[0].t) || 0,
     });
     trackedRunIndex = findTrailRunIndex(tripSegments, trackedGps, aroundMs);
   }
