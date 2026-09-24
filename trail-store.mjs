@@ -571,34 +571,47 @@ function recentTrailKeysByColumn(column, values, { days = TRAIL_KEEP_DAYS, limit
   const keepDays = Math.min(TRAIL_KEEP_DAYS, Math.max(1, Number(days) || TRAIL_KEEP_DAYS));
   const cutoff = Date.now() - keepDays * 86400000;
   const cap = Math.min(80, Math.max(4, Number(limit) || 40));
-  // Fleet only needs the newest few dozen identities. Reading a bounded recent
-  // window avoids a full GROUP BY across millions of duplicate alias rows.
-  const scanLimit = Math.min(30_000, Math.max(4_000, cap * 300));
+  // Walk bounded newest-first windows instead of grouping the whole seven-day
+  // table. This keeps route/Fleet key lists fast even while old duplicate rows
+  // are being retired.
+  const chunkSize = Math.min(30_000, Math.max(4_000, cap * 300));
+  const maxChunks = 10;
   const placeholders = codes.map(() => "?").join(",");
-  const rows = sqlAll(
-    `SELECT trail_key, line, operator, t
-     FROM vehicle_trail_points
-     WHERE ${column} IN (${placeholders}) AND t >= ?
-     ORDER BY t DESC
-     LIMIT ?`,
-    [...codes, cutoff, scanLimit],
-  );
   const grouped = new Map();
-  for (const row of rows) {
-    const key = String(row.trail_key || "").trim();
-    if (!key) continue;
-    const current = grouped.get(key) || {
-      key,
-      line: row.line || "",
-      operator: row.operator || "",
-      points: 0,
-      lastT: 0,
-    };
-    current.points += 1;
-    current.lastT = Math.max(current.lastT, Number(row.t) || 0);
-    if (!current.line) current.line = row.line || "";
-    if (!current.operator) current.operator = row.operator || "";
-    grouped.set(key, current);
+  let cursor = Number.MAX_SAFE_INTEGER;
+  for (let chunk = 0; chunk < maxChunks; chunk += 1) {
+    const rows = sqlAll(
+      `SELECT trail_key, line, operator, t
+       FROM vehicle_trail_points
+       WHERE ${column} IN (${placeholders})
+         AND t >= ?
+         AND t < ?
+       ORDER BY t DESC
+       LIMIT ?`,
+      [...codes, cutoff, cursor, chunkSize],
+    );
+    if (!rows.length) break;
+    for (const row of rows) {
+      const key = String(row.trail_key || "").trim();
+      if (!key) continue;
+      const current = grouped.get(key) || {
+        key,
+        line: row.line || "",
+        operator: row.operator || "",
+        points: 0,
+        lastT: 0,
+      };
+      current.points += 1;
+      current.lastT = Math.max(current.lastT, Number(row.t) || 0);
+      if (!current.line) current.line = row.line || "";
+      if (!current.operator) current.operator = row.operator || "";
+      grouped.set(key, current);
+    }
+    const nextCursor = Number(rows[rows.length - 1]?.t) || 0;
+    if (!nextCursor || nextCursor >= cursor) break;
+    cursor = nextCursor;
+    if (rows.length < chunkSize && grouped.size >= cap) break;
+    if (grouped.size >= cap + 10) break;
   }
   return [...grouped.values()]
     .filter((row) => row.points >= 2)
