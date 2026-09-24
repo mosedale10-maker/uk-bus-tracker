@@ -4121,9 +4121,7 @@ function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
   // wait for the validated OSRM geometry instead of showing that fallback.
   if (
     breakOpts.coach ||
-    isCoachTrailOperator(breakOpts.operator) ||
-    breakOpts.staffs ||
-    isStaffsTrailOperator(breakOpts.operator)
+    isCoachTrailOperator(breakOpts.operator)
   ) return [];
   const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
   if (flattenTrailLatLngs(local).length >= 2) return local;
@@ -13408,7 +13406,7 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
         // Local OFM snap is useful for ordinary bus/staff roads, but its
         // nearest-road bridge can pick the wrong motorway carriageway. Keep
         // failed coach alignment hidden until a validated road path exists.
-        if (!coach && !staffs) {
+        if (!coach && !plannedRoute) {
           segs = trailSegmentsOf(alignTrailToRoadsLocal(latlngs, alignOpts), alignOpts);
         }
       } else {
