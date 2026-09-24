@@ -2004,8 +2004,13 @@ export async function fetchCoachHistoryFromTrails({
         const destChanged = rawDestChanged && (gap >= journeyFlipMs || terminalTurn);
         const idBoundary =
           (journeyChanged || tripChanged) &&
-          (lineChanged || directionChanged || rawDestChanged || gap > journeyFlipMs);
-        const hardBoundary = Boolean(lineChanged || directionChanged || terminalTurn || (rawDestChanged && (journeyChanged || tripChanged)));
+          (lineChanged || directionChanged || (rawDestChanged && gap >= 60_000) || gap > journeyFlipMs);
+        const hardBoundary = Boolean(
+          lineChanged ||
+            directionChanged ||
+            terminalTurn ||
+            (rawDestChanged && gap >= 60_000 && (journeyChanged || tripChanged)),
+        );
         const shouldSplit =
           !cur ||
           lineChanged ||
