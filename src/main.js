@@ -2126,6 +2126,18 @@ function gpsReplayUpdateDirectionArrows(t) {
     clearReplayDirectionArrows(replay);
   }
   if (!replay.directionArrows) replay.directionArrows = [];
+  // Keep the arrow layer authoritative even after a scrub or a late frame:
+  // nothing may remain ahead of the moving replay cursor.
+  for (let i = replay.directionArrows.length - 1; i >= 0; i -= 1) {
+    const marker = replay.directionArrows[i];
+    if (!marker || Number(marker._replayT) <= t + 1) continue;
+    try {
+      playbackLayer.removeLayer(marker);
+    } catch {
+      /* already removed */
+    }
+    replay.directionArrows.splice(i, 1);
+  }
   if (!Number.isFinite(replay.arrowT)) replay.arrowT = Number.NEGATIVE_INFINITY;
   if (t < pts[0].t) return;
 
@@ -2280,6 +2292,17 @@ function gpsReplaySetClock(ms) {
   if (txt) playbackClockEl.textContent = txt.split(" · ")[0];
 }
 
+/** Keep the replay cursor, its direction arrow, and the clipped tail on one position. */
+function gpsReplaySetCursor(t) {
+  const point = gpsReplayInterp(gpsReplay?.pts || [], t);
+  if (!point) return null;
+  gpsReplayMarkerAt(point.lat, point.lng, point.heading);
+  gpsReplaySetClock(t);
+  gpsReplayUpdateTravelled(t);
+  updateReplayBusMarkerAt(point);
+  return point;
+}
+
 function gpsReplayInterp(pts, t) {
   const list = pts;
   if (!list.length) return null;
@@ -2329,14 +2352,8 @@ function gpsReplayFrame(ts) {
     gpsReplayPause();
   }
   const t = gpsReplay.t0 + gpsReplay.pos;
-  const p = gpsReplayInterp(gpsReplay.pts, t);
-  if (p) {
-    gpsReplayMarkerAt(p.lat, p.lng, p.heading);
-    gpsReplaySetClock(t);
-    gpsReplayUpdateTravelled(t);
-    if (playbackScrubEl) playbackScrubEl.value = String(Math.round((p.frac || 0) * 1000));
-    updateReplayBusMarkerAt(p);
-  }
+  const p = gpsReplaySetCursor(t);
+  if (p && playbackScrubEl) playbackScrubEl.value = String(Math.round((p.frac || 0) * 1000));
   if (gpsReplay?.playing) requestAnimationFrame(gpsReplayFrame);
 }
 
@@ -2379,13 +2396,7 @@ function gpsReplayStart() {
   playbackReplayEl.hidden = false;
   // Reset the travelled stroke immediately when a completed replay is replayed
   // again, rather than leaving the full route visible for one frame.
-  const current = gpsReplayInterp(gpsReplay.pts, gpsReplay.t0 + gpsReplay.pos);
-  gpsReplayUpdateTravelled(gpsReplay.t0 + gpsReplay.pos);
-  gpsReplayMarkerAt(
-    current?.lat ?? gpsReplay.pts[0].lat,
-    current?.lng ?? gpsReplay.pts[0].lng,
-    current?.heading ?? gpsReplay.pts[0].heading,
-  );
+  gpsReplaySetCursor(gpsReplay.t0 + gpsReplay.pos);
   requestAnimationFrame(gpsReplayFrame);
 }
 
@@ -13159,13 +13170,7 @@ playbackScrubEl?.addEventListener("input", () => {
   const frac = Number(playbackScrubEl.value) / 1000;
   gpsReplay.pos = (gpsReplay.t1 - gpsReplay.t0) * Math.min(1, Math.max(0, frac));
   const t = gpsReplay.t0 + gpsReplay.pos;
-  const p = gpsReplayInterp(gpsReplay.pts, t);
-  if (p) {
-    gpsReplayMarkerAt(p.lat, p.lng, p.heading);
-    gpsReplaySetClock(t);
-    gpsReplayUpdateTravelled(t);
-    updateReplayBusMarkerAt(p);
-  }
+  gpsReplaySetCursor(t);
 });
 journeyPanelCloseEl?.addEventListener("click", () => {
   if (playback) stopRoutePlayback("", { clearTail: true });
