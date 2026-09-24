@@ -26,6 +26,7 @@ import {
   listPlusUsers,
 } from "./auth-store.mjs";
 import { paypalConfigured, createPlusOrder, capturePlusOrder, plusAmount, plusCurrency } from "./paypal-plus.mjs";
+import { initStopStore, stopsEnabled, stopsInBounds, stopCount } from "./stop-store.mjs";
 import { sendPlusThankYouEmail } from "./mail.mjs";
 import {
   initPhotoStore,
@@ -700,11 +701,57 @@ app.get("/api/vehicles", async (req, res, next) => {
   }
 });
 
-/** Stop pins previously came from bustimes.org — disabled (BODS has no stop GeoJSON). */
-app.get("/api/stops-geo", (_req, res) => {
-  res.setHeader("Cache-Control", "public, max-age=60");
-  res.setHeader("X-Data-Source", "none");
-  res.type("json").send(JSON.stringify({ type: "FeatureCollection", features: [] }));
+/**
+ * Bus stop pins. Served from the local SQLite catalogue (scripts/import-stops.mjs) —
+ * bustimes.org's /api/stops/ has no bbox filter, so we import once and query locally.
+ */
+app.get("/api/stops-geo", (req, res) => {
+  if (!stopsEnabled()) {
+    res.setHeader("X-Data-Source", "none");
+    res.type("json").send(JSON.stringify({ type: "FeatureCollection", features: [] }));
+    return;
+  }
+  const south = Number(req.query.ymin);
+  const west = Number(req.query.xmin);
+  const north = Number(req.query.ymax);
+  const east = Number(req.query.xmax);
+  res.setHeader("Cache-Control", "public, max-age=120");
+  res.setHeader("X-Data-Source", "sqlite-stops");
+  res.type("json").send(JSON.stringify(stopsInBounds({ south, west, north, east })));
+});
+
+/** Bustimes departure times for one stop — powers the stop popup board. */
+const stopTimesCache = new Map();
+const STOP_TIMES_TTL_MS = 30_000;
+app.get("/api/stop-times/:atco", async (req, res, next) => {
+  const atco = String(req.params.atco || "").trim();
+  if (!/^[A-Za-z0-9]{4,32}$/.test(atco)) {
+    res.status(400).json({ times: [] });
+    return;
+  }
+  const hit = stopTimesCache.get(atco);
+  if (hit && Date.now() - hit.at < STOP_TIMES_TTL_MS) {
+    res.setHeader("Cache-Control", "public, max-age=30");
+    res.type("json").send(hit.body);
+    return;
+  }
+  try {
+    const upstream = await fetch(`https://bustimes.org/api/stop-times/${encodeURIComponent(atco)}/`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const data = await upstream.json().catch(() => null);
+    const body = JSON.stringify({ times: Array.isArray(data?.results) ? data.results : [] });
+    if (upstream.ok) stopTimesCache.set(atco, { at: Date.now(), body });
+    res.setHeader("Cache-Control", "public, max-age=30");
+    res.type("json").send(body);
+  } catch (err) {
+    if (hit) {
+      res.type("json").send(hit.body);
+      return;
+    }
+    next(err);
+  }
 });
 
 /** Former bustimes.org REST proxies — return empty so the UI does not call bustimes. */
@@ -729,7 +776,6 @@ function mountBtStub(path, handler) {
 
 mountBtStub("/api/bt-operators", stubBtList);
 mountBtStub("/api/bt-stops", stubBtGone);
-mountBtStub("/api/stop-times", stubBtGone);
 
 /**
  * Bustimes service (route) catalogue — powers Fleet · Routes, route chips and
@@ -1990,6 +2036,23 @@ async function bootTrailStack() {
 bootTrailStack().catch((error) => {
   console.error("[boot] trail stack failed", error?.message || error);
 });
+
+// Bus stop catalogue (SQLite). Populate with: node scripts/import-stops.mjs
+initStopStore()
+  .then((ok) => {
+    if (!ok) {
+      console.warn("[stops] store unavailable — stop pins hidden (run scripts/import-stops.mjs)");
+      return;
+    }
+    if (!stopCount()) {
+      console.warn("[stops] catalogue empty — run: node scripts/import-stops.mjs");
+    } else {
+      console.log(`[stops] ${stopCount()} stops ready for map pins`);
+    }
+  })
+  .catch((error) => {
+    console.error("[stops] init failed", error?.message || error);
+  });
 
 app.use(
   express.static(distDir, {
