@@ -4611,6 +4611,16 @@ function refreshPinnedTrailLine(key) {
       String(id).startsWith("at:"),
   };
   let gpsPoints = trackedPointsFor(id, filter);
+  // Alias feeds can contribute points with no journey ID. Once a live
+  // selection has a real journey/trip identity, do not let those unrelated
+  // points extend a NatEx/Flix tail beyond the selected coach.
+  if (filter.live && filter.journeyId) {
+    const exact = gpsPoints.filter((point) => String(point.journeyId || "") === String(filter.journeyId));
+    if (exact.length >= 2) gpsPoints = exact;
+  } else if (filter.live && filter.tripId) {
+    const exact = gpsPoints.filter((point) => String(point.tripId || "") === String(filter.tripId));
+    if (exact.length >= 2) gpsPoints = exact;
+  }
   if (filter.live || filter.follow) {
     const ping = livePingForTrailFilter(filter, gpsPoints);
     gpsPoints = clipGpsPointsAtPing(gpsPoints, ping);
