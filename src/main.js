@@ -3693,10 +3693,10 @@ function isStaffsTrailOperator(operator) {
   return STAFFS_TRAIL_NOCS.has(String(operator || "").trim().toUpperCase());
 }
 
-/** Route 36A is displayed against its published A50 alignment when requested. */
+/** Staffordshire services with a Bustimes trip can use its published track. */
 function usesPlannedRouteOverride(line, operator) {
   const noc = String(operator || "").trim().toUpperCase();
-  return sameServiceLine(line, "36A") && (!noc || noc === "FPOT");
+  return isStaffsTrailOperator(noc) || (sameServiceLine(line, "36A") && (!noc || noc === "FPOT"));
 }
 
 function trailBreakLimits({ coach = false, staffs = false, operator = "", continuous = false } = {}) {
@@ -5052,10 +5052,16 @@ async function showFleetRouteTails({
     for (const key of expanded) keys.add(key);
   }
 
-  // Route-wide Map · tails intentionally remain recorded GPS tails. Bustimes
-  // alignment is used only for an explicit 36A Replay.
+  const plannedRoutePromise = fetchPlannedRoutePath({
+    targets,
+    code,
+    opCode,
+    plannedTripId,
+    plannedServiceId,
+    plannedDate,
+  });
   await fetchServerTrailsChunked([...keys], { force: true });
-  const plannedRoutePath = [];
+  const plannedRoutePath = await plannedRoutePromise;
 
   clearPinnedTrails();
   const focusRegs = new Set(
@@ -6120,9 +6126,9 @@ async function startRoutePlayback({
         Number.isFinite(new Date(datetime).getTime()) &&
         Date.now() - new Date(datetime).getTime() > 12 * 60_000,
     );
-  // A diverted service normally uses recorded GPS. Route 36A is the explicit
-  // exception requested for the published A50 alignment.
-  const plannedRouteOverride = usesPlannedRouteOverride(line, operator) && autoReplay;
+  // Staffordshire buses use the matching Bustimes trip alignment when one is
+  // available; the current marker still clips live playback to the bus.
+  const plannedRouteOverride = usesPlannedRouteOverride(line, operator);
   const actualRouteRequired = Boolean(
     !plannedRouteOverride && (diverted || isDivertedText(dest, line, operator)),
   );
@@ -6542,7 +6548,7 @@ async function startRoutePlayback({
   // A recorded/history run owns its full extent. Only live playback clips to
   // the current bus marker; using a later marker's position here would append
   // the next return leg to an older journey.
-  const clipPing = plannedPath.length >= 2 ? null : preserveRecordedRun ? null : lastPing;
+  const clipPing = preserveRecordedRun ? null : lastPing;
 
   showMessage(usingTracked ? "Matching GPS to roads…" : "Matching route to roads…");
   let drawPath = path;
