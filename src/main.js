@@ -4972,19 +4972,43 @@ async function fetchPlannedRoutePath({
   plannedServiceId = "",
   plannedDate = "",
 } = {}) {
-  if (!usesPlannedRouteOverride(code, opCode) || !targets.length) return [];
-  let serviceTripId = plannedTripId;
+  if (
+    !usesPlannedRouteOverride(code, opCode) ||
+    (!targets.length && !plannedTripId && !plannedServiceId)
+  ) {
+    return [];
+  }
+  let serviceTripId = String(plannedTripId || "").trim();
+  const routeDate = String(plannedDate || ukDateKey()).slice(0, 10);
+
+  // Anonymous coach AVL has no trip/vehicle id. Resolve a current Bustimes trip
+  // from the route + destination so route-wide Map · tails still has a planned
+  // path even when the live feed supplied no usable GPS key.
+  if (!serviceTripId && !plannedServiceId && isCoachTrailOperator(opCode)) {
+    serviceTripId = await resolveBustimesTripForPlayback({
+      operator: opCode,
+      line: code,
+      datetime: plannedDate || "",
+      destination: targets[0]?.destination || targets[0]?.dest || "",
+    });
+  }
   if (!serviceTripId && plannedServiceId) {
     try {
-      const date = String(plannedDate || ukDateKey()).slice(0, 10);
-      const res = await fetch(`/api/bt-trips/?service=${encodeURIComponent(plannedServiceId)}&date=${date}&limit=20`);
+      const res = await fetch(
+        `/api/bt-trips/?service=${encodeURIComponent(plannedServiceId)}&date=${encodeURIComponent(routeDate)}&limit=20`,
+      );
       const data = res.ok ? await res.json() : null;
       serviceTripId = String(data?.results?.[0]?.id || data?.[0]?.id || "").trim();
     } catch {
       serviceTripId = "";
     }
   }
-  for (const v of targets.slice(0, 4)) {
+
+  // A service id/trip id is enough even when the live vehicle list is empty.
+  const candidates = targets.length
+    ? targets
+    : [{ line: code, datetime: plannedDate || "", destination: "" }];
+  for (const v of candidates.slice(0, 4)) {
     const directTrip = String(v.trip_id || v.tripId || serviceTripId || "").trim();
     const numericVehicle = String(v.id || v.btId || v.vehicleId || "").trim();
     let candidateTrip = directTrip;
@@ -5001,7 +5025,7 @@ async function fetchPlannedRoutePath({
     if (!candidateTrip) continue;
     const trip = await Promise.race([
       tripEnds(candidateTrip, {
-        date: String(plannedDate || v.datetime || v.recordedAtTime || "").slice(0, 10),
+        date: String(plannedDate || v.datetime || v.recordedAtTime || routeDate).slice(0, 10),
       }),
       new Promise((resolve) => setTimeout(() => resolve(null), 4500)),
     ]);
@@ -5028,7 +5052,12 @@ async function showFleetRouteTails({
 } = {}) {
   const code = String(line || "").trim();
   const opCode = String(operator || "").trim().toUpperCase();
-  const forceSingle = isSingleVehicleRouteOperator(opCode) || isSingleVehicleRouteLine(code);
+  const hasExplicitSelection = Boolean(vehicleId || trailKey || reg || journeyId || tripId);
+  // A selected coach journey stays single-run. A route-wide Map · tails request
+  // may use the matching Bustimes service path even when the live feed has many
+  // anonymous vehicles (and therefore no single safe target to select).
+  const forceSingle = isSingleVehicleRouteLine(code) ||
+    (isSingleVehicleRouteOperator(opCode) && hasExplicitSelection);
   if (!code && !vehicleId && !trailKey && !reg) {
     showMessage("No route to show");
     return;
@@ -5055,13 +5084,14 @@ async function showFleetRouteTails({
 
   // FlixBus / National Express / D&G / First Potteries / Stanton's: one vehicle + one route only.
   let targets = list.length ? list : single;
-  if (forceSingle) {
-    if (vehicleId || trailKey || reg || journeyId || tripId) {
-      targets = single.length ? single : targets.slice(0, 1);
-    } else if (targets.length !== 1) {
-      showMessage("Open a bus and press Map — only that vehicle’s route is shown on the map");
-      return;
-    }
+  // Route-wide coach requests can contain hundreds of anonymous live rows. The
+  // published service path is the useful fallback; a small GPS sample is enough
+  // when it is available and avoids fanning out hundreds of recorder requests.
+  if (!hasExplicitSelection && isCoachTrailOperator(opCode) && targets.length > 12) {
+    targets = targets.slice(0, 12);
+  }
+  if (forceSingle && hasExplicitSelection) {
+    targets = single.length ? single : targets.slice(0, 1);
   }
 
   const label = code
@@ -5119,15 +5149,17 @@ async function showFleetRouteTails({
     }
   }
 
-  if (!keys.size) {
-    showMessage(
-      forceSingle
-        ? `No GPS tail for this bus yet — leave it open on the map or wait for the server recorder`
-        : `No GPS tails for ${label} yet`,
-    );
-    return;
-  }
-
+  // Start the Bustimes route lookup before the GPS-key check. A coach route can
+  // have no usable recorder key (anonymous AVL / stale feed) but still has a
+  // valid published service path.
+  const plannedRoutePromise = fetchPlannedRoutePath({
+    targets,
+    code,
+    opCode,
+    plannedTripId,
+    plannedServiceId,
+    plannedDate,
+  });
   if (isCoachTrailOperator(opCode) && targets.length === 1) {
     const v = targets[0];
     const expanded = await expandCoachTrailKeys([...keys], {
@@ -5140,17 +5172,16 @@ async function showFleetRouteTails({
     });
     for (const key of expanded) keys.add(key);
   }
-
-  const plannedRoutePromise = fetchPlannedRoutePath({
-    targets,
-    code,
-    opCode,
-    plannedTripId,
-    plannedServiceId,
-    plannedDate,
-  });
-  await fetchServerTrailsChunked([...keys], { force: true });
+  if (keys.size) await fetchServerTrailsChunked([...keys], { force: true });
   const plannedRoutePath = await plannedRoutePromise;
+  if (!keys.size && plannedRoutePath.length < 2) {
+    showMessage(
+      hasExplicitSelection
+        ? `No GPS or Bustimes path for this bus yet — leave it open on the map or try again later`
+        : `No GPS or Bustimes tails for ${label} yet`,
+    );
+    return;
+  }
 
   clearPinnedTrails();
   const focusRegs = new Set(

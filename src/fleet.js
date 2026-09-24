@@ -3185,7 +3185,10 @@ function liveBusToRouteVehicle(bus, service = null) {
     reg: plate,
     slug: "",
     live: true,
-    route_name: bus?.service?.line_name || service?.line_name || "",
+    // The vehicle endpoint sometimes exposes the service id (for example
+    // "2") in service.line_name. On a route page the service object is
+    // authoritative, otherwise those live rows are discarded as the wrong line.
+    route_name: service?.line_name || bus?.service?.line_name || "",
     destination: bus?.destination || "",
     datetime: bus?.datetime || "",
     trip_id: bus?.trip_id || "",
