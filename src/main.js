@@ -5347,6 +5347,11 @@ function clearTrailArtifacts(layer) {
 
 function clearPinnedTrails() {
   for (const pair of pinnedTrailLines.values()) removeTrailPair(pair, liveTrailLayer);
+  // The layer can contain orphaned pairs from an interrupted async render that
+  // are no longer present in pinnedTrailLines. Clear the whole tail layer so a
+  // NatEx/Flix selection cannot inherit a previous coach's arrows.
+  liveTrailLayer.clearLayers();
+  liveTrailLine = null;
   clearTrailArtifacts(liveTrailLayer);
   pinnedTrailLines.clear();
   pinnedTrailKeys.clear();
