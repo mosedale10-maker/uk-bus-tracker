@@ -5244,6 +5244,19 @@ function pinVehicleTrail({
     direction: safeDirection,
   });
   if (!keys.length) return;
+  const renderKey = String(trailKey || vehicleId || regTrailKey(reg) || keys[0] || "").trim();
+  if (!renderKey) return;
+  // Alias keys (reg, Bustimes id, journey and run keys) describe the same
+  // physical coach. Merge their already-fetched points into one canonical
+  // in-memory key and draw one live tail, not one overlapping tail per alias.
+  let mergedPoints = trailMem.get(renderKey) || [];
+  for (const key of keys) {
+    const id = String(key || "");
+    if (!id || id === renderKey) continue;
+    const points = trailMem.get(id);
+    if (points?.length) mergedPoints = mergeTrailPoints(mergedPoints, points);
+  }
+  if (mergedPoints.length) trailMem.set(renderKey, mergedPoints);
   const window = trailTimeWindow(datetime);
   const followLive = live || !datetime;
   const coachLive = isCoachTrailOperator(operator);
@@ -5271,29 +5284,26 @@ function pinVehicleTrail({
     actualRoute: Boolean(diverted),
   };
   multiTailActiveGroup = null;
-  for (const key of keys) {
-    if (
-      filter.line ||
-      filter.journeyId ||
-      filter.tripId ||
-      filter.direction ||
-      filter.operator ||
-      filter.fromMs ||
-      filter.live ||
-      filter.diverted ||
-      filter.actualRoute
-    ) {
-      pinnedTrailFilters.set(String(key), filter);
-    } else {
-      pinnedTrailFilters.delete(String(key));
-    }
-    pinnedTrailKeys.add(key);
-    rememberTrailVehicle(key);
-    refreshPinnedTrailLine(key);
+  if (
+    filter.line ||
+    filter.journeyId ||
+    filter.tripId ||
+    filter.direction ||
+    filter.operator ||
+    filter.fromMs ||
+    filter.live ||
+    filter.diverted ||
+    filter.actualRoute
+  ) {
+    pinnedTrailFilters.set(renderKey, filter);
+  } else {
+    pinnedTrailFilters.delete(renderKey);
   }
-  const primary = String(trailKey || vehicleId || keys[0] || "").trim();
+  pinnedTrailKeys.add(renderKey);
+  rememberTrailVehicle(renderKey);
+  refreshPinnedTrailLine(renderKey);
   // History · Map pins its own stroke — skip a second liveTrailLine overlay.
-  if (followLive && primary && liveFocus) setLiveTrailFocus(primary);
+  if (followLive && renderKey && liveFocus) setLiveTrailFocus(renderKey);
   updatePlaybackChrome();
 }
 
