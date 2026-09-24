@@ -3581,7 +3581,10 @@ function collectTrailGpsForKeys(keys, filter = {}) {
  * Pin each trip as its own tail polyline (Hanley→Newcastle separate from Newcastle→Hanley).
  * Returns the synthetic keys that were drawn.
  */
-function pinSeparateTripTails(segments, { baseKey = "bus", line = "", operator = "", actualRoute = false } = {}) {
+function pinSeparateTripTails(
+  segments,
+  { baseKey = "bus", line = "", operator = "", actualRoute = false, plannedRoute = false } = {},
+) {
   // A new selection must not inherit arrows from a previous route selection.
   clearTrailArtifacts(liveTrailLayer);
   const drawn = [];
@@ -3618,6 +3621,7 @@ function pinSeparateTripTails(segments, { baseKey = "bus", line = "", operator =
       toMs: endT,
       operator: String(operator || "").trim().toUpperCase(),
       actualRoute: Boolean(actualRoute),
+      plannedRoute: Boolean(plannedRoute),
     });
     pinnedTrailKeys.add(key);
     refreshPinnedTrailLine(key);
@@ -4076,18 +4080,19 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
   const line = String(filter?.line || "").trim().toUpperCase();
   const id = String(key || "");
   const actualRoute = Boolean(filter?.actualRoute || filter?.diverted);
+  const plannedRoute = Boolean(filter?.plannedRoute);
   const staffs =
     Boolean(filter?.staffs) ||
     isStaffsTrailOperator(op) ||
     isAltonLine(line) ||
     id.startsWith("staff-") ||
     id.startsWith("at:");
-  if (op) return { operator: op, coach: isCoachTrailOperator(op), staffs, actualRoute };
-  if (filter?.coach) return { coach: true, operator: op || "", staffs, actualRoute };
+  if (op) return { operator: op, coach: isCoachTrailOperator(op), staffs, actualRoute, plannedRoute };
+  if (filter?.coach) return { coach: true, operator: op || "", staffs, actualRoute, plannedRoute };
   const pts = trailMem.get(id) || [];
   for (let i = pts.length - 1; i >= 0; i -= 1) {
     const pOp = String(pts[i]?.operator || "").trim().toUpperCase();
-    if (pOp) return { operator: pOp, coach: isCoachTrailOperator(pOp), staffs: staffs || isStaffsTrailOperator(pOp), actualRoute };
+    if (pOp) return { operator: pOp, coach: isCoachTrailOperator(pOp), staffs: staffs || isStaffsTrailOperator(pOp), actualRoute, plannedRoute };
   }
   // Live Flix / NATX markers: bus.id is the trail key but points may lack operator yet.
   if (id) {
@@ -4095,11 +4100,11 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
       if (String(marker?.bus?.id) !== id) continue;
       if (isFlixBus(marker.bus) || isNationalExpress(marker.bus)) {
         const noc = trailOperatorForBus(marker.bus);
-        return { operator: noc, coach: true, staffs: false, actualRoute };
+        return { operator: noc, coach: true, staffs: false, actualRoute, plannedRoute };
       }
     }
   }
-  return { staffs, actualRoute };
+  return { staffs, actualRoute, plannedRoute };
 }
 
 /**
@@ -4110,6 +4115,7 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
 function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
   const roadFlat = flattenTrailLatLngs(roadPath);
   if (roadFlat.length >= 2) return roadPath;
+  if (breakOpts.plannedRoute) return gpsPath;
   // A local nearest-road stitch can choose the opposite carriageway at a
   // motorway junction and draw a convincing-looking loop. Coaches therefore
   // wait for the validated OSRM geometry instead of showing that fallback.
@@ -4246,6 +4252,7 @@ function trailPairBreakOpts(opts = {}, fallback = {}) {
     coach: !!(opts.coach ?? fallback.coach),
     staffs: !!(opts.staffs ?? fallback.staffs),
     actualRoute: !!(opts.actualRoute ?? fallback.actualRoute),
+    plannedRoute: !!(opts.plannedRoute ?? fallback.plannedRoute),
   };
 }
 
@@ -4312,12 +4319,13 @@ function setTrailPairPath(pair, path, opts = {}) {
   const breakOpts = trailPairBreakOpts(
     {
       ...(pair.breakOpts || {}),
-      ...(opts.operator != null || opts.coach != null || opts.staffs != null || opts.actualRoute != null
+      ...(opts.operator != null || opts.coach != null || opts.staffs != null || opts.actualRoute != null || opts.plannedRoute != null
         ? {
             operator: opts.operator ?? pair.breakOpts?.operator,
             coach: opts.coach ?? pair.breakOpts?.coach,
             staffs: opts.staffs ?? pair.breakOpts?.staffs,
             actualRoute: opts.actualRoute ?? pair.breakOpts?.actualRoute,
+            plannedRoute: opts.plannedRoute ?? pair.breakOpts?.plannedRoute,
           }
         : {}),
     },
@@ -5147,6 +5155,7 @@ async function showFleetRouteTails({
       baseKey: `planned-${code}`,
       line: code,
       operator: opCode,
+      plannedRoute: true,
     });
     drawn.length = 0;
     drawn.push(...plannedKeys);
@@ -6459,6 +6468,7 @@ async function startRoutePlayback({
     coach: coachOp || isCoachTrailOperator(operator),
     staffs: isStaffsTrailOperator(operator) || isAltonLine(lineName),
     actualRoute: actualRouteRequired,
+    plannedRoute: plannedPath.length >= 2,
   };
 
   // A historical Map view still has a live vehicle marker when the bus is
@@ -6488,7 +6498,7 @@ async function startRoutePlayback({
   // A recorded/history run owns its full extent. Only live playback clips to
   // the current bus marker; using a later marker's position here would append
   // the next return leg to an older journey.
-  const clipPing = preserveRecordedRun ? null : lastPing;
+  const clipPing = plannedPath.length >= 2 ? null : preserveRecordedRun ? null : lastPing;
 
   showMessage(usingTracked ? "Matching GPS to roads…" : "Matching route to roads…");
   let drawPath = path;
@@ -13301,8 +13311,16 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
     isStaffsTrailOperator(breakOpts.operator) ||
     isAltonLine(breakOpts.line);
   const actualRoute = Boolean(breakOpts.actualRoute);
-  const key = `${trailPathHash(latlngs)}|${actualRoute ? "actual" : coach ? "coach" : staffs ? "staffs" : "bus"}|v8`;
+  const plannedRoute = Boolean(breakOpts.plannedRoute);
+  const key = `${trailPathHash(latlngs)}|${plannedRoute ? "planned" : actualRoute ? "actual" : coach ? "coach" : staffs ? "staffs" : "bus"}|v8`;
   if (trailAlignCache.has(key)) return trailAlignCache.get(key);
+  if (plannedRoute) {
+    const cleaned = Array.isArray(latlngs?.[0]?.[0])
+      ? latlngs.map((seg) => dedupeNearTrailPoints(seg, 2)).filter((seg) => seg.length >= 2)
+      : dedupeNearTrailPoints(latlngs, 2);
+    trailAlignCache.set(key, cleaned);
+    return cleaned;
+  }
   if (trailAlignPending.has(key)) return trailAlignPending.get(key);
   const pending = (async () => {
     try {
