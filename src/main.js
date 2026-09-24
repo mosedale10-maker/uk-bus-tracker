@@ -3698,7 +3698,11 @@ function usesPlannedRouteOverride(line, operator) {
   // AT1–AT3 are staff/NextStop services and have no Bustimes trip track.
   if (isAltonLine(line)) return false;
   const noc = String(operator || "").trim().toUpperCase();
-  return isStaffsTrailOperator(noc) || (sameServiceLine(line, "36A") && (!noc || noc === "FPOT"));
+  return (
+    isStaffsTrailOperator(noc) ||
+    isCoachTrailOperator(noc) ||
+    (sameServiceLine(line, "36A") && (!noc || noc === "FPOT"))
+  );
 }
 
 function trailBreakLimits({ coach = false, staffs = false, operator = "", continuous = false } = {}) {
