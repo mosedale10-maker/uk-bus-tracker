@@ -510,8 +510,10 @@ const vehiclesJsonInflight = new Map();
 /** Fresh window — keep ≈ client BUS_POLL_MS (7s) so refresh hits memory, not upstream. */
 const VEHICLES_JSON_TTL_MS = 5000;
 const VEHICLES_OPERATOR_TTL_MS = 7_000;
-/** Serve expired bodies while a background refresh runs (avoids stampede + empty map). */
-const VEHICLES_STALE_MS = 60_000;
+/** Serve expired bodies while a background refresh runs (avoids stampede + empty map).
+ *  Wide Staffs bboxes can take 6–15s upstream, so keep a generous stale window — that
+ *  turns a slow refresh into a background task instead of a stalled map. */
+const VEHICLES_STALE_MS = 300_000;
 
 function vehiclesCacheTtl(url) {
   return /[?&]operator=/i.test(url) ? VEHICLES_OPERATOR_TTL_MS : VEHICLES_JSON_TTL_MS;
@@ -2096,9 +2098,17 @@ const server = app.listen(port, "0.0.0.0", () => {
         : " (set BODS_API_KEY)"
     }`,
   );
-  // Warm a mid-England bbox so the first map poll often hits memory (SWR after that).
-  const warmKey = quantizeVehiclesQuery("?xmin=-2.50&ymin=52.50&xmax=-1.50&ymax=53.20");
-  revalidateVehiclesInBackground(warmKey);
+  // Warm the bboxes people actually open. A cold BODS bbox costs 6–15s, and one wide box
+  // only helps the exact view it was warmed for — so warm the common Staffordshire zooms
+  // (wide, mid and town level) up front so the first map poll hits memory.
+  for (const qs of [
+    "?xmin=-2.50&ymin=52.50&xmax=-1.50&ymax=53.20", // whole Staffordshire
+    "?xmin=-2.30&ymin=52.80&xmax=-1.90&ymax=53.15", // Stoke / Newcastle / Leek
+    "?xmin=-2.20&ymin=52.90&xmax=-1.95&ymax=53.08", // Stoke town
+    "?xmin=-2.15&ymin=52.97&xmax=-2.08&ymax=53.02", // Hanley / Longton
+  ]) {
+    revalidateVehiclesInBackground(quantizeVehiclesQuery(qs));
+  }
 });
 // Many http-proxy-middleware mounts each attach a close listener.
 server.setMaxListeners(32);

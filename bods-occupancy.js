@@ -329,6 +329,8 @@ export function siriItemToBus(item) {
 const BBOX_RE = /^-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?$/;
 const OPERATOR_RE = /^[A-Z0-9]{2,8}(,[A-Z0-9]{2,8})*$/i;
 const FEED_TTL_MS = 5000;
+/** Cap the upstream wait — wide Staffs boxes can take 6–15s, which stalls the map. */
+const BODS_FEED_TIMEOUT_MS = 8000;
 const feedCache = new Map();
 
 function feedCacheKey({ bbox = "", operatorRef = "" } = {}) {
@@ -353,6 +355,9 @@ async function bodsDatafeed(apiKey, { bbox = "", operatorRef = "" } = {}) {
       Accept: "*/*",
       "User-Agent": "uk-bus-tracker/1.0 (local map app)",
     },
+    // BODS can take 6–15s on wide bounding boxes. Without this the map request
+    // hangs for the full upstream wait instead of falling back to the last good body.
+    signal: AbortSignal.timeout(BODS_FEED_TIMEOUT_MS),
   });
   const xml = await response.text();
   if (response.ok) {
