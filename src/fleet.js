@@ -5430,7 +5430,11 @@ export function createFleetBrowser({
       vehicle.operator?.noc || vehicle.operator?.id || state.operator?.noc || "",
     ).toUpperCase();
     const staffsNocs = new Set(STAFFS_OPERATORS.map((op) => op.noc).filter(Boolean));
-    const isStaffs = staffsNocs.has(noc);
+    // BS1–BS2 shuttles are First Potteries but often surface from GPS trails with no
+    // operator block, so also trigger on a shuttle line seen anywhere for this bus.
+    const lineSignal = String(vehicle.lastRoute?.line || lineFilter || "").toUpperCase();
+    const isShuttle = STOKE_FC_LINE_SET.has(lineSignal);
+    const isStaffs = staffsNocs.has(noc) || isShuttle;
     if (!isStaffs) return;
     const regKey = compactQuery(vehicle.reg);
     const idKey = String(vehicle.id || "").trim();
@@ -5457,13 +5461,26 @@ export function createFleetBrowser({
       const filtered = date
         ? coachRows.filter((row) => !row.date || row.date === date)
         : coachRows;
-      if (!filtered.length) return;
+      // "Routes this bus has run" should keep every route from the whole 7-day window,
+      // not just the day on screen — otherwise a finished BS1/BS2 run drops off the list.
+      state.vehicleRoutes = unionRouteLines(state.vehicleRoutes, coachRows);
+      if (!filtered.length) {
+        if (state.vehicleRoutes.length) {
+          state.vehicleRoutesLoading = false;
+          render();
+        }
+        return;
+      }
       const base = Array.isArray(state.allJourneys) && state.allJourneys.length ? state.allJourneys : journeys;
       const merged = mergeAtHistoryRows(base, filtered).map((row) => ({
         ...row,
         trailKey: row.trailKey || idKey || `reg:${regKey}`,
       }));
       applyJourneysToState(vehicle, merged, state.lineFilter);
+      // Persist so saved vehicles keep their shuttle routes across reloads.
+      if (state.vehicleRoutes.length && isSavedVehicle(vehicle)) {
+        upsertSavedVehicle(vehicle, state.vehicleRoutes);
+      }
     } catch {
       // Staffs GPS history optional.
     }
