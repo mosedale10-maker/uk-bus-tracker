@@ -3421,6 +3421,14 @@ const TRAIL_STROKE = {
   className: "trail-line",
 };
 
+const TRAIL_CASING = {
+  ...TRAIL_STROKE,
+  color: "#f8fafc",
+  weight: 8,
+  opacity: 0.92,
+  className: "trail-line-casing",
+};
+
 /** FlixBus history/trails in brand green so they never read as (or blend into) the indigo route lines. */
 function trailLineColor(operator) {
   if (String(operator || "").trim().toUpperCase() === "FLIX") return "#73d700";
@@ -3973,13 +3981,15 @@ function trailPairBreakOpts(opts = {}, fallback = {}) {
 function makeTrailPair(path, layer, opts = {}) {
   const breakOpts = trailPairBreakOpts(opts);
   const latlngs = asTrailLatLngs(path, breakOpts);
-  // Single stroke only — a casing + stroke read as a double line on the map.
+  // White casing + coloured centre keeps the route readable over both light
+  // street maps and the dark night tiles, like the reference replay view.
+  const casing = L.polyline(latlngs, TRAIL_CASING).addTo(layer);
   const line = L.polyline(latlngs, { ...TRAIL_STROKE, color: trailLineColor(breakOpts.operator) }).addTo(layer);
   const gps = opts.gpsPoints || opts.gpsPath || null;
   const arrows = opts.deferArrows
     ? []
     : buildTrailArrowsAlongRoad(path, layer, { gpsPoints: gps, breakOpts });
-  return { casing: null, line, arrows, layer, gpsPoints: gps || null, breakOpts, path };
+  return { casing, line, arrows, layer, gpsPoints: gps || null, breakOpts, path };
 }
 
 function setTrailPairPath(pair, path, opts = {}) {
