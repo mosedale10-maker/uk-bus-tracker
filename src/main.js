@@ -6507,7 +6507,7 @@ async function startRoutePlayback({
     coach: coachOp || isCoachTrailOperator(operator),
     staffs: isStaffsTrailOperator(operator) || isAltonLine(lineName),
     actualRoute: actualRouteRequired,
-    plannedRoute: plannedPath.length >= 2,
+    plannedRoute: plannedPath.length >= 2 || (usesPlannedRouteOverride(line, operator) && !usingTracked),
   };
 
   // A historical Map view still has a live vehicle marker when the bus is
