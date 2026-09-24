@@ -6239,6 +6239,7 @@ export function createFleetBrowser({
         datetime: btn.dataset.datetime || "",
         direction: btn.dataset.direction || "",
         plannedTripId: String(state.routeTimetable?.[0]?.id || state.routeTimetable?.[0]?.trip_id || "").trim(),
+        plannedServiceId: String(state.routeService?.id || state.routeServices?.[0]?.id || "").trim(),
         plannedDate: state.date || "",
       });
       return;

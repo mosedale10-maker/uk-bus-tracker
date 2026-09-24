@@ -4876,10 +4876,28 @@ function trailTimeWindow(datetime, { coach = false } = {}) {
   };
 }
 
-async function fetchPlannedRoutePath({ targets = [], code = "", opCode = "", plannedTripId = "", plannedDate = "" } = {}) {
+async function fetchPlannedRoutePath({
+  targets = [],
+  code = "",
+  opCode = "",
+  plannedTripId = "",
+  plannedServiceId = "",
+  plannedDate = "",
+} = {}) {
   if (!usesPlannedRouteOverride(code, opCode) || !targets.length) return [];
+  let serviceTripId = plannedTripId;
+  if (!serviceTripId && plannedServiceId) {
+    try {
+      const date = String(plannedDate || ukDateKey()).slice(0, 10);
+      const res = await fetch(`/api/bt-trips/?service=${encodeURIComponent(plannedServiceId)}&date=${date}&limit=20`);
+      const data = res.ok ? await res.json() : null;
+      serviceTripId = String(data?.results?.[0]?.id || data?.[0]?.id || "").trim();
+    } catch {
+      serviceTripId = "";
+    }
+  }
   for (const v of targets.slice(0, 4)) {
-    const directTrip = String(v.trip_id || v.tripId || plannedTripId || "").trim();
+    const directTrip = String(v.trip_id || v.tripId || serviceTripId || "").trim();
     const numericVehicle = String(v.id || v.btId || v.vehicleId || "").trim();
     let candidateTrip = directTrip;
     if (!candidateTrip && /^\d+$/.test(numericVehicle)) {
@@ -4917,6 +4935,7 @@ async function showFleetRouteTails({
   datetime = "",
   direction = "",
   plannedTripId = "",
+  plannedServiceId = "",
   plannedDate = "",
 } = {}) {
   const code = String(line || "").trim();
@@ -5039,6 +5058,7 @@ async function showFleetRouteTails({
     code,
     opCode,
     plannedTripId,
+    plannedServiceId,
     plannedDate,
   });
   await fetchServerTrailsChunked([...keys], { force: true });
