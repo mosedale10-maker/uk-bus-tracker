@@ -3089,6 +3089,12 @@ html.map-night .leaflet-control-container {
   pointer-events: none;
 }
 
+/* While Replay owns the map, hide static route/tail arrows and strokes. */
+.map-wrap.gps-replay-active .trail-arrow-icon:not(.replay-arrow-icon),
+.map-wrap.gps-replay-active .trail-line {
+  display: none;
+}
+
 .trail-arrow-hit {
   display: grid;
   place-items: center;

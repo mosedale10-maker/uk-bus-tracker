@@ -1939,6 +1939,10 @@ const REPLAY_ARROW_SPACING_ZOOMED_M = 52;
 const REPLAY_ARROW_SPACING_M = 28;
 const REPLAY_ARROW_LIMIT = 480;
 
+function setGpsReplayActive(active) {
+  mapWrapEl?.classList.toggle("gps-replay-active", Boolean(active));
+}
+
 function gpsReplayControls(show) {
   if (!playbackReplayEl) return;
   const hasPts = Boolean(gpsReplay?.pts?.length >= 2);
@@ -2074,6 +2078,7 @@ function gpsReplayTravelledLine() {
     lineJoin: "round",
     lineCap: "round",
     interactive: false,
+    className: "gps-replay-travelled-line",
   }).addTo(playbackLayer);
   return gpsReplay.travelledLine;
 }
@@ -2134,7 +2139,9 @@ function gpsReplayInterp(pts, t) {
   return {
     lat: a.lat + (b.lat - a.lat) * f,
     lng: a.lng + (b.lng - a.lng) * f,
-    heading: angleDiff(b.heading || 0, a.heading || 0) === 0 ? a.heading : a.heading,
+    heading: Number.isFinite(a.heading)
+      ? a.heading
+      : segmentBearing([a.lat, a.lng], [b.lat, b.lng]),
     t,
     frac: (lo + f) / (list.length - 1),
   };
@@ -2172,6 +2179,7 @@ function updateReplayBusMarkerAt(p) {
 
 function gpsReplayStart() {
   if (!gpsReplay?.pts?.length) return;
+  setGpsReplayActive(true);
   gpsReplay.playing = true;
   gpsReplay.raf = 0;
   playbackReplayEl.textContent = "⏸ Pause";
@@ -2195,6 +2203,7 @@ function gpsReplayPause() {
 }
 
 function gpsReplayTeardown() {
+  setGpsReplayActive(false);
   if (gpsReplay?.marker) playbackLayer.removeLayer(gpsReplay.marker);
   if (gpsReplay?.arrow) playbackLayer.removeLayer(gpsReplay.arrow);
   if (gpsReplay?.travelledLine) playbackLayer.removeLayer(gpsReplay.travelledLine);
@@ -2221,6 +2230,23 @@ function gpsReplayTeardown() {
   if (playbackSpeedEl) {
     playbackSpeedEl.hidden = true;
     playbackSpeedEl.textContent = "×60";
+  }
+}
+
+function restoreGpsReplayLayers() {
+  if (!gpsReplay) return;
+  const layers = [
+    gpsReplay.travelledLine,
+    ...(gpsReplay.directionArrows || []),
+    gpsReplay.marker,
+    gpsReplay.arrow,
+  ].filter(Boolean);
+  for (const layer of layers) {
+    try {
+      playbackLayer.addLayer(layer);
+    } catch {
+      /* layer was already removed */
+    }
   }
 }
 
@@ -3223,6 +3249,7 @@ const TRAIL_STROKE = {
   lineJoin: "round",
   lineCap: "round",
   interactive: false,
+  className: "trail-line",
 };
 
 /** FlixBus history/trails in brand green so they never read as (or blend into) the indigo route lines. */
@@ -5273,6 +5300,7 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
     tripStops = [],
   } = opts;
   playbackLayer.clearLayers();
+  restoreGpsReplayLayers();
   const flat = flattenTrailLatLngs(drawPath);
   if (flat.length < 2) return;
   if (!usingTracked && !replayOnly) {
@@ -5364,6 +5392,8 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
   if (fit) {
     map.fitBounds(L.latLngBounds(flat).pad(0.1), { maxZoom: 13, animate: true });
   }
+  // A late scene/road redraw must not detach the replay cursor or its tail.
+  restoreGpsReplayLayers();
 }
 
 async function startRoutePlayback({
@@ -12656,6 +12686,7 @@ playbackSpeedEl?.addEventListener("click", () => {
 });
 playbackScrubEl?.addEventListener("input", () => {
   if (!gpsReplay) return;
+  setGpsReplayActive(true);
   const frac = Number(playbackScrubEl.value) / 1000;
   gpsReplay.pos = (gpsReplay.t1 - gpsReplay.t0) * Math.min(1, Math.max(0, frac));
   const t = gpsReplay.t0 + gpsReplay.pos;
