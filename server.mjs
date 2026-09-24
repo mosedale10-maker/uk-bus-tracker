@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleBodsOccupancy, handleBodsVehicles, fetchBodsVehiclesJson } from "./bods-occupancy.js";
 import { handleDgAtTimetable } from "./dg-at-timetable.js";
-import { handleFirstStopTimes, firstOccupancyNearBus } from "./first-departures.js";
+import { appKey, handleFirstStopTimes, firstOccupancyNearBus } from "./first-departures.js";
 import { startFirstStream, streamOccupancyForBus } from "./first-stream.mjs";
 import {
   initAuthStore,
@@ -483,6 +483,10 @@ app.get("/api/first-occupancy", async (req, res) => {
     recorded_at_time: hit?.recorded_at_time || "",
   });
 });
+
+// Warm the First vehicle stream at process start so the first card does not
+// have to wait for the websocket handshake. Missing keys simply skip it.
+if (appKey()) startFirstStream();
 
 /** Whole-UK live vehicle count (BODS SIRI-VM), refreshed about every 30s. */
 const UK_LIVE_BBOX = { xmin: -8.2, ymin: 49.8, xmax: 1.85, ymax: 60.9 };

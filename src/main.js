@@ -6914,10 +6914,12 @@ function isFpotFinishedTrip(bus, extra = {}) {
 
 function operatorHaystack(bus, extra = {}) {
   return [
+    bus?.operator,
     bus?.operator?.noc,
     bus?.operator?.id,
     bus?.operator?.name,
     bus?.operator?.slug,
+    bus?._bods?.operator,
     bus?.service?.operator?.name,
     bus?.service?.operator?.noc,
     bus?.service?.url,
