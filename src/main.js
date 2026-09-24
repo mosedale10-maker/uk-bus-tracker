@@ -1201,6 +1201,32 @@ function observedGpsPoints(
   return points;
 }
 
+function observedSegmentDistance(stop, a, b) {
+  const stopLat = Number(stop?.lat);
+  const stopLng = Number(stop?.lng);
+  const aLat = Number(a?.lat);
+  const aLng = Number(a?.lng);
+  const bLat = Number(b?.lat);
+  const bLng = Number(b?.lng);
+  if (![stopLat, stopLng, aLat, aLng, bLat, bLng].every(Number.isFinite)) return null;
+  const xScale = 111_320 * Math.cos(((aLat + bLat) / 2) * (Math.PI / 180));
+  const yScale = 110_540;
+  const ax = (aLng - stopLng) * xScale;
+  const ay = (aLat - stopLat) * yScale;
+  const bx = (bLng - stopLng) * xScale;
+  const by = (bLat - stopLat) * yScale;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const denominator = dx * dx + dy * dy;
+  const fraction = denominator
+    ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / denominator))
+    : 0;
+  return {
+    distance: Math.hypot(ax + fraction * dx, ay + fraction * dy),
+    fraction,
+  };
+}
+
 /**
  * Add GPS-observed arrival times to mapped trip stops. Stops are processed in route
  * order and each match must be within a short radius, so the current/final GPS ping
@@ -1223,14 +1249,32 @@ function attachObservedStopTimes(stops, gpsPoints, options = {}) {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return { ...stop };
 
     let chosen = null;
-    for (let i = cursor; i < points.length; i += 1) {
-      const point = points[i];
-      if (point.t > nowMs + OBSERVED_STOP_FUTURE_GRACE_MS) break;
-      if (previousT != null && point.t < previousT - 45_000) continue;
-      const distance = haversineMeters(lat, lng, point.lat, point.lng);
-      if (distance > radius) continue;
-      chosen = { point, index: i, distance };
+    // Prefer the point where the recorded path crossed the stop. This fills gaps
+    // between AVL pings without treating a single nearby sample as the arrival.
+    for (let i = cursor; i < points.length - 1; i += 1) {
+      const a = points[i];
+      const b = points[i + 1];
+      if (b.t > nowMs + OBSERVED_STOP_FUTURE_GRACE_MS) break;
+      if (previousT != null && b.t < previousT - 45_000) continue;
+      const hit = observedSegmentDistance(stop, a, b);
+      if (!hit || hit.distance > radius) continue;
+      const observedAt = a.t + (b.t - a.t) * hit.fraction;
+      if (observedAt > nowMs + OBSERVED_STOP_FUTURE_GRACE_MS) continue;
+      if (previousT != null && observedAt < previousT - 45_000) continue;
+      chosen = { point: { ...a, t: observedAt }, index: i, distance: hit.distance };
       break;
+    }
+    // A single recorded sample can still be the only evidence for a short stop.
+    if (!chosen) {
+      for (let i = cursor; i < points.length; i += 1) {
+        const point = points[i];
+        if (point.t > nowMs + OBSERVED_STOP_FUTURE_GRACE_MS) break;
+        if (previousT != null && point.t < previousT - 45_000) continue;
+        const distance = haversineMeters(lat, lng, point.lat, point.lng);
+        if (distance > radius) continue;
+        chosen = { point, index: i, distance };
+        break;
+      }
     }
     if (!chosen) return { ...stop };
 
