@@ -10138,9 +10138,6 @@ async function loadBuses({ replace = false } = {}) {
   } else if (histFocus?.journeyOnly) {
     hint.hidden = false;
     hint.textContent = "Journey map";
-  } else if (overStaffs && zoom < 9) {
-    hint.hidden = false;
-    hint.textContent = "Staffordshire locals loaded · zoom in for more detail";
   } else {
     hint.hidden = true;
   }
