@@ -5164,7 +5164,7 @@ async function showFleetRouteTails({
     }
   }
 
-  if (plannedRoutePath.length >= 2) {
+  if (plannedRoutePath.length >= 2 && !pathCrossesActiveRoadNotice(plannedRoutePath)) {
     clearPinnedTrails();
     const plannedStart = Date.now() - Math.max(60_000, plannedRoutePath.length * 1000);
     const plannedGps = plannedRoutePath.map((point, index) => ({
