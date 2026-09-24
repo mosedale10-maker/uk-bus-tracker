@@ -2568,6 +2568,7 @@ const liveTrailLayer = L.layerGroup().addTo(map);
 const trailArrowMarkers = new Set();
 /** Active static route overlay (not animated playback). */
 let playback = null;
+let playbackRequestSeq = 0;
 /** Live bus / staff marker shown in the left side panel (replaces the old popup card). */
 let selectedMapMarker = null;
 
@@ -5498,7 +5499,8 @@ function updatePlaybackChrome() {
   playbackLabelEl.textContent = "";
 }
 
-function stopRoutePlayback(message = "", { clearTail = false } = {}) {
+function stopRoutePlayback(message = "", { clearTail = false, invalidatePending = true } = {}) {
+  if (invalidatePending) playbackRequestSeq += 1;
   clearPlaybackLayers();
   gpsReplayTeardown();
   playback = null;
@@ -5905,6 +5907,7 @@ async function startRoutePlayback({
   recordedReplay = false,
   live = false,
 } = {}) {
+  const requestId = ++playbackRequestSeq;
   const playKey = tripId || journeyId || trailKey || vehicleId || regTrailKey(reg);
   const requestedRecordedReplay =
     recordedReplay === true ||
@@ -5940,7 +5943,7 @@ async function startRoutePlayback({
   showMessage("Loading route…");
   // A new history row replaces the previous replay immediately; never leave old
   // outbound/inbound tails visible while the next Bustimes trip is loading.
-  stopRoutePlayback("", { clearTail: true });
+  stopRoutePlayback("", { clearTail: true, invalidatePending: false });
   clearPinnedTrails();
   setLiveTrailFocus("");
   const safeJourneyId = trailFilterJourneyId(journeyId, line);
@@ -5998,6 +6001,7 @@ async function startRoutePlayback({
     line,
     datetime,
   });
+  if (requestId !== playbackRequestSeq) return;
   // Prefer journey/trip segment keys first so Map shows this route only, not the whole day.
   if (resolvedTripId) {
     const tripSeg = `trip:${resolvedTripId}`;
@@ -6025,6 +6029,7 @@ async function startRoutePlayback({
     toMs: toMs ? toMs + 30 * 60_000 : 0,
     force: true,
   });
+  if (requestId !== playbackRequestSeq) return;
 
   // If Map didn't say in/out, infer from GPS near this run — never draw both legs.
   if (!safeDirection) {
@@ -6057,6 +6062,7 @@ async function startRoutePlayback({
       });
     }
   }
+  if (requestId !== playbackRequestSeq) return;
 
   // Load the full window without forcing one direction — we split trips below.
   const staffsGap =
@@ -6073,9 +6079,11 @@ async function startRoutePlayback({
   let allGps = collectTrailGpsForKeys(keys, trackOpts);
   if (coachPlayback && allGps.length < 2) {
     await fetchServerTrailsChunked(keys, { force: true });
+    if (requestId !== playbackRequestSeq) return;
     trackOpts = { ...trackOpts, fromMs: Date.now() - COACH_TRAIL_LIVE_MS, toMs: 0 };
     allGps = collectTrailGpsForKeys(keys, trackOpts);
   }
+  if (requestId !== playbackRequestSeq) return;
   const tripSegments = segmentTrailIntoTrips(allGps, { gapMs: coachGapMs });
 
   // Playback highlight: start with the trip matching journey/trip/time. Recorded
@@ -6167,6 +6175,7 @@ async function startRoutePlayback({
     : tripId
       ? await tripEnds(tripId, { date: tripDate })
       : null;
+  if (requestId !== playbackRequestSeq) return;
   const tripPath = Array.isArray(trip?.path) ? trip.path : [];
   const tripStops = attachObservedStopTimes(
     Array.isArray(trip?.stops) ? trip.stops : [],
@@ -6274,6 +6283,7 @@ async function startRoutePlayback({
 
   // GPS trails: one stroke per trip/route leg — never glue outbound+inbound or other routes.
   // Live current run: growing filtered tail. Historical Map: pin the clipped segment only.
+  if (requestId !== playbackRequestSeq) return;
   if (usingTracked) {
     const liveKey = String(trailKey || vehicleId || regTrailKey(reg) || "").trim();
     const gapMs = coachOp
@@ -6399,7 +6409,9 @@ async function startRoutePlayback({
     lineName +
     (headsign ? " → " + headsign : "") +
     (actualRouteRequired ? " · actual GPS route" : usingTracked ? " · GPS path" : " · timetable");
+  if (requestId !== playbackRequestSeq) return;
   playback = {
+    requestId,
     playKey,
     tripId: resolvedTripId || tripId,
     journeyId,
@@ -6469,7 +6481,7 @@ async function startRoutePlayback({
   if (!usingTracked && !replayOnly) {
     prepareRoadTrail(path, undefined, alignBreak)
       .then((aligned) => {
-        if (!playback || playback.playKey !== playKey) return;
+        if (!playback || playback.requestId !== requestId || playback.playKey !== playKey) return;
         let upgraded = aligned;
         if (flattenTrailLatLngs(upgraded).length < 2 && tripStops.length >= 2) {
           const stopPath = tripStops
