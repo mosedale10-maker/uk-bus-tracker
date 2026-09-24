@@ -4104,6 +4104,14 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
  */
 function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
   const roadFlat = flattenTrailLatLngs(roadPath);
+  if (String(breakOpts.operator || "").trim().toUpperCase() === "NATX") {
+    console.debug("[NATX_TRAIL_DEBUG] prefer", {
+      gps: flattenTrailLatLngs(gpsPath).length,
+      road: roadFlat.length,
+      coach: Boolean(breakOpts.coach),
+      operator: breakOpts.operator || "",
+    });
+  }
   if (roadFlat.length >= 2) return roadPath;
   // A local nearest-road stitch can choose the opposite carriageway at a
   // motorway junction and draw a convincing-looking loop. Coaches therefore
@@ -4702,6 +4710,12 @@ async function runPinnedTrailAlign(id) {
       const pair = pinnedTrailLines.get(key);
       if (!pair) continue;
       const drawn = preferRoadMatchedTrail(job.path, aligned, job.breakOpts || {});
+      if (String(job.breakOpts?.operator || "").trim().toUpperCase() === "NATX") {
+        console.debug("[NATX_TRAIL_DEBUG] aligned", {
+          aligned: flattenTrailLatLngs(aligned).length,
+          drawn: flattenTrailLatLngs(drawn).length,
+        });
+      }
       if (flattenTrailLatLngs(drawn).length < 2) continue;
       setTrailPairPath(pair, drawn, { gpsPoints: job.gpsPoints, ...job.breakOpts });
     }
