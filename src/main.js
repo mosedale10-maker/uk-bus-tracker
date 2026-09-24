@@ -969,13 +969,14 @@ function scheduleTripDelayRefresh(marker) {
   if (marker._tripDelayAt && now - marker._tripDelayAt < minGap) return;
   marker._tripDelayAt = now;
   const gen = (marker._tripDelayGen = (marker._tripDelayGen || 0) + 1);
-  tripEnds(tripId, { force: true })
+  tripEnds(tripId, { force: true, date: marker.bus?.date || "" })
     .then((ends) => {
       if (!ends || marker._tripDelayGen !== gen) return;
       if (String(tripIdForMarker(marker) || "") !== String(tripId)) return;
       marker.extra ||= {};
       if (ends.stops?.length) {
         marker.extra.stops = ends.stops;
+        marker.extra._observedStopSig = "";
         marker.extra.from = ends.from || marker.extra.from;
         marker.extra.to = ends.to || marker.extra.to;
         marker.extra._nextStopIdx = undefined;
@@ -1111,6 +1112,126 @@ function mapTripStops(times) {
       delaySec: stopDelaySeconds(row),
       timingStatus: String(row.timing_status || "").toUpperCase(),
       done: Boolean(row.actual_departure_time || row.actual_arrival_time),
+    };
+  });
+}
+
+/**
+ * GPS recorder points are the only stop-level record available for many UK feeds.
+ * Keep official bustimes actual times when present; otherwise use the first recorded
+ * position near each stop as the observed arrival time. The timetable is minute-based,
+ * so this is deliberately an observation, not a claimed fare-machine stop event.
+ */
+const OBSERVED_STOP_RADIUS_M = 180;
+const OBSERVED_STOP_FUTURE_GRACE_MS = 30_000;
+const OBSERVED_CLOCK_FMT = new Intl.DateTimeFormat("en-GB", {
+  timeZone: UK_TZ,
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+function observedPointTimestamp(point) {
+  let t = Number(point?.t);
+  if (!Number.isFinite(t)) t = Date.parse(point?.t || "");
+  if (Number.isFinite(t) && t > 0 && t < 100_000_000_000) t *= 1000;
+  return Number.isFinite(t) ? t : null;
+}
+
+function observedClockLabel(ms) {
+  if (!Number.isFinite(ms)) return "";
+  const label = OBSERVED_CLOCK_FMT.format(new Date(ms));
+  return label === "24:00" ? "00:00" : label;
+}
+
+/** Select the GPS points belonging to one trip, without mixing another bus run. */
+function observedGpsPoints(
+  gpsPoints,
+  { tripId = "", line = "", fromMs = 0, toMs = 0, nowMs = Date.now() } = {},
+) {
+  const base = (Array.isArray(gpsPoints) ? gpsPoints : [])
+    .map((point) => {
+      const t = observedPointTimestamp(point);
+      const lat = Number(point?.lat);
+      const lng = Number(point?.lng);
+      if (!Number.isFinite(t) || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      return { ...point, t, lat, lng };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.t - b.t);
+  let points = base.filter((point) => {
+    if (fromMs && point.t < fromMs) return false;
+    if (toMs && point.t > toMs) return false;
+    if (Number.isFinite(nowMs) && point.t > nowMs + OBSERVED_STOP_FUTURE_GRACE_MS) return false;
+    return true;
+  });
+
+  const wantedTrip = String(tripId || "").trim();
+  if (wantedTrip) {
+    const exact = points.filter((point) => String(point.tripId || "").trim() === wantedTrip);
+    // A trip id is stronger than line metadata: BODS can briefly report 11 for an 11X run.
+    if (exact.length) points = exact;
+  }
+  const wantedLine = String(line || "").trim();
+  if (wantedLine) {
+    const matching = points.filter(
+      (point) => !String(point.line || "").trim() || sameServiceLine(point.line, wantedLine),
+    );
+    if (matching.length) points = matching;
+  }
+  return points;
+}
+
+/**
+ * Add GPS-observed arrival times to mapped trip stops. Stops are processed in route
+ * order and each match must be within a short radius, so the current/final GPS ping
+ * cannot be copied into every future stop in the timetable.
+ */
+function attachObservedStopTimes(stops, gpsPoints, options = {}) {
+  const rows = Array.isArray(stops) ? stops : [];
+  if (!rows.length) return rows;
+  const points = observedGpsPoints(gpsPoints, options);
+  if (!points.length) return rows;
+
+  const radius = Number(options.radiusM) > 0 ? Number(options.radiusM) : OBSERVED_STOP_RADIUS_M;
+  const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
+  let cursor = 0;
+  let previousT = null;
+
+  return rows.map((stop) => {
+    const lat = Number(stop?.lat);
+    const lng = Number(stop?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return { ...stop };
+
+    let chosen = null;
+    for (let i = cursor; i < points.length; i += 1) {
+      const point = points[i];
+      if (point.t > nowMs + OBSERVED_STOP_FUTURE_GRACE_MS) break;
+      if (previousT != null && point.t < previousT - 45_000) continue;
+      const distance = haversineMeters(lat, lng, point.lat, point.lng);
+      if (distance > radius) continue;
+      chosen = { point, index: i, distance };
+      break;
+    }
+    if (!chosen) return { ...stop };
+
+    const observedAt = chosen.point.t;
+    const observed = observedClockLabel(observedAt);
+    const hasOfficialActual = Boolean(stop.actualArr || stop.actualDep || stop.actual);
+    const actualArr = stop.actualArr || (hasOfficialActual ? "" : observed);
+    const actual = stop.actual || (hasOfficialActual ? "" : observed);
+    // Keep the cursor on this sample: closely-spaced stops can share one GPS ping.
+    cursor = chosen.index;
+    previousT = observedAt;
+    return {
+      ...stop,
+      actualArr,
+      actual,
+      actualSource: hasOfficialActual ? stop.actualSource || "feed" : "gps",
+      observedAt,
+      observedDistanceM: Math.round(chosen.distance),
+      done: true,
+      live: stop.live || actual || stop.expected || stop.aimed,
     };
   });
 }
@@ -4381,6 +4502,62 @@ async function hydrateLiveTrailFromServer(key) {
   if (String(liveTrailKey) === id) refreshLiveTrailLine(id);
 }
 
+/** GPS points for the live marker's current trip, not the vehicle's whole day. */
+function observedGpsForMarker(marker, { fromMs = 0, toMs = 0 } = {}) {
+  const bus = marker?.bus;
+  if (!bus) return [];
+  const extra = marker.extra || {};
+  const line = String(bus.service?.line_name || extra.line || extra.historyLineFilter || "").trim();
+  const journeyId = String(bus.journey_id || "").trim();
+  const vehicleId = historyVehicleId(bus, extra);
+  const reg =
+    compactReg(
+      extra.btVehicle?.reg ||
+        extra.vehicle?.reg ||
+        bus.vehicle?.reg ||
+        busRegistration(bus, extra) ||
+        "",
+    ) || "";
+  const keys = trailKeysForVehicle({
+    vehicleId,
+    trailKey: extra.trailKey || String(bus.id || ""),
+    reg,
+    journeyId,
+    tripId: bus.trip_id || extra.tripId || "",
+    line,
+    datetime: bus.datetime || new Date().toISOString(),
+  });
+  const start = Number(extra.tripStartMs);
+  const end = Number(extra.tripEndMs);
+  const from = fromMs || (Number.isFinite(start) && start > 0 ? start - 60 * 60_000 : 0);
+  const to = toMs || (Number.isFinite(end) && end > 0 ? end + 60 * 60_000 : 0);
+  return collectTrailGpsForKeys(keys, { fromMs: from, toMs: to });
+}
+
+/** Refresh the ACTUAL column as new recorder pings arrive. */
+function refreshObservedStopTimes(marker, { force = false } = {}) {
+  if (!marker?.bus || !Array.isArray(marker.extra?.stops) || !marker.extra.stops.length) return false;
+  const extra = marker.extra;
+  const bus = marker.bus;
+  const tripId = String(bus.trip_id || extra.tripId || "").trim();
+  const points = observedGpsForMarker(marker);
+  const lastT = points.length ? points[points.length - 1].t : 0;
+  const signature = `${tripId}|${points.length}|${lastT}|${extra.stops.length}`;
+  if (!force && extra._observedStopSig === signature) return false;
+  const line = String(bus.service?.line_name || extra.line || extra.historyLineFilter || "").trim();
+  const start = Number(extra.tripStartMs);
+  const end = Number(extra.tripEndMs);
+  extra.stops = attachObservedStopTimes(extra.stops, points, {
+    tripId,
+    line,
+    fromMs: Number.isFinite(start) && start > 0 ? start - 60 * 60_000 : 0,
+    toMs: Number.isFinite(end) && end > 0 ? end + 60 * 60_000 : 0,
+    nowMs: Date.now(),
+  });
+  extra._observedStopSig = signature;
+  return true;
+}
+
 loadTrailStore();
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") {
@@ -5004,9 +5181,24 @@ async function startRoutePlayback({
   }
 
   let tracked = pathFromGpsPoints(trackedGps);
-  const trip = resolvedTripId ? await tripEnds(resolvedTripId) : tripId ? await tripEnds(tripId) : null;
+  const tripDate = datetime ? String(datetime).slice(0, 10) : "";
+  const trip = resolvedTripId
+    ? await tripEnds(resolvedTripId, { date: tripDate })
+    : tripId
+      ? await tripEnds(tripId, { date: tripDate })
+      : null;
   const tripPath = Array.isArray(trip?.path) ? trip.path : [];
-  const tripStops = Array.isArray(trip?.stops) ? trip.stops : [];
+  const tripStops = attachObservedStopTimes(
+    Array.isArray(trip?.stops) ? trip.stops : [],
+    trackedGps,
+    {
+      tripId: resolvedTripId || tripId,
+      line: line || trip?.line || "",
+      fromMs,
+      toMs,
+      nowMs: Date.now(),
+    },
+  );
   const coachOp = coachPlayback;
   // Prefer real GPS where the coach/bus actually drove. Timetable is fallback only.
   // GPS-tail playbacks (Staffs locals, coaches, AT) never hard-fail on missing
@@ -8256,7 +8448,7 @@ function tripPathFromTimes(times) {
   return path;
 }
 
-async function tripEnds(tripId, { force = false } = {}) {
+async function tripEnds(tripId, { force = false, date = "" } = {}) {
   if (!tripId) return null;
   const fresh =
     !force && tripCache.has(tripId) && Date.now() - (tripCacheAt.get(tripId) || 0) < 25000;
@@ -8275,6 +8467,14 @@ async function tripEnds(tripId, { force = false } = {}) {
             trip?.operator?.name ||
             trip?.operator?.noc ||
             (typeof trip?.operator === "string" ? trip.operator : "");
+          const tripDate = String(trip?.date || date || "").slice(0, 10);
+          const dateRef = /^\d{4}-\d{2}-\d{2}$/.test(tripDate)
+            ? Date.parse(`${tripDate}T12:00:00Z`)
+            : Date.now();
+          const start = String(trip?.start || "");
+          const end = String(trip?.end || "");
+          const startMs = tripDate ? tripAimedMs(start, dateRef) : NaN;
+          const endMs = tripDate ? tripAimedMs(end, dateRef) : NaN;
           return {
             from,
             to,
@@ -8284,6 +8484,11 @@ async function tripEnds(tripId, { force = false } = {}) {
             path: tripPathFromTimes(times),
             line: trip?.service?.line_name || "",
             headsign: trip?.headsign || to,
+            date: tripDate,
+            start,
+            end,
+            startMs: Number.isFinite(startMs) ? startMs : null,
+            endMs: Number.isFinite(endMs) ? endMs : null,
           };
         })
         .catch(() => null),
@@ -8592,6 +8797,7 @@ function patchPopupLive(marker) {
 /** Rebuild open popup / left panel only when HTML structure changed; keep scroll + fold state. */
 function refreshPopup(marker, { force = false } = {}) {
   if (!marker) return;
+  refreshObservedStopTimes(marker);
   refreshFirstOccupancyIfDue(marker);
   if (selectedMapMarker === marker && journeyPanelEl && !journeyPanelEl.hidden) {
     rememberNextStop(marker);
@@ -8908,13 +9114,18 @@ async function enrichBustimes(eventOrMarker) {
   marker.extra.trailKey = marker.extra.trailKey || String(bus.id || "");
   if (isFlixBus(bus)) marker.extra.operatorNoc = "FLIX";
   if (isNationalExpress(bus)) marker.extra.operatorNoc = "NATX";
-  hydrateLiveTrailFromServer(String(bus.id)).catch(() => {});
+  const trailHydrate = hydrateLiveTrailFromServer(String(bus.id)).catch(() => {});
+  trailHydrate.then(() => {
+    if (gen !== marker._enrichGen) return;
+    refreshObservedStopTimes(marker, { force: true });
+    if (selectedMapMarker === marker || marker.isPopupOpen?.()) refreshPopup(marker);
+  });
   const ll = marker.getLatLng();
   marker.extra.limitMph = resolveLimitMph(bus, marker.extra, ll.lat, ll.lng);
   ensureMarkerSpeedLimit(marker);
   const [ends, vehicleFromId] = await Promise.all([
     // Only real trip ids — journey_id is not a trip (NATX BODS often has journey, not trip).
-    bus.trip_id ? tripEnds(bus.trip_id) : Promise.resolve(null),
+    bus.trip_id ? tripEnds(bus.trip_id, { date: bus.date || "" }) : Promise.resolve(null),
     isLikelyBustimesVehicleId(bus, bus.btId || bus.id)
       ? vehicleDetails(bus.btId || bus.id)
       : null,
@@ -8934,9 +9145,13 @@ async function enrichBustimes(eventOrMarker) {
     marker.extra.from = ends.from;
     marker.extra.to = ends.to || bus.destination;
     marker.extra.stops = ends.stops || [];
+    marker.extra._observedStopSig = "";
     marker.extra._nextStopIdx = undefined;
     if (ends.operator) marker.extra.operator = ends.operator;
     marker.extra.tripId = bus.trip_id || marker.extra.tripId || "";
+    marker.extra.tripDate = ends.date || bus.date || "";
+    marker.extra.tripStartMs = ends.startMs;
+    marker.extra.tripEndMs = ends.endMs;
     marker.extra.delaySec = resolveLiveDelaySec(
       bus,
       { ...marker.extra, stops: ends.stops, delaySec: ends.delaySec },
@@ -8947,6 +9162,7 @@ async function enrichBustimes(eventOrMarker) {
     marker.extra._tripDelayFreshAt = Date.now();
     marker._tripDelayAt = Date.now();
   }
+  refreshObservedStopTimes(marker, { force: true });
   if (vehicle) {
     marker.extra.vehicle = vehicle;
     marker.extra.btVehicle = marker.extra.btVehicle || vehicle;
