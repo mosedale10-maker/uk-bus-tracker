@@ -4876,6 +4876,35 @@ function trailTimeWindow(datetime, { coach = false } = {}) {
   };
 }
 
+async function fetchPlannedRoutePath({ targets = [], code = "", opCode = "", plannedTripId = "", plannedDate = "" } = {}) {
+  if (!usesPlannedRouteOverride(code, opCode) || !targets.length) return [];
+  for (const v of targets.slice(0, 4)) {
+    const directTrip = String(v.trip_id || v.tripId || plannedTripId || "").trim();
+    const numericVehicle = String(v.id || v.btId || v.vehicleId || "").trim();
+    let candidateTrip = directTrip;
+    if (!candidateTrip && /^\d+$/.test(numericVehicle)) {
+      candidateTrip = await Promise.race([
+        resolveTripIdForPlayback({
+          vehicleId: numericVehicle,
+          line: code,
+          datetime: v.datetime || v.recordedAtTime || "",
+        }),
+        new Promise((resolve) => setTimeout(() => resolve(""), 3500)),
+      ]);
+    }
+    if (!candidateTrip) continue;
+    const trip = await Promise.race([
+      tripEnds(candidateTrip, {
+        date: String(plannedDate || v.datetime || v.recordedAtTime || "").slice(0, 10),
+      }),
+      new Promise((resolve) => setTimeout(() => resolve(null), 4500)),
+    ]);
+    const candidatePath = Array.isArray(trip?.path) ? thinTrailPoints(trip.path, 55) : [];
+    if (candidatePath.length >= 2) return candidatePath;
+  }
+  return [];
+}
+
 async function showFleetRouteTails({
   line = "",
   operator = "",
@@ -5005,39 +5034,15 @@ async function showFleetRouteTails({
     for (const key of expanded) keys.add(key);
   }
 
+  const plannedRoutePromise = fetchPlannedRoutePath({
+    targets,
+    code,
+    opCode,
+    plannedTripId,
+    plannedDate,
+  });
   await fetchServerTrailsChunked([...keys], { force: true });
-
-  // For the explicitly requested 36A correction, resolve one published trip
-  // path and use that alignment instead of the recorded Longton diversion.
-  let plannedRoutePath = [];
-  if (usesPlannedRouteOverride(code, opCode) && targets.length) {
-    for (const v of targets.slice(0, 4)) {
-      const directTrip = String(v.trip_id || v.tripId || plannedTripId || "").trim();
-      const numericVehicle = String(v.id || v.btId || v.vehicleId || "").trim();
-      const plannedTripDate = String(plannedDate || v.datetime || v.recordedAtTime || "").slice(0, 10);
-      let candidateTrip = directTrip;
-      if (!candidateTrip && /^\d+$/.test(numericVehicle)) {
-        candidateTrip = await Promise.race([
-          resolveTripIdForPlayback({
-            vehicleId: numericVehicle,
-            line: code,
-            datetime: v.datetime || v.recordedAtTime || "",
-          }),
-          new Promise((resolve) => setTimeout(() => resolve(""), 3500)),
-        ]);
-      }
-      if (!candidateTrip) continue;
-      const trip = await Promise.race([
-        tripEnds(candidateTrip, { date: plannedTripDate }),
-        new Promise((resolve) => setTimeout(() => resolve(null), 4500)),
-      ]);
-      const candidatePath = Array.isArray(trip?.path) ? thinTrailPoints(trip.path, 55) : [];
-      if (candidatePath.length >= 2) {
-        plannedRoutePath = candidatePath;
-        break;
-      }
-    }
-  }
+  const plannedRoutePath = await plannedRoutePromise;
 
   clearPinnedTrails();
   const focusRegs = new Set(
