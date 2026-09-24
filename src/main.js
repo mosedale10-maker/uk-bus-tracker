@@ -3882,6 +3882,37 @@ function formatTrailArrowTime(ms) {
   return `${time} · ${day}`;
 }
 
+/** Turn an on-road geometry into timestamped replay points without reintroducing raw GPS chords. */
+function roadPathToReplayPoints(roadPath, sourceGps, breakOpts = {}) {
+  const segments = asTrailLatLngs(roadPath, breakOpts)
+    .filter((seg) => seg.length >= 2)
+    .sort((a, b) => pathLengthMeters(b) - pathLengthMeters(a));
+  const road = segments[0] || [];
+  const source = normalizeGpsTrailPoints(sourceGps);
+  if (road.length < 2 || source.length < 2) return [];
+  const out = [];
+  for (let i = 0; i < road.length; i += 1) {
+    const frac = road.length === 1 ? 0 : i / (road.length - 1);
+    const t = gpsTimeAtPathFraction(source, frac);
+    if (!Number.isFinite(t)) continue;
+    const prev = road[Math.max(0, i - 1)];
+    const next = road[Math.min(road.length - 1, i + 1)];
+    const near = source[Math.min(source.length - 1, Math.round(frac * (source.length - 1)))];
+    out.push({
+      lat: road[i][0],
+      lng: road[i][1],
+      t,
+      heading:
+        i === road.length - 1
+          ? segmentBearing(prev, next)
+          : segmentBearing(road[i], next),
+      direction: near?.direction || "",
+      speedMph: near?.speedMph ?? null,
+    });
+  }
+  return out;
+}
+
 function trailSampleSpeedMph(a, b) {
   if (!a || !b) return null;
   if (!Number.isFinite(a.t) || !Number.isFinite(b.t)) return null;
@@ -4021,16 +4052,16 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
 }
 
 /**
- * Prefer road-matched geometry. If roads aren't ready yet, keep GPS so a trail
- * still appears — async align upgrades it onto roads when matching finishes.
+ * Prefer road-matched geometry. Never draw raw GPS chords while road matching
+ * is pending: a sparse GPS sample can cut across fields and look like a false
+ * route. The async aligner will paint the on-road version when it is ready.
  */
 function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
   const roadFlat = flattenTrailLatLngs(roadPath);
   if (roadFlat.length >= 2) return roadPath;
   const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
   if (flattenTrailLatLngs(local).length >= 2) return local;
-  const gpsFlat = flattenTrailLatLngs(gpsPath);
-  return gpsFlat.length >= 2 ? gpsPath : [];
+  return [];
 }
 
 function gpsTimeAtPathFraction(gpsPts, frac) {
@@ -6276,7 +6307,7 @@ async function startRoutePlayback({
   };
   // Offer a true GPS replay when we recorded pings for this journey. A live
   // replay must never fall back to the un-clipped allGps window.
-  const replayPoints =
+  let replayPoints =
     trackedGps.length >= 2
       ? trackedGps
       : preserveRecordedRun
@@ -6284,6 +6315,21 @@ async function startRoutePlayback({
         : currentLivePing
           ? clipGpsPointsAtPing(allGps, currentLivePing)
           : [];
+  if (replayOnly) {
+    const roadSource = replayPoints.length >= 2 ? replayPoints : tracked;
+    const roadPath = await prepareRoadTrail(roadSource, undefined, alignBreak);
+    const roadReplayPoints = roadPathToReplayPoints(roadPath, replayPoints, alignBreak);
+    if (roadReplayPoints.length < 2) {
+      showMessage("No road-matched GPS is available for this replay yet — the planned route will not be shown");
+      return;
+    }
+    replayPoints = roadReplayPoints;
+    if (playback) playback.path = roadPath;
+    const roadFlat = flattenTrailLatLngs(roadPath);
+    if (roadFlat.length >= 2) {
+      map.fitBounds(L.latLngBounds(roadFlat).pad(0.1), { maxZoom: 15, animate: true });
+    }
+  }
   gpsReplaySetup(replayPoints);
   showJourneyPanel({
     operator: opName,
