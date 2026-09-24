@@ -6393,10 +6393,10 @@ async function startRoutePlayback({
         vehicleId,
         trailKey: liveKey,
         reg,
-        // Keep direction so the opposite leg is never drawn on the same stroke.
-        // Journey ids from Ticketer/BODS can flap — rely on direction + line + time.
-        journeyId: "",
-        tripId: "",
+        // Keep the selected identity when the feed provides one; this prevents
+        // a NatEx/Flix vehicle's next journey from being appended to the live tail.
+        journeyId: safeJourneyId,
+        tripId: resolvedTripId || "",
         line: lineName,
         operator,
         direction: safeDirection,
