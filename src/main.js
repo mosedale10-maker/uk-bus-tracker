@@ -4442,6 +4442,89 @@ function bestTrackedGpsPoints(keys, opts = {}) {
   return best;
 }
 
+function bustimesLineMatches(a, b) {
+  const clean = (value) => String(value || "").toUpperCase().replace(/^UK/, "").replace(/[^A-Z0-9]/g, "");
+  return sameServiceLine(clean(a), clean(b));
+}
+
+function bustimesServiceMatchesOperator(service, operator) {
+  const noc = String(operator || "").trim().toUpperCase();
+  const ops = (Array.isArray(service?.operator) ? service.operator : [service?.operator])
+    .filter(Boolean)
+    .map((value) => String(value).toUpperCase());
+  const text = `${ops.join(" ")} ${service?.description || ""}`;
+  if (noc === "NATX") return /(?:NATX|NATIONAL\s+EXPRESS|IE-1178)/i.test(text);
+  if (noc === "FLIX") return /(?:FLIX|FLIXBUS)/i.test(text);
+  return true;
+}
+
+const bustimesCoachLookupCache = new Map();
+
+async function resolveBustimesTripForPlayback({
+  operator = "",
+  line = "",
+  datetime = "",
+  destination = "",
+  vehicleId = "",
+} = {}) {
+  const noc = String(operator || "").trim().toUpperCase();
+  if (!isCoachTrailOperator(noc) || !line) return "";
+  const date = String(datetime || "").slice(0, 10) || ukDateKey();
+  const cacheKey = `${noc}|${line}|${date}|${compactQuery(destination)}`;
+  if (bustimesCoachLookupCache.has(cacheKey)) return bustimesCoachLookupCache.get(cacheKey);
+  try {
+    const serviceResults = [];
+    const queries = [...new Set([String(line).trim(), `UK${String(line).trim()}`, noc === "FLIX" ? "FlixBus" : "National Express"])];
+    for (const query of queries) {
+      const res = await fetch(`/api/bt-services/?search=${encodeURIComponent(query)}&limit=50`);
+      if (!res.ok) continue;
+      const data = await res.json();
+      for (const service of data?.results || []) {
+        if (bustimesLineMatches(service.line_name, line) && bustimesServiceMatchesOperator(service, noc)) {
+          serviceResults.push(service);
+        }
+      }
+    }
+    if (!serviceResults.length) {
+      bustimesCoachLookupCache.set(cacheKey, "");
+      return "";
+    }
+    const destWords = new Set(normalizeTrailDestination(destination).split(/[^a-z0-9]+/).filter((word) => word.length >= 4));
+    serviceResults.sort((a, b) => {
+      const score = (service) => {
+        const text = normalizeTrailDestination(`${service.description || ""} ${service.headsign || ""}`);
+        return [...destWords].filter((word) => text.includes(word)).length;
+      };
+      return score(b) - score(a);
+    });
+    const targetMs = datetime ? new Date(datetime).getTime() : Date.now();
+    for (const service of serviceResults.slice(0, 4)) {
+      const res = await fetch(`/api/bt-trips/?service=${encodeURIComponent(service.id)}&date=${encodeURIComponent(date)}&limit=100`);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const trips = Array.isArray(data?.results) ? data.results : [];
+      const ranked = trips
+        .map((trip) => {
+          const tripText = normalizeTrailDestination(`${trip.headsign || ""} ${service.description || ""}`);
+          const destinationScore = [...destWords].filter((word) => tripText.includes(word)).length;
+          const startMs = tripAimedMs(trip.start, targetMs);
+          const timeDistance = Number.isFinite(startMs) ? Math.abs(startMs - targetMs) : Number.POSITIVE_INFINITY;
+          return { trip, score: destinationScore * 10_000_000 - timeDistance };
+        })
+        .sort((a, b) => b.score - a.score);
+      const selected = ranked.find((row) => row.trip?.id)?.trip;
+      if (selected?.id) {
+        bustimesCoachLookupCache.set(cacheKey, String(selected.id));
+        return String(selected.id);
+      }
+    }
+  } catch {
+    /* GPS remains the fallback when Bustimes cannot resolve this coach. */
+  }
+  bustimesCoachLookupCache.set(cacheKey, "");
+  return "";
+}
+
 async function resolveTripIdForPlayback({ tripId = "", journeyId = "", vehicleId = "", line = "", datetime = "" } = {}) {
   if (tripId) return String(tripId);
   const wantJourney = journeyId ? String(journeyId) : "";
@@ -6212,13 +6295,22 @@ async function startRoutePlayback({
     aroundMs = Date.now();
   }
 
-  const resolvedTripId = await resolveTripIdForPlayback({
+  let resolvedTripId = await resolveTripIdForPlayback({
     tripId,
     journeyId: safeJourneyId,
     vehicleId,
     line,
     datetime,
   });
+  if (!resolvedTripId && isCoachTrailOperator(operator)) {
+    resolvedTripId = await resolveBustimesTripForPlayback({
+      operator,
+      line,
+      datetime,
+      destination: dest,
+      vehicleId,
+    });
+  }
   if (requestId !== playbackRequestSeq) return;
   // Prefer journey/trip segment keys first so Map shows this route only, not the whole day.
   if (resolvedTripId) {
