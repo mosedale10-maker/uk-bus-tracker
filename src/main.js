@@ -3646,7 +3646,8 @@ const TRAIL_CASING = {
 
 /** FlixBus history/trails in brand green so they never read as (or blend into) the indigo route lines. */
 function trailLineColor(operator) {
-  if (String(operator || "").trim().toUpperCase() === "FLIX") return "#73d700";
+  const noc = String(operator || "").trim().toUpperCase();
+  if (noc === "FLIX" || noc === "NATX") return "#73d700";
   return TRAIL_STROKE.color;
 }
 
@@ -12707,7 +12708,8 @@ function alignTrailToRoadsLocal(latlngs, breakOpts = {}) {
       const next = seg[i + 1];
       const heading = next ? segmentBearing(cur, next) : Number.isFinite(prevHeading) ? prevHeading : null;
       // Prefer the nearest road — never keep raw GPS in fields (that draws chords across country).
-      const hit = snapHit(cur[0], cur[1], heading, snapNear) || snapHit(cur[0], cur[1], heading, snapFar);
+      let hit = snapHit(cur[0], cur[1], heading, snapNear) || snapHit(cur[0], cur[1], heading, snapFar);
+      if (hit && cur[3] != null && Number.isFinite(Number(cur[3]))) hit = { ...hit, t: Number(cur[3]) };
       if (!hit) {
         if (out.length >= 2) {
           alignedSegs.push(out.slice());
@@ -12828,18 +12830,20 @@ function roadBridgePlausible(a, b, part, breakOpts = {}) {
   // allowance with the direct distance instead of imposing a fixed cap.
   const ratioCap = straight < 2_000 ? 6 : straight < 8_000 ? 7 : 8;
   if (routeM > Math.max(2_500, straight * ratioCap)) return false;
-  const at = Number.isFinite(Number(Array.isArray(a) ? a[3] : a.t))
-    ? Number(Array.isArray(a) ? a[3] : a.t)
-    : null;
-  const bt = Number.isFinite(Number(Array.isArray(b) ? b[3] : b.t))
-    ? Number(Array.isArray(b) ? b[3] : b.t)
-    : null;
+  const rawAt = Array.isArray(a) ? a[3] : a?.t;
+  const rawBt = Array.isArray(b) ? b[3] : b?.t;
+  const at = rawAt != null && rawAt !== "" && Number.isFinite(Number(rawAt)) ? Number(rawAt) : null;
+  const bt = rawBt != null && rawBt !== "" && Number.isFinite(Number(rawBt)) ? Number(rawBt) : null;
   if (at != null && bt != null) {
     const seconds = Math.abs(bt - at) / 1_000;
     const mph = (routeM / Math.max(seconds, 1)) * 2.23694;
     const coach = Boolean(breakOpts.coach || isCoachTrailOperator(breakOpts.operator));
     const staffs = Boolean(breakOpts.staffs || isStaffsTrailOperator(breakOpts.operator));
-    const maxMph = coach ? 180 : staffs ? 150 : 135;
+    const maxMph = coach
+      ? COACH_TRAIL_BREAK_SPEED_MPH
+      : staffs
+        ? STAFFS_TRAIL_BREAK_SPEED_MPH
+        : TRAIL_BREAK_SPEED_MPH;
     // Timestamp jitter is common at coach stops. Only reject a fast, clearly
     // implausible detour; ordinary motorway samples remain accepted.
     if (seconds >= 5 && seconds <= 45 * 60 && mph > maxMph && routeM > straight + 1_000) return false;
