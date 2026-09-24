@@ -12725,11 +12725,18 @@ function alignTrailToRoadsLocal(latlngs, breakOpts = {}) {
         out.push([hit.lat, hit.lng]);
       } else if (prevHit.road === hit.road) {
         const along = pointsAlongSameRoad(prevHit, hit);
-        for (const p of along.slice(1)) {
-          if (haversineMeters(out[out.length - 1][0], out[out.length - 1][1], p[0], p[1]) >= 2) out.push(p);
+        if (roadBridgePlausible(prevHit, hit, along, breakOpts)) {
+          for (const p of along.slice(1)) {
+            if (haversineMeters(out[out.length - 1][0], out[out.length - 1][1], p[0], p[1]) >= 2) out.push(p);
+          }
+        } else {
+          if (out.length >= 2) alignedSegs.push(out.slice());
+          out.length = 0;
+          out.push([hit.lat, hit.lng]);
         }
       } else {
         const bridge = bridgeTrailRoads(prevHit, hit);
+        const bridgePlausible = roadBridgePlausible(prevHit, hit, bridge, breakOpts);
         const bridgeJump =
           bridge.length >= 2 &&
           bridge.slice(1).some((p, idx) => {
@@ -12741,6 +12748,7 @@ function alignTrailToRoadsLocal(latlngs, breakOpts = {}) {
             return isTrailGapJump(a, p, bridgeGap, breakOpts);
           });
         if (
+          !bridgePlausible ||
           bridgeJump ||
           isTrailGapJump(
             prevHit,
@@ -12795,7 +12803,51 @@ function trailFetchWithDeadline(url, options = {}, timeoutMs = 12_000) {
   });
 }
 
-async function osrmRoadBridge(a, b, signal) {
+function roadBridgePlausible(a, b, part, breakOpts = {}) {
+  if (!Array.isArray(part) || part.length < 2 || !a || !b) return false;
+  const aLat = Number(Array.isArray(a) ? a[0] : a.lat);
+  const aLng = Number(Array.isArray(a) ? a[1] : a.lng);
+  const bLat = Number(Array.isArray(b) ? b[0] : b.lat);
+  const bLng = Number(Array.isArray(b) ? b[1] : b.lng);
+  if (![aLat, aLng, bLat, bLng].every(Number.isFinite)) return false;
+  const first = part[0];
+  const last = part[part.length - 1];
+  if (!Array.isArray(first) || !Array.isArray(last)) return false;
+  // OSRM may snap to a nearby carriageway, but it must still begin/end at the
+  // two recorded points. A large endpoint jump means the match belongs to a
+  // different road/journey and must not be painted.
+  if (
+    haversineMeters(aLat, aLng, Number(first[0]), Number(first[1])) > 800 ||
+    haversineMeters(bLat, bLng, Number(last[0]), Number(last[1])) > 800
+  ) return false;
+  const straight = haversineMeters(aLat, aLng, bLat, bLng);
+  const routeM = pathLengthMeters(part);
+  if (!Number.isFinite(routeM) || routeM < 1) return false;
+  // A short pair of GPS fixes must not be turned into a motorway-sized loop.
+  // Sparse coach fixes can legitimately have a sizeable detour, so scale the
+  // allowance with the direct distance instead of imposing a fixed cap.
+  const ratioCap = straight < 2_000 ? 6 : straight < 8_000 ? 7 : 8;
+  if (routeM > Math.max(2_500, straight * ratioCap)) return false;
+  const at = Number.isFinite(Number(Array.isArray(a) ? a[3] : a.t))
+    ? Number(Array.isArray(a) ? a[3] : a.t)
+    : null;
+  const bt = Number.isFinite(Number(Array.isArray(b) ? b[3] : b.t))
+    ? Number(Array.isArray(b) ? b[3] : b.t)
+    : null;
+  if (at != null && bt != null) {
+    const seconds = Math.abs(bt - at) / 1_000;
+    const mph = (routeM / Math.max(seconds, 1)) * 2.23694;
+    const coach = Boolean(breakOpts.coach || isCoachTrailOperator(breakOpts.operator));
+    const staffs = Boolean(breakOpts.staffs || isStaffsTrailOperator(breakOpts.operator));
+    const maxMph = coach ? 180 : staffs ? 150 : 135;
+    // Timestamp jitter is common at coach stops. Only reject a fast, clearly
+    // implausible detour; ordinary motorway samples remain accepted.
+    if (seconds >= 5 && seconds <= 45 * 60 && mph > maxMph && routeM > straight + 1_000) return false;
+  }
+  return true;
+}
+
+async function osrmRoadBridge(a, b, signal, breakOpts = {}) {
   if (!a || !b) return null;
   const coords = `${Number(a[1]).toFixed(5)},${Number(a[0]).toFixed(5)};${Number(b[1]).toFixed(5)},${Number(b[0]).toFixed(5)}`;
   try {
@@ -12806,7 +12858,7 @@ async function osrmRoadBridge(a, b, signal) {
     if (routeRes.ok) {
       const data = await routeRes.json();
       const part = osrmCoordsFromLngLat(data?.routes?.[0]?.geometry?.coordinates);
-      if (part) return part;
+      if (roadBridgePlausible(a, b, part, breakOpts)) return part;
     }
   } catch {
     /* try match fallback */
@@ -12821,7 +12873,7 @@ async function osrmRoadBridge(a, b, signal) {
       if (!res.ok) continue;
       const data = await res.json();
       const part = osrmCoordsFromLngLat(data?.matchings?.[0]?.geometry?.coordinates);
-      if (part) return part;
+      if (roadBridgePlausible(a, b, part, breakOpts)) return part;
     } catch {
       /* try next radius */
     }
@@ -12865,7 +12917,7 @@ async function stitchTrailViaOsrmRoutes(latlngs, signal, breakOpts = {}) {
           continue;
         }
         jobs.push(
-          osrmRoadBridge(a, b, signal).then((part) => {
+          osrmRoadBridge(a, b, signal, breakOpts).then((part) => {
             bridges[i] = part;
           }),
         );
@@ -12979,7 +13031,7 @@ async function matchTrailViaOsrm(latlngs, signal, breakOpts = {}) {
           }
         }
       } else if (joinDist < 3500) {
-        const bridge = await osrmRoadBridge(prev, next, signal);
+        const bridge = await osrmRoadBridge(prev, next, signal, breakOpts);
         if (bridge?.length >= 2) {
           for (const p of bridge.slice(1)) {
             if (haversineMeters(merged[merged.length - 1][0], merged[merged.length - 1][1], p[0], p[1]) >= 2) {
