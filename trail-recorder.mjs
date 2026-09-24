@@ -1,4 +1,4 @@
-/** Continuously record live vehicle GPS into the 7-day trail store (no browser needed). */
+/** Continuously record live vehicle GPS into the 5-day trail store (no browser needed). */
 
 import { appendTrailPointsBatch, trailsEnabled, initTrailStore } from "./trail-store.mjs";
 

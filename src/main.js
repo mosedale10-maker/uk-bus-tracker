@@ -1454,12 +1454,12 @@ function stopsBlock(stops, lat, lng, stickyNext = null) {
   `;
 }
 
-const HISTORY_DAY_OPTIONS = [1, 3, 7];
+const HISTORY_DAY_OPTIONS = [1, 3, 5];
 const HISTORY_DAYS_KEY = "uk-bus-history-days";
 const FREE_HISTORY_DAYS = 1;
 let historyDays = (() => {
   const n = Number(localStorage.getItem(HISTORY_DAYS_KEY));
-  const picked = HISTORY_DAY_OPTIONS.includes(n) ? n : 7;
+  const picked = HISTORY_DAY_OPTIONS.includes(n) ? n : 5;
   if (!isPlus() && picked > FREE_HISTORY_DAYS) return FREE_HISTORY_DAYS;
   return picked;
 })();
@@ -2757,12 +2757,12 @@ function clearMapMarkerSelection({ keepPlayback = false } = {}) {
   else if (!playback) hideJourneyPanel();
 }
 
-const TRAIL_STORE_KEY = "uk-bus-trails-v2";
+const TRAIL_STORE_KEY = "uk-bus-trails-v3";
 const TRAIL_MAX_POINTS = 8000;
 const TRAIL_MAX_VEHICLES = 60;
 /** Server + local GPS tails are always kept for this many days (independent of Plus history chips). */
-const TRAIL_KEEP_DAYS = 7;
-// The server-side recorder is the canonical seven-day store. Uploading every
+const TRAIL_KEEP_DAYS = 5;
+// The server-side recorder is the canonical five-day store. Uploading every
 // viewer's duplicate local trail stream adds POSTs and JSON work without adding
 // history; keep the client queue available as an explicit fallback switch.
 const CLIENT_TRAIL_UPLOADS_ENABLED = false;
@@ -4295,7 +4295,7 @@ async function resolveTripIdForPlayback({ tripId = "", journeyId = "", vehicleId
   const wantJourney = journeyId ? String(journeyId) : "";
   // Bustimes vehiclejourneys need a numeric vehicle id — skip BODS/Flix journey ids.
   if (!vehicleId || !/^\d+$/.test(String(vehicleId))) return "";
-  const rows = await fetchVehicleHistory(vehicleId, Math.max(historyDays, 7));
+  const rows = await fetchVehicleHistory(vehicleId, Math.max(historyDays, 5));
   if (!rows.length) return "";
   const wantLine = String(line || "").trim();
   const targetMs = datetime ? new Date(datetime).getTime() : NaN;

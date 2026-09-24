@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { hasDatabase } from "./auth-store.mjs";
 import pg from "pg";
 
-export const TRAIL_KEEP_DAYS = 7;
+export const TRAIL_KEEP_DAYS = 5;
 const MAX_BATCH = 250;
 const MAX_POINTS_PER_KEY = 4_000;
 const MAX_KEYS_PER_QUERY = 24;
@@ -269,6 +269,45 @@ export async function pruneOldTrailPoints({ force = false, days = TRAIL_KEEP_DAY
     }
   }
   return n;
+}
+
+/**
+ * Emergency/manual reset: remove every recorded GPS point while preserving the
+ * schema and indexes. Callers should stop the recorder first, then restart it
+ * so its in-memory throttle/sticky-route state starts empty.
+ */
+export async function clearAllTrailPoints() {
+  await initTrailStore();
+  if (!db) return { ok: false, reason: "no-store" };
+  await new Promise((resolve) => setImmediate(resolve));
+  let deleted = 0;
+  const reset = () => {
+    deleted = Number(sqlRun("DELETE FROM vehicle_trail_points")?.changes || 0);
+    try {
+      sqlRun("DELETE FROM sqlite_sequence WHERE name = ?", ["vehicle_trail_points"]);
+    } catch {
+      /* sqlite_sequence is optional */
+    }
+  };
+  if (backend === "node:sqlite") {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      reset();
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        /* ignore */
+      }
+      throw error;
+    }
+  } else {
+    db.transaction(reset)();
+  }
+  checkpointWal({ force: true });
+  console.log(`[trails] cleared ${deleted} recorded GPS points`);
+  return { ok: true, deleted };
 }
 
 /** Drop old Postgres trail table so Plus login can use the small Railway DB volume. */
