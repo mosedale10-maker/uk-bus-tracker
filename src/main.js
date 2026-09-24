@@ -2458,8 +2458,8 @@ function normalizeTrailDestination(raw) {
     .toLowerCase();
 }
 
-/** Live follow tracks the bus only — Map · trail / Map · tails draw per-journey GPS. */
-const SHOW_LIVE_TAIL_WHILE_FOLLOWING = true;
+/** Live follow tracks the bus only — no growing day tail behind it. Map · trail / Map · tails draw per-journey GPS. */
+const SHOW_LIVE_TAIL_WHILE_FOLLOWING = false;
 
 function trailKeysForVehicle({
   vehicleId = "",
@@ -5630,7 +5630,12 @@ function startFollowBus(marker) {
   // Map · trail / Map · tails pin each journey separately.
   const trailKey = liveTrailKeyForMarker(marker);
   if (trailKey) rememberTrailVehicle(trailKey);
-  if (SHOW_LIVE_TAIL_WHILE_FOLLOWING && trailKey) setLiveTrailFocus(trailKey);
+  if (SHOW_LIVE_TAIL_WHILE_FOLLOWING && trailKey) {
+    setLiveTrailFocus(trailKey);
+  } else if (liveTrailKey) {
+    // Following shows the bus only — drop any growing day tail that was already up.
+    setLiveTrailFocus("");
+  }
   keepFollowedInView(marker, { force: true });
   if (announceOn) followJourney(marker, true);
   updateFollowChip();
