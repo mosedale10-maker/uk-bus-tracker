@@ -3626,6 +3626,25 @@ export function createFleetBrowser({
     persistSavedVehicles(state.savedVehicles);
   }
 
+  /** Union two route-summary lists (keyed by line) so a save is additive. */
+  function mergeRouteSummary(a, b) {
+    const map = new Map();
+    for (const row of [...(a || []), ...(b || [])]) {
+      if (!row?.line) continue;
+      const key = String(row.line).toUpperCase();
+      const cur = map.get(key) || { line: row.line, trips: 0, lastAt: "", dest: "" };
+      cur.trips = Math.max(Number(cur.trips) || 0, Number(row.trips) || 0);
+      if (String(row.lastAt || "") > String(cur.lastAt || "")) {
+        cur.lastAt = row.lastAt;
+        cur.dest = row.dest || cur.dest;
+      } else if (!cur.dest && row.dest) {
+        cur.dest = row.dest;
+      }
+      map.set(key, cur);
+    }
+    return [...map.values()].sort((x, y) => compareLineNames(x.line, y.line));
+  }
+
   function upsertSavedVehicle(vehicle, routes = null) {
     if (!vehicle?.id && !vehicle?.reg) return;
     const id = String(vehicle.id || "");
@@ -3633,12 +3652,17 @@ export function createFleetBrowser({
     const idx = state.savedVehicles.findIndex(
       (row) => (id && row.id === id) || (reg && compactQuery(row.reg) === compactQuery(reg)),
     );
+    // Merge rather than replace: AT1–AT3 / BS1–BS2 only exist in GPS trails, so a
+    // later bustimes-only save must not wipe routes another source already found.
+    const existingRoutes = idx >= 0 && Array.isArray(state.savedVehicles[idx].routes)
+      ? state.savedVehicles[idx].routes
+      : [];
     const next = {
       id,
       reg,
       fleet: String(vehicle.fleet_code || vehicle.fleet_number || vehicle.fleet || "").trim(),
       operatorName: String(vehicle.operator?.name || vehicle.operatorName || "").trim(),
-      routes: Array.isArray(routes) ? routes : idx >= 0 ? state.savedVehicles[idx].routes : [],
+      routes: Array.isArray(routes) ? mergeRouteSummary(existingRoutes, routes) : existingRoutes,
       routesAt: Array.isArray(routes) ? Date.now() : idx >= 0 ? state.savedVehicles[idx].routesAt : 0,
     };
     if (idx >= 0) state.savedVehicles[idx] = { ...state.savedVehicles[idx], ...next };
