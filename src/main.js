@@ -1935,6 +1935,9 @@ const playbackSpeedEl = document.getElementById("playback-speed");
  */
 let gpsReplay = null; // { pts, idx, frac, speed, playing, raf, marker, arrow, t0, t1 }
 const GPS_REPLAY_SPEEDS = [1, 15, 60, 240];
+const REPLAY_ARROW_SPACING_ZOOMED_M = 52;
+const REPLAY_ARROW_SPACING_M = 28;
+const REPLAY_ARROW_LIMIT = 480;
 
 function gpsReplayControls(show) {
   if (!playbackReplayEl) return;
@@ -1946,9 +1949,100 @@ function gpsReplayControls(show) {
   playbackSpeedEl.hidden = !on;
 }
 
-/** bustimes.org-style travelled-so-far overlay: green stroke over the indigo planned route. */
+/** Bustimes-style travelled-so-far overlay: a green stroke revealed by the replay cursor. */
 const REPLAY_TRAVELLED_COLOR = "#22a447";
 const REPLAY_TRAVELLED_WEIGHT = 5;
+
+function replayArrowSpacingM() {
+  const zoom = map.getZoom();
+  return zoom < 12
+    ? REPLAY_ARROW_SPACING_ZOOMED_M
+    : zoom < 13
+      ? 40
+      : zoom < 14
+        ? 34
+        : REPLAY_ARROW_SPACING_M;
+}
+
+function clearReplayDirectionArrows(replay = gpsReplay) {
+  for (const marker of replay?.directionArrows || []) {
+    try {
+      playbackLayer.removeLayer(marker);
+    } catch {
+      /* already gone */
+    }
+  }
+  if (replay) {
+    replay.directionArrows = [];
+    replay.arrowScanIndex = 0;
+    replay.arrowLastPoint = replay.pts?.[0] || null;
+    replay.arrowT = replay.t0 ?? Number.NEGATIVE_INFINITY;
+  }
+}
+
+function addReplayDirectionArrow(replay, point, bearing, t) {
+  if (!replay || !point || !Number.isFinite(point.lat) || !Number.isFinite(point.lng)) return;
+  if ((replay.directionArrows?.length || 0) >= REPLAY_ARROW_LIMIT) return;
+  const marker = L.marker([point.lat, point.lng], {
+    icon: trailArrowIcon(bearing, { replay: true }),
+    interactive: false,
+    keyboard: false,
+    opacity: 0.95,
+    zIndexOffset: 220,
+  }).addTo(playbackLayer);
+  marker._replayT = Number.isFinite(t) ? t : point.t;
+  replay.directionArrows.push(marker);
+}
+
+/**
+ * Add route-direction arrows only to the GPS already covered by the replay.
+ * The markers are incremental, so a long replay does not rebuild hundreds of
+ * Leaflet icons on every animation frame.
+ */
+function gpsReplayUpdateDirectionArrows(t) {
+  const replay = gpsReplay;
+  const pts = replay?.pts;
+  if (!replay || !pts?.length || !Number.isFinite(t)) return;
+  if (t < (replay.arrowT ?? Number.NEGATIVE_INFINITY)) {
+    clearReplayDirectionArrows(replay);
+  }
+  if (!replay.directionArrows) replay.directionArrows = [];
+  if (!Number.isFinite(replay.arrowT)) replay.arrowT = Number.NEGATIVE_INFINITY;
+  if (t < pts[0].t) return;
+
+  let endIndex = Math.max(0, Number(replay.arrowScanIndex || 0) - 1);
+  while (endIndex + 1 < pts.length && pts[endIndex + 1].t <= t) endIndex += 1;
+  const spacing = Math.max(Number(replay.arrowSpacingM) || 0, replayArrowSpacingM());
+  let lastPoint = replay.arrowLastPoint || pts[0];
+  for (let i = Math.max(1, Number(replay.arrowScanIndex || 1)); i <= endIndex; i += 1) {
+    const point = pts[i];
+    if (!Number.isFinite(point.lat) || !Number.isFinite(point.lng)) continue;
+    if (haversineMeters(lastPoint.lat, lastPoint.lng, point.lat, point.lng) >= spacing) {
+      const previous = pts[i - 1] || lastPoint;
+      addReplayDirectionArrow(replay, point, segmentBearing([previous.lat, previous.lng], [point.lat, point.lng]), point.t);
+      lastPoint = point;
+    }
+  }
+  replay.arrowScanIndex = Math.max(Number(replay.arrowScanIndex || 0), endIndex + 1);
+  replay.arrowLastPoint = lastPoint;
+
+  // Include the interpolated cursor point when the bus is between two pings,
+  // but never place an arrow beyond the current replay time.
+  const current = endIndex < pts.length - 1 ? gpsReplayInterp(pts, t) : null;
+  if (current && Number.isFinite(current.lat) && Number.isFinite(current.lng)) {
+    const previous = pts[endIndex] || lastPoint;
+    if (haversineMeters(lastPoint.lat, lastPoint.lng, current.lat, current.lng) >= spacing * 0.72) {
+      addReplayDirectionArrow(
+        replay,
+        current,
+        segmentBearing([previous.lat, previous.lng], [current.lat, current.lng]),
+        t,
+      );
+      replay.arrowLastPoint = current;
+    }
+  }
+  replay.arrowT = t;
+}
 
 /** Grow the green "been here" line up to the replay cursor. */
 function gpsReplayUpdateTravelled(t) {
@@ -1965,6 +2059,7 @@ function gpsReplayUpdateTravelled(t) {
     latlngs.push([p.lat, p.lng]);
   }
   if (latlngs.length >= 1) line.setLatLngs(latlngs);
+  gpsReplayUpdateDirectionArrows(t);
 }
 
 function gpsReplayTravelledLine() {
@@ -2004,11 +2099,11 @@ function gpsReplayMarkerAt(lat, lng, heading) {
         interactive: false,
         keyboard: false,
         zIndexOffset: 450,
-        icon: trailArrowIcon(heading),
+        icon: trailArrowIcon(heading, { replay: true }),
       }).addTo(playbackLayer);
     } else {
       gpsReplay.arrow.setLatLng([lat, lng]);
-      gpsReplay.arrow.setIcon(trailArrowIcon(heading));
+      gpsReplay.arrow.setIcon(trailArrowIcon(heading, { replay: true }));
     }
   }
 }
@@ -2103,6 +2198,13 @@ function gpsReplayTeardown() {
   if (gpsReplay?.marker) playbackLayer.removeLayer(gpsReplay.marker);
   if (gpsReplay?.arrow) playbackLayer.removeLayer(gpsReplay.arrow);
   if (gpsReplay?.travelledLine) playbackLayer.removeLayer(gpsReplay.travelledLine);
+  for (const marker of gpsReplay?.directionArrows || []) {
+    try {
+      playbackLayer.removeLayer(marker);
+    } catch {
+      /* already gone */
+    }
+  }
   gpsReplay = null;
   if (playbackReplayEl) {
     playbackReplayEl.textContent = "▶ Replay";
@@ -2142,6 +2244,14 @@ function gpsReplaySetup(pts) {
     marker: null,
     arrow: null,
     travelledLine: null,
+    directionArrows: [],
+    arrowScanIndex: 0,
+    arrowLastPoint: clean[0],
+    arrowT: clean[0].t,
+    arrowSpacingM: Math.max(
+      replayArrowSpacingM(),
+      pathLengthMeters(pathFromGpsPoints(clean)) / REPLAY_ARROW_LIMIT,
+    ),
   };
   // Start with no travelled line; it grows only as the replay marker advances.
   gpsReplayTravelledLine();
@@ -3456,14 +3566,17 @@ function trailArrowPopupHtml(sample) {
   return `<div class="trail-arrow-popup"><strong>Tracked position</strong><div class="trail-arrow-popup-time">Time unknown for this point</div>${extra}</div>`;
 }
 
-function trailArrowIcon(bearingDeg) {
+function trailArrowIcon(bearingDeg, { replay = false } = {}) {
   const rot = Number.isFinite(bearingDeg) ? bearingDeg : 0;
   const z = map.getZoom();
   const size = z < 13 ? 12 : z < 15 ? 15 : 18;
   const half = size / 2;
+  const content = replay
+    ? `<span class="trail-arrow-chevron" style="--trail-rot:${rot}deg" aria-hidden="true"></span>`
+    : `<button type="button" class="trail-arrow-hit" aria-label="Show time at this point"><span class="trail-arrow-chevron" style="--trail-rot:${rot}deg" aria-hidden="true"></span></button>`;
   return L.divIcon({
-    className: "trail-arrow-icon",
-    html: `<button type="button" class="trail-arrow-hit" aria-label="Show time at this point"><span class="trail-arrow-chevron" style="--trail-rot:${rot}deg" aria-hidden="true"></span></button>`,
+    className: `trail-arrow-icon${replay ? " replay-arrow-icon" : ""}`,
+    html: content,
     iconSize: [size, size],
     iconAnchor: [half, half],
   });

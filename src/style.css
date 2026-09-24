@@ -3085,6 +3085,10 @@ html.map-night .leaflet-control-container {
   box-shadow: none !important;
 }
 
+.trail-arrow-icon.replay-arrow-icon {
+  pointer-events: none;
+}
+
 .trail-arrow-hit {
   display: grid;
   place-items: center;
