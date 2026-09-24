@@ -440,7 +440,7 @@ app.get("/api/bods-vehicles", (req, res) => handleBodsVehicles(req, res, bodsKey
 const BUILD_ID = (() => {
   try {
     const html = fs.readFileSync(path.join(distDir, "index.html"), "utf8");
-    const asset = String(html.match(/assets\/index-[A-Za-z0-9_.-]+\.js/) || [""])[0];
+    const asset = String((html.match(/assets\/index-[A-Za-z0-9_.-]+\.js/) || [""])[0]);
     return asset || Date.now().toString(36);
   } catch {
     return "unknown";
