@@ -7110,6 +7110,46 @@ const STAFF_COLOURS = {
 const liveryCache = new Map();
 const liveryById = new Map();
 const btRegCache = new Map();
+const LIVERY_CACHE_KEY = "uk-bus-livery-css-v1";
+const LIVERY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+let liveryPersistTimer = null;
+
+function restoreLiveryCache() {
+  if (typeof localStorage === "undefined") return;
+  try {
+    const raw = localStorage.getItem(LIVERY_CACHE_KEY);
+    const entries = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(entries)) return;
+    const now = Date.now();
+    for (const entry of entries) {
+      const id = String(entry?.id || "");
+      const at = Number(entry?.at || 0);
+      const row = entry?.row;
+      if (!id || !row || !at || now - at > LIVERY_CACHE_TTL_MS) continue;
+      if (row.left_css || row.left) liveryById.set(id, row);
+    }
+  } catch {
+    /* ignore malformed/old cache */
+  }
+}
+
+function scheduleLiveryCachePersist() {
+  if (typeof localStorage === "undefined" || liveryPersistTimer) return;
+  liveryPersistTimer = setTimeout(() => {
+    liveryPersistTimer = null;
+    try {
+      const now = Date.now();
+      const entries = [...liveryById.entries()]
+        .slice(-400)
+        .map(([id, row]) => ({ id, at: now, row }));
+      localStorage.setItem(LIVERY_CACHE_KEY, JSON.stringify(entries));
+    } catch {
+      /* storage is optional */
+    }
+  }, 1000);
+}
+
+restoreLiveryCache();
 
 /** Resolve paint: bustimes.org livery CSS first, then photo/fleet, then local brand. */
 function resolveBusLivery(bus) {
@@ -7120,7 +7160,11 @@ function resolveBusLivery(bus) {
   if (numeric) {
     const hit = liveryById.get(String(id));
     if (liveryCss(hit)) return hit;
-    return null;
+    // A known local/fleet paint is a safe immediate fallback while the
+    // bustimes CSS request is still in flight; the numeric CSS replaces it
+    // as soon as ensureLiveries completes.
+    const local = fleetLiveryForBus(bus);
+    return liveryCss(local) ? local : null;
   }
   const raw = bus.vehicle?.livery;
   if (raw && typeof raw === "object") {
@@ -7184,8 +7228,10 @@ async function ensureLiveries(idsOrBuses) {
           );
         }
         const row = await liveryCache.get(id);
-        if (row?.left_css || row?.left) liveryById.set(id, row);
-        else liveryCache.delete(id);
+        if (row?.left_css || row?.left) {
+          liveryById.set(id, row);
+          scheduleLiveryCachePersist();
+        } else liveryCache.delete(id);
       }),
     );
   }
@@ -9009,26 +9055,23 @@ function busIcon(bus, headingOverride = null) {
     return vehicleIcon(line, heading, colour, natxLiv, bus.speedMph);
   }
   const brand = brandLiveryForBus(bus);
-  // bustimes.org colour when present; brand only while paint/CSS is still loading.
+  const immediateLivery = liveryCss(livery) ? livery : fleetLiveryForBus(bus) || brand;
+  // bustimes.org colour when present; local/operator paint is the immediate fallback.
   let colour = scfc
     ? bus.vehicle?.colour || "#e03c31"
     : bus.vehicle?.colour && bus.vehicle.colour !== "#2563eb"
       ? bus.vehicle.colour
-      : brand?.colour || brandColourForBus(bus, "#2563eb");
+      : immediateLivery?.colour || brandColourForBus(bus, "#2563eb");
   if (
     !scfc &&
     isNearWhite(colour) &&
-    !liveryCss(livery) &&
-    brand?.colour &&
-    !isNearWhite(brand.colour)
+    immediateLivery?.colour &&
+    !isNearWhite(immediateLivery.colour)
   ) {
-    colour = brand.colour;
+    colour = immediateLivery.colour;
   }
-  // Bustimes CSS wins whenever loaded; brand is temporary fallback only.
-  let paintLiv = livery;
-  if (!liveryCss(paintLiv) && brand && liveryCss(brand)) {
-    paintLiv = brand;
-  }
+  // Bustimes CSS wins whenever loaded; local/operator paint is temporary only.
+  let paintLiv = immediateLivery;
   return vehicleIcon(line, heading, colour, paintLiv, bus.speedMph, { school, scfc });
 }
 
@@ -10996,24 +11039,25 @@ async function loadBuses({ replace = false } = {}) {
       live.push({ bus, snapped });
     }
 
-    // Livery CSS is useful but should not delay live positions. Paint the
-    // markers immediately, then refresh their icons when the CSS arrives.
-    ensureLiveries(live.map((row) => row.bus))
-      .then(() => {
-        if (gen !== busesGen) return;
-        for (const marker of markers.values()) {
-          const bus = marker.bus;
-          if (!bus) continue;
-          const heading = Number.isFinite(Number(bus.heading)) ? Number(bus.heading) : 0;
-          const iconKey = busIconKey(bus, heading, bus.speedMph);
-          if (marker._iconKey === iconKey) continue;
-          marker._iconKey = iconKey;
-          marker.setIcon(busIcon(bus, heading));
-        }
-      })
-      .catch(() => {
-        /* livery is optional; keep the live marker */
-      });
+    // Give cached/quick livery responses a short head start so the first map
+    // paint already has the real CSS. Never wait indefinitely for Bustimes.
+    const liveryReady = ensureLiveries(live.map((row) => row.bus)).catch(() => {});
+    await Promise.race([
+      liveryReady,
+      new Promise((resolve) => setTimeout(resolve, 700)),
+    ]);
+    liveryReady.then(() => {
+      if (gen !== busesGen) return;
+      for (const marker of markers.values()) {
+        const bus = marker.bus;
+        if (!bus) continue;
+        const heading = Number.isFinite(Number(bus.heading)) ? Number(bus.heading) : 0;
+        const iconKey = busIconKey(bus, heading, bus.speedMph);
+        if (marker._iconKey === iconKey) continue;
+        marker._iconKey = iconKey;
+        marker.setIcon(busIcon(bus, heading));
+      }
+    });
 
     for (const { bus, snapped } of live) {
       seenService.add(bus.id);
