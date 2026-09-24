@@ -2018,6 +2018,7 @@ const playbackSpeedEl = document.getElementById("playback-speed");
  * with a scrub bar, play/pause and speed multiplier — a true "as it happened" replay.
  */
 let gpsReplay = null; // { pts, idx, frac, speed, playing, raf, marker, arrow, t0, t1 }
+let gpsReplayWatchdog = null;
 const GPS_REPLAY_SPEEDS = [1, 15, 60, 240];
 const REPLAY_ARROW_SPACING_ZOOMED_M = 52;
 const REPLAY_ARROW_SPACING_M = 28;
@@ -2309,9 +2310,18 @@ function gpsReplayInterp(pts, t) {
 
 function gpsReplayFrame(ts) {
   if (!gpsReplay || !gpsReplay.playing) return;
-  if (!gpsReplay.raf) gpsReplay.raf = ts;
-  const wall = (ts - gpsReplay.raf) / 1000;
-  gpsReplay.raf = ts;
+  const now = Number.isFinite(Number(ts)) ? Number(ts) : performance.now();
+  // Browsers can throttle requestAnimationFrame when the tab is not foregrounded.
+  // The watchdog below supplies a low-frequency fallback; avoid double-advancing
+  // when animation frames are already healthy.
+  if (gpsReplay.lastFrameAt && now - gpsReplay.lastFrameAt < 100) {
+    requestAnimationFrame(gpsReplayFrame);
+    return;
+  }
+  gpsReplay.lastFrameAt = now;
+  if (!gpsReplay.raf) gpsReplay.raf = now;
+  const wall = (now - gpsReplay.raf) / 1000;
+  gpsReplay.raf = now;
   const span = gpsReplay.t1 - gpsReplay.t0;
   gpsReplay.pos += wall * gpsReplay.speed;
   if (gpsReplay.pos >= span) {
@@ -2337,6 +2347,23 @@ function updateReplayBusMarkerAt(p) {
   }
 }
 
+function startGpsReplayWatchdog() {
+  if (gpsReplayWatchdog) return;
+  gpsReplayWatchdog = setInterval(() => {
+    if (!gpsReplay?.playing) return;
+    const now = performance.now();
+    if (!gpsReplay.lastFrameAt || now - gpsReplay.lastFrameAt >= 400) {
+      gpsReplayFrame(now);
+    }
+  }, 250);
+}
+
+function stopGpsReplayWatchdog() {
+  if (!gpsReplayWatchdog) return;
+  clearInterval(gpsReplayWatchdog);
+  gpsReplayWatchdog = null;
+}
+
 function gpsReplayStart() {
   if (!gpsReplay?.pts?.length) return;
   if (!gpsReplay.hasStarted) {
@@ -2346,6 +2373,8 @@ function gpsReplayStart() {
   setGpsReplayActive(true);
   gpsReplay.playing = true;
   gpsReplay.raf = 0;
+  gpsReplay.lastFrameAt = 0;
+  startGpsReplayWatchdog();
   playbackReplayEl.textContent = "⏸ Pause";
   playbackReplayEl.hidden = false;
   // Reset the travelled stroke immediately when a completed replay is replayed
@@ -2363,10 +2392,12 @@ function gpsReplayStart() {
 function gpsReplayPause() {
   if (!gpsReplay) return;
   gpsReplay.playing = false;
+  stopGpsReplayWatchdog();
   if (playbackReplayEl) playbackReplayEl.textContent = "▶ Replay";
 }
 
 function gpsReplayTeardown() {
+  stopGpsReplayWatchdog();
   setGpsReplayActive(false);
   if (gpsReplay?.marker) playbackLayer.removeLayer(gpsReplay.marker);
   if (gpsReplay?.arrow) playbackLayer.removeLayer(gpsReplay.arrow);
