@@ -6282,11 +6282,6 @@ async function startRoutePlayback({
   if (requestId !== playbackRequestSeq) return;
   if (usingTracked) {
     const liveKey = String(trailKey || vehicleId || regTrailKey(reg) || "").trim();
-    const gapMs = coachOp
-      ? COACH_TRAIL_BREAK_GAP_MS
-      : isStaffsTrailOperator(operator) || isAltonLine(lineName)
-        ? STAFFS_TRAIL_BREAK_GAP_MS
-        : 18 * 60_000;
 
     if (isHistorical || !liveKey) {
       if (replayOnly) {
@@ -6294,28 +6289,16 @@ async function startRoutePlayback({
         // historical tail ahead of the replay marker.
         multiTailActiveGroup = null;
       } else {
-      let segs = segmentTrailIntoTrips(trackedGps, { gapMs });
-      const clipped = clipPointsToSingleDirectionRun(trackedGps, {
-        direction: safeDirection,
-        aroundMs: aroundMs || Number(trackedGps[0]?.t) || 0,
-      });
-      if (clipped.length >= 2) segs = [clipped];
-      // Drop any leftover opposite-direction / other-route segments.
-      if (segs.length > 1 && (safeDirection || aroundMs)) {
-        const want = clipPointsToSingleDirectionRun(
-          segs.flat(),
-          { direction: safeDirection, aroundMs: aroundMs || 0 },
-        );
-        if (want.length >= 2) segs = [want];
-      }
-      // Historical/recorded runs are complete directional records. Do not
-      // clip them to a current marker, which may already be on the return leg.
-      // Live rows still clip below so their stroke can never run ahead.
-      segs = isHistorical
-        ? segs.filter((seg) => seg.length >= 2)
+      // The selected row is already scoped to one journey/direction. Do not
+      // re-segment it here: doing so can turn one Fleet row into several
+      // visible tails when journey IDs flap at stops. Keep one synthetic tail;
+      // gap splitting still happens safely inside the road renderer.
+      const selectedGps = isHistorical
+        ? trackedGps
         : lastPing
-          ? segs.map((seg) => clipGpsPointsAtPing(seg, lastPing)).filter((seg) => seg.length >= 2)
+          ? clipGpsPointsAtPing(trackedGps, lastPing)
           : [];
+      const segs = selectedGps.length >= 2 ? [selectedGps] : [];
       pinSeparateTripTails(segs, {
         baseKey: liveKey || resolvedTripId || tripId || safeJourneyId || "hist",
         line: lineName,
