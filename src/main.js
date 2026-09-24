@@ -5045,12 +5045,15 @@ async function showFleetRouteTails({
     // Do not fall back to every recent run for that vehicle: that creates
     // several extra tails on the map. Route-wide tails without an ID still
     // intentionally show all recorded trips.
-    const singleSelectedRun = targets.length === 1 && Boolean(vWhen);
+    // A route-wide view may contain several buses, but each supplied live
+    // target still represents one current stint. Do not append that bus's older
+    // journeys to the target and create a false there-and-back shape.
+    const selectedRun = Boolean(vWhen);
     if (vJourney) {
       gps = gps.filter((point) => String(point.journeyId || "") === vJourney);
     } else if (vTrip) {
       gps = gps.filter((point) => String(point.tripId || "") === vTrip);
-    } else if (singleSelectedRun) {
+    } else if (selectedRun) {
       // Flix/NATX and AT employee IDs can flap or be absent. Select the one
       // recorded stint nearest the selected row's time, never every nearby run.
       const selected = clipPointsToSingleDirectionRun(gps, {
@@ -5063,7 +5066,7 @@ async function showFleetRouteTails({
       isStaffsTrailOperator(opCode) ||
       isAltonLine(vLine || code) ||
       String(v.trailKey || trailKey || "").startsWith("staff-");
-    const segments = singleSelectedRun && gps.length >= 2
+    const segments = selectedRun && gps.length >= 2
       ? [gps]
       : segmentTrailIntoTrips(gps, {
           gapMs: staffsGap ? STAFFS_TRAIL_BREAK_GAP_MS : 18 * 60_000,
