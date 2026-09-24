@@ -832,8 +832,8 @@ export function mergeLiveHistoryRow(journeys, liveRow) {
       break;
     }
     const rowMs = new Date(row.datetime).getTime();
-    const rowDest = String(row.destination || "").trim().toLowerCase().replace(/\s+/g, " ");
-    const liveDest = String(liveRow.destination || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const rowDest = normalizeFleetDestination(row.destination);
+    const liveDest = normalizeFleetDestination(liveRow.destination);
     const rowDir = normalizeFleetDirection(row.direction);
     const liveDir = normalizeFleetDirection(liveRow.direction);
     const destinationCompatible = !rowDest || !liveDest || rowDest === liveDest;
@@ -1582,6 +1582,16 @@ function normalizeFleetDirection(raw) {
   return "";
 }
 
+function normalizeFleetDestination(raw) {
+  return String(raw || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .replace(/[,–-]\s*(bus station|bus stn|arrival)\b.*$/i, "")
+    .replace(/\s+(bus station|bus stn|arrival|edensor road)\b.*$/i, "")
+    .trim();
+}
+
 function directionFromJourneyRow(row = {}) {
   return normalizeFleetDirection(
     row.direction ||
@@ -1608,8 +1618,9 @@ function fleetMapDataAttrs({
   dest = "",
   datetime = "",
   diverted = false,
+  live = false,
 } = {}) {
-  return `data-trip-id="${esc(tripId || "")}" data-journey-id="${esc(journeyId || "")}" data-vehicle-id="${esc(vehicleId || "")}" data-trail-key="${esc(trailKey || "")}" data-reg="${esc(reg || "")}" data-line="${esc(line || "")}" data-operator="${esc(operator || "")}" data-direction="${esc(normalizeFleetDirection(direction))}" data-dest="${esc(dest || "")}" data-datetime="${esc(datetime || "")}" data-diverted="${diverted ? "1" : "0"}"`;
+  return `data-trip-id="${esc(tripId || "")}" data-journey-id="${esc(journeyId || "")}" data-vehicle-id="${esc(vehicleId || "")}" data-trail-key="${esc(trailKey || "")}" data-reg="${esc(reg || "")}" data-line="${esc(line || "")}" data-operator="${esc(operator || "")}" data-direction="${esc(normalizeFleetDirection(direction))}" data-dest="${esc(dest || "")}" data-datetime="${esc(datetime || "")}" data-diverted="${diverted ? "1" : "0"}" data-live="${live ? "1" : "0"}"`;
 }
 
 /**
@@ -1911,8 +1922,8 @@ export function mergeAtHistoryRows(journeys, atRows) {
     const dup = list.some((existing) => {
       if (!sameServiceLine(existing.route_name, row.route_name)) return false;
       const existingMs = new Date(existing.datetime).getTime();
-      const existingDest = String(existing.destination || "").trim().toLowerCase().replace(/\s+/g, " ");
-      const rowDest = String(row.destination || "").trim().toLowerCase().replace(/\s+/g, " ");
+      const existingDest = normalizeFleetDestination(existing.destination);
+      const rowDest = normalizeFleetDestination(row.destination);
       const existingDir = normalizeFleetDirection(existing.direction);
       const rowDir = normalizeFleetDirection(row.direction);
       return (
@@ -4194,6 +4205,7 @@ export function createFleetBrowser({
                       direction: entry.direction,
                       dest: entry.dest,
                       datetime: entry.recordedAtTime || "",
+                       live: true,
                     })}>Map</button>
                   </li>`;
                 })
@@ -4242,6 +4254,7 @@ export function createFleetBrowser({
                       direction: entry.direction,
                       dest: entry.dest,
                       datetime: entry.recordedAtTime || "",
+                       live: true,
                     })}>Map</button>
                   </li>`;
                 })
@@ -4358,6 +4371,7 @@ export function createFleetBrowser({
                         direction: entry.direction || "",
                         dest: entry.destination || "",
                         datetime: entry.datetime || "",
+                        live: Boolean(entry.live),
                       })}>Map</button>
                     </td>
                   </tr>`;
@@ -4466,6 +4480,7 @@ export function createFleetBrowser({
                               direction: entry.direction || "",
                               dest: entry.destination || "",
                               datetime: entry.datetime || "",
+                        live: Boolean(entry.live),
                             })}>Map</button>`
                           : ""
                       }
@@ -4627,6 +4642,7 @@ export function createFleetBrowser({
                             direction: v.lastRoute?.direction || "",
                             dest,
                             datetime: when,
+                             live: Boolean(v.live),
                           })}>Map</button>`
                         : "";
                       const replayBtn = (v.id || v.reg) && when
@@ -4639,6 +4655,7 @@ export function createFleetBrowser({
                             direction: v.lastRoute?.direction || "",
                             dest,
                             datetime: when,
+                             live: Boolean(v.live),
                           })}>▶ Replay</button>`
                         : "";
                       return `<li class="fleet-list-row">
@@ -4945,7 +4962,8 @@ export function createFleetBrowser({
                                 direction: row.direction || "",
                                 dest: row.destination || "",
                                 datetime: row.datetime || "",
-                                diverted: Boolean(row.diverted),
+                                live: Boolean(row.live),
+                                 diverted: Boolean(row.diverted),
                               })}>Map</button>`;
                             })()
                           }

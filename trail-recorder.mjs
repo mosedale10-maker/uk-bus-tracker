@@ -137,6 +137,16 @@ function normalizeDirection(raw) {
   return "";
 }
 
+function normalizeDestination(raw) {
+  return String(raw || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .replace(/[,–-]\s*(bus station|bus stn|arrival)\b.*$/i, "")
+    .replace(/\s+(bus station|bus stn|arrival|edensor road)\b.*$/i, "")
+    .trim();
+}
+
 /** UK calendar day for segment keys (matches client ukDateKey / fleet replay). */
 function ukDateKey(ms = Date.now()) {
   return new Intl.DateTimeFormat("en-CA", {
@@ -284,22 +294,18 @@ function stabilizeRoutePoint(primary, point, { coach = false } = {}) {
       Number.isFinite(gap) &&
       gap > journeySwitchMs,
   );
-  const previousDestination = String(prev?.destination || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-  const currentDestination = String(rawDest || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
+  const previousDestination = normalizeDestination(prev?.destination);
+  const currentDestination = normalizeDestination(rawDest);
   const destinationChanged = Boolean(
     previousDestination &&
       currentDestination &&
       previousDestination !== currentDestination,
   );
+  const sameTripIdentity = Boolean(rawTrip && prev?.tripId && rawTrip === prev.tripId);
   const identityChanged = Boolean(
-    (rawJourney && rawJourney !== prev?.journeyId) ||
-      (rawTrip && rawTrip !== prev?.tripId),
+    !sameTripIdentity &&
+      ((rawJourney && rawJourney !== prev?.journeyId) ||
+        (rawTrip && rawTrip !== prev?.tripId)),
   );
   const nearPrevious = Boolean(
     prev &&

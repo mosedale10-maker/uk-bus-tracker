@@ -3051,7 +3051,10 @@ function normalizeTrailDestination(raw) {
   return String(raw || "")
     .trim()
     .replace(/\s+/g, " ")
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/[,–-]\s*(bus station|bus stn|arrival)\b.*$/i, "")
+    .replace(/\s+(bus station|bus stn|arrival|edensor road)\b.*$/i, "")
+    .trim();
 }
 
 /** Live follow tracks the bus only — no growing day tail behind it. Map · trail / Map · tails draw per-journey GPS. */
@@ -3457,11 +3460,13 @@ function canJoinRecordedReplayRuns(previous, next, { line = "", direction = "", 
   const nextJourney = String(next.find((p) => p?.journeyId)?.journeyId || "").trim();
   const previousTrip = String(previous.find((p) => p?.tripId)?.tripId || "").trim();
   const nextTrip = String(next.find((p) => p?.tripId)?.tripId || "").trim();
+  const sameTripIdentity = Boolean(previousTrip && nextTrip && previousTrip === nextTrip);
   const identityChanged =
-    Boolean(previousJourney) !== Boolean(nextJourney) ||
-    Boolean(previousTrip) !== Boolean(nextTrip) ||
-    (previousJourney && nextJourney && previousJourney !== nextJourney) ||
-    (previousTrip && nextTrip && previousTrip !== nextTrip);
+    !sameTripIdentity &&
+    (Boolean(previousJourney) !== Boolean(nextJourney) ||
+      Boolean(previousTrip) !== Boolean(nextTrip) ||
+      (previousJourney && nextJourney && previousJourney !== nextJourney) ||
+      (previousTrip && nextTrip && previousTrip !== nextTrip));
   if (identityChanged) {
     const previousDestination = normalizeTrailDestination(
       previous[previous.length - 1]?.destination || previous.find((p) => p?.destination)?.destination,
@@ -5850,11 +5855,13 @@ async function startRoutePlayback({
   diverted = false,
   autoReplay = false,
   recordedReplay = false,
+  live = false,
 } = {}) {
   const playKey = tripId || journeyId || trailKey || vehicleId || regTrailKey(reg);
   const requestedRecordedReplay =
     recordedReplay === true ||
     Boolean(
+      !live &&
       datetime &&
         Number.isFinite(new Date(datetime).getTime()) &&
         Date.now() - new Date(datetime).getTime() > 12 * 60_000,
@@ -5906,12 +5913,17 @@ async function startRoutePlayback({
   let fromMs = 0;
   let toMs = 0;
   let aroundMs = 0;
-  const historicalPlayback = datetime && Date.now() - new Date(datetime).getTime() > 12 * 60_000;
+  const historicalPlayback = Boolean(
+    !live &&
+      datetime &&
+      Number.isFinite(new Date(datetime).getTime()) &&
+      Date.now() - new Date(datetime).getTime() > 12 * 60_000,
+  );
   // A live bus-card Replay follows the bus and must remain clipped to its
   // current marker. Fleet history replays opt into the complete recorded run
   // separately, so they can show the whole journey that was actually stored.
-  const replayRecordedRun = recordedReplay === true;
-  const preserveRecordedRun = Boolean(historicalPlayback || replayRecordedRun);
+  const replayRecordedRun = requestedRecordedReplay;
+  const preserveRecordedRun = replayRecordedRun;
   if (datetime) {
     const start = new Date(datetime).getTime();
     if (Number.isFinite(start)) {
@@ -6924,6 +6936,9 @@ document.addEventListener(
         datetime: playBtn.dataset.datetime || "",
         showTail: true,
         diverted: playBtn.dataset.diverted === "1",
+        live: playBtn.dataset.live === "1",
+        recordedReplay:
+          playBtn.dataset.replayRecorded === "1" || playBtn.dataset.live === "0",
         autoReplay: playBtn.dataset.replay === "1",
       })
         .catch(() => {});
@@ -12585,11 +12600,26 @@ function osrmCoordsFromLngLat(coords) {
   return cleaned.length >= 2 ? cleaned : null;
 }
 
+function trailFetchWithDeadline(url, options = {}, timeoutMs = 12_000) {
+  const controller = new AbortController();
+  const externalSignal = options.signal;
+  const abort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", abort, { once: true });
+  }
+  const timer = setTimeout(abort, timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => {
+    clearTimeout(timer);
+    externalSignal?.removeEventListener?.("abort", abort);
+  });
+}
+
 async function osrmRoadBridge(a, b, signal) {
   if (!a || !b) return null;
   const coords = `${Number(a[1]).toFixed(5)},${Number(a[0]).toFixed(5)};${Number(b[1]).toFixed(5)},${Number(b[0]).toFixed(5)}`;
   try {
-    const routeRes = await fetch(
+    const routeRes = await trailFetchWithDeadline(
       `/api/osrm-route/${coords}?overview=full&geometries=geojson`,
       { signal },
     );
@@ -12604,7 +12634,7 @@ async function osrmRoadBridge(a, b, signal) {
   // Public OSRM rejects large radiuses (TooBig) — keep match snap tight.
   for (const radius of [35, 25]) {
     try {
-      const res = await fetch(
+      const res = await trailFetchWithDeadline(
         `/api/osrm-match/${coords}?overview=full&geometries=geojson&gaps=ignore&radiuses=${radius};${radius}`,
         { signal },
       );
@@ -12689,7 +12719,7 @@ async function matchOsrmChunk(chunk, signal, radius) {
     .map(([lat, lng]) => `${Number(lng).toFixed(5)},${Number(lat).toFixed(5)}`)
     .join(";");
   const radiuses = chunk.map(() => String(radius)).join(";");
-  const res = await fetch(
+  const res = await trailFetchWithDeadline(
     `/api/osrm-match/${coords}?overview=full&geometries=geojson&tidy=true&gaps=ignore&radiuses=${radiuses}`,
     { signal },
   );
@@ -13358,6 +13388,7 @@ const fleetBrowser = fleetContentEl
           showTail: true,
           autoReplay: Boolean(opts?.autoReplay),
           recordedReplay: Boolean(opts?.recordedReplay),
+          live: Boolean(opts?.live),
         });
       },
       onShowRouteTails: (opts) => {
