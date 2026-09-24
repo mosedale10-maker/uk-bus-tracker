@@ -1964,7 +1964,7 @@ function gpsReplayUpdateTravelled(t) {
   if (p && (!latlngs.length || latlngs[latlngs.length - 1][0] !== p.lat || latlngs[latlngs.length - 1][1] !== p.lng)) {
     latlngs.push([p.lat, p.lng]);
   }
-  if (latlngs.length >= 2) line.setLatLngs(latlngs);
+  if (latlngs.length >= 1) line.setLatLngs(latlngs);
 }
 
 function gpsReplayTravelledLine() {
@@ -2081,7 +2081,15 @@ function gpsReplayStart() {
   gpsReplay.raf = 0;
   playbackReplayEl.textContent = "⏸ Pause";
   playbackReplayEl.hidden = false;
-  gpsReplayMarkerAt(gpsReplay.pts[0].lat, gpsReplay.pts[0].lng, gpsReplay.pts[0].heading);
+  // Reset the travelled stroke immediately when a completed replay is replayed
+  // again, rather than leaving the full route visible for one frame.
+  const current = gpsReplayInterp(gpsReplay.pts, gpsReplay.t0 + gpsReplay.pos);
+  gpsReplayUpdateTravelled(gpsReplay.t0 + gpsReplay.pos);
+  gpsReplayMarkerAt(
+    current?.lat ?? gpsReplay.pts[0].lat,
+    current?.lng ?? gpsReplay.pts[0].lng,
+    current?.heading ?? gpsReplay.pts[0].heading,
+  );
   requestAnimationFrame(gpsReplayFrame);
 }
 
@@ -5146,6 +5154,7 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
     lastPing = null,
     isHistorical = false,
     usingTracked = false,
+    replayOnly = false,
     alignBreak = {},
     datetime = "",
     tripStops = [],
@@ -5153,7 +5162,7 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
   playbackLayer.clearLayers();
   const flat = flattenTrailLatLngs(drawPath);
   if (flat.length < 2) return;
-  if (!usingTracked) {
+  if (!usingTracked && !replayOnly) {
     const arrowGps =
       trackedGps.length >= 2
         ? normalizeGpsTrailPoints(trackedGps)
@@ -5180,7 +5189,7 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
       });
     }
   }
-  if (isHistorical) {
+  if (isHistorical && !replayOnly) {
     L.circleMarker(flat[0], {
       radius: 6,
       color: "#ffffff",
@@ -5201,7 +5210,9 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
       .bindTooltip("End", { direction: "top", opacity: 0.9 });
   }
   // Last AVL ping on the road (where arrows / bus orientation come from).
-  if (lastPing && Number.isFinite(lastPing.lat) && Number.isFinite(lastPing.lng)) {
+  // During Replay the animated cursor is authoritative; do not show the
+  // recorded final ping ahead of it.
+  if (!replayOnly && lastPing && Number.isFinite(lastPing.lat) && Number.isFinite(lastPing.lng)) {
     const snap = snapHit(lastPing.lat, lastPing.lng, lastPing.heading, 120) || null;
     const plat = snap?.lat ?? lastPing.lat;
     const plng = snap?.lng ?? lastPing.lng;
@@ -5529,17 +5540,23 @@ async function startRoutePlayback({
     else if (tripLen > 25000 && gpsLen < tripLen * 0.15) usingTracked = false;
   }
   if (diverted && tracked.length >= 2) usingTracked = true;
-  let path = historicalPlayback && tripPath.length >= 2 && !usingTracked
-    ? tripPath
-    : usingTracked
-      ? tracked
-      : tripPath.length >= 2
-        ? tripPath
-        : tracked.length >= 2
-          ? tracked
-          : [];
+  // An explicit Replay must use the recorded GPS line, not the complete planned
+  // timetable path. The replay layer will reveal that line progressively.
+  const replayOnly = Boolean(autoReplay);
+  if (autoReplay) usingTracked = true;
+  let path = replayOnly
+    ? tracked
+    : historicalPlayback && tripPath.length >= 2 && !usingTracked
+      ? tripPath
+      : usingTracked
+        ? tracked
+        : tripPath.length >= 2
+          ? tripPath
+          : tracked.length >= 2
+            ? tracked
+            : [];
   usingTracked = path === tracked && tracked.length >= 2;
-  if (path.length < 2 && tripSegments.some((seg) => seg.length >= 2)) {
+  if (!autoReplay && path.length < 2 && tripSegments.some((seg) => seg.length >= 2)) {
     const fallbackRun = tripSegments.reduce((best, run) => (run.length > best.length ? run : best), tripSegments[0]);
     trackedGps = preserveRecordedRun
       ? fallbackRun
@@ -5550,7 +5567,7 @@ async function startRoutePlayback({
     path = tracked;
     usingTracked = path.length >= 2;
   }
-  if (path.length < 2) {
+  if (path.length < 2 && !(replayOnly && allGps.length >= 2)) {
     showMessage(
       "No GPS path recorded yet for that journey — keep the live map open while it runs so we can record the roads it takes, then try Replay again",
     );
@@ -5597,7 +5614,7 @@ async function startRoutePlayback({
         : 18 * 60_000;
 
     if (isHistorical || !liveKey) {
-      if (autoReplay && usingTracked) {
+      if (replayOnly) {
         // Replay draws its travelled line progressively; do not pin the full
         // historical tail ahead of the replay marker.
         multiTailActiveGroup = null;
@@ -5692,6 +5709,7 @@ async function startRoutePlayback({
     lastPing,
     isHistorical,
     usingTracked,
+    replayOnly,
     alignBreak,
     datetime,
     tripStops,
@@ -5752,7 +5770,7 @@ async function startRoutePlayback({
 
   // Quality upgrade in the background: once OSRM road-matching finishes, redraw the
   // timetable path onto real roads (still clipped at the bus). Never blocks first paint.
-  if (!usingTracked) {
+  if (!usingTracked && !replayOnly) {
     prepareRoadTrail(path, undefined, alignBreak)
       .then((aligned) => {
         if (!playback || playback.playKey !== playKey) return;
