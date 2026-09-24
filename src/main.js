@@ -3689,6 +3689,11 @@ function isStaffsTrailOperator(operator) {
   return STAFFS_TRAIL_NOCS.has(String(operator || "").trim().toUpperCase());
 }
 
+/** Route 36A is displayed against its published A50 alignment when requested. */
+function usesPlannedRouteOverride(line, operator) {
+  return sameServiceLine(line, "36A") && String(operator || "").trim().toUpperCase() === "FPOT";
+}
+
 function trailBreakLimits({ coach = false, staffs = false, operator = "", continuous = false } = {}) {
   if (continuous) {
     return {
@@ -4992,6 +4997,37 @@ async function showFleetRouteTails({
 
   await fetchServerTrailsChunked([...keys], { force: true });
 
+  // For the explicitly requested 36A correction, resolve one published trip
+  // path and use that alignment instead of the recorded Longton diversion.
+  let plannedRoutePath = [];
+  if (usesPlannedRouteOverride(code, opCode) && targets.length) {
+    for (const v of targets.slice(0, 4)) {
+      const directTrip = String(v.trip_id || v.tripId || "").trim();
+      const numericVehicle = String(v.id || v.btId || v.vehicleId || "").trim();
+      let candidateTrip = directTrip;
+      if (!candidateTrip && /^\d+$/.test(numericVehicle)) {
+        candidateTrip = await Promise.race([
+          resolveTripIdForPlayback({
+            vehicleId: numericVehicle,
+            line: code,
+            datetime: v.datetime || v.recordedAtTime || "",
+          }),
+          new Promise((resolve) => setTimeout(() => resolve(""), 3500)),
+        ]);
+      }
+      if (!candidateTrip) continue;
+      const trip = await Promise.race([
+        tripEnds(candidateTrip, { date: String(v.datetime || v.recordedAtTime || "").slice(0, 10) }),
+        new Promise((resolve) => setTimeout(() => resolve(null), 4500)),
+      ]);
+      const candidatePath = Array.isArray(trip?.path) ? thinTrailPoints(trip.path, 55) : [];
+      if (candidatePath.length >= 2) {
+        plannedRoutePath = candidatePath;
+        break;
+      }
+    }
+  }
+
   clearPinnedTrails();
   const focusRegs = new Set(
     targets.map((v) => compactReg(v.reg || v.regLabel || reg || "")).filter(Boolean),
@@ -5091,6 +5127,29 @@ async function showFleetRouteTails({
       seenSeg.add(key);
       drawn.push(key);
     }
+  }
+
+  if (plannedRoutePath.length >= 2) {
+    clearPinnedTrails();
+    const plannedStart = Date.now() - Math.max(60_000, plannedRoutePath.length * 1000);
+    const plannedGps = plannedRoutePath.map((point, index) => ({
+      t: plannedStart + index * 1000,
+      lat: Number(point[0]),
+      lng: Number(point[1]),
+      line: code,
+      operator: opCode,
+      direction: normalizeTrailDirection(direction),
+      journeyId: `planned-${code}`,
+      tripId: "",
+      destination: "",
+    }));
+    const plannedKeys = pinSeparateTripTails([plannedGps], {
+      baseKey: `planned-${code}`,
+      line: code,
+      operator: opCode,
+    });
+    drawn.length = 0;
+    drawn.push(...plannedKeys);
   }
 
   // Line-wide fallback: segment whatever keys we found for the route.
@@ -6031,9 +6090,12 @@ async function startRoutePlayback({
         Number.isFinite(new Date(datetime).getTime()) &&
         Date.now() - new Date(datetime).getTime() > 12 * 60_000,
     );
-  // A diverted service must be drawn from the vehicle's recorded GPS. Never
-  // silently fall back to the published timetable/route geometry.
-  const actualRouteRequired = Boolean(diverted || isDivertedText(dest, line, operator));
+  // A diverted service normally uses recorded GPS. Route 36A is the explicit
+  // exception requested for the published A50 alignment.
+  const plannedRouteOverride = usesPlannedRouteOverride(line, operator);
+  const actualRouteRequired = Boolean(
+    !plannedRouteOverride && (diverted || isDivertedText(dest, line, operator)),
+  );
   if (!playKey) {
     showMessage("No route to show");
     return;
@@ -6318,33 +6380,45 @@ async function startRoutePlayback({
     },
   );
   const coachOp = coachPlayback;
+  // Route 36A explicitly displays the published A50 alignment instead of the
+  // recorded Longton diversion. Other journeys still prefer recorded GPS.
+  const plannedPath = plannedRouteOverride && tripPath.length >= 2 ? tripPath : [];
+  const plannedReplayPoints = plannedPath.length >= 2
+    ? plannedPathReplayPoints(plannedPath, {
+        startMs: trip?.startMs || aroundMs || Date.now(),
+        endMs: trip?.endMs || 0,
+        direction: safeDirection,
+      })
+    : [];
   // Prefer the recorded GPS whenever this journey has a usable recorded run,
   // including historical Fleet rows. A scheduled/timetable path is only a
   // fallback when no GPS was captured; otherwise the row can silently show a
   // planned line instead of the route the bus actually drove.
   const hasRecordedGps = tracked.length >= 2;
-  let usingTracked = hasRecordedGps;
-  if (coachOp && hasRecordedGps) {
+  let usingTracked = hasRecordedGps && !plannedPath;
+  if (coachOp && hasRecordedGps && !plannedPath) {
     // Coaches: always show the roads actually driven — never substitute the full timetable.
     usingTracked = true;
   }
-  // An explicit Replay must use the recorded GPS line, not the complete planned
-  // timetable path. The replay layer will reveal that line progressively.
+  // An explicit Replay uses the recorded GPS line unless the route-specific
+  // planned override is active.
   const replayOnly = Boolean(autoReplay);
-  if (autoReplay) usingTracked = hasRecordedGps;
-  let path = actualRouteRequired
-    ? tracked
-    : replayOnly
+  if (autoReplay && !plannedPath) usingTracked = hasRecordedGps;
+  let path = plannedPath.length >= 2
+    ? plannedPath
+    : actualRouteRequired
       ? tracked
-      : historicalPlayback && tripPath.length >= 2 && !usingTracked
-        ? tripPath
-        : usingTracked
-          ? tracked
-          : tripPath.length >= 2
-            ? tripPath
-            : tracked.length >= 2
-              ? tracked
-              : [];
+      : replayOnly
+        ? tracked
+        : historicalPlayback && tripPath.length >= 2 && !usingTracked
+          ? tripPath
+          : usingTracked
+            ? tracked
+            : tripPath.length >= 2
+              ? tripPath
+              : tracked.length >= 2
+                ? tracked
+                : [];
   usingTracked = path === tracked && tracked.length >= 2;
   if (!autoReplay && path.length < 2 && tripSegments.some((seg) => seg.length >= 2)) {
     const fallbackRun = tripSegments.reduce((best, run) => (run.length > best.length ? run : best), tripSegments[0]);
@@ -6391,7 +6465,22 @@ async function startRoutePlayback({
   // tracked now. Use that position (or the final recorded ping as fallback)
   // for every visible tail; a planned/recorded route must never run past it.
   const isHistorical = preserveRecordedRun;
+  const plannedEnd = plannedPath.length >= 2
+    ? Array.isArray(plannedPath[0]?.[0])
+      ? plannedPath[plannedPath.length - 1]?.[plannedPath[plannedPath.length - 1].length - 1]
+      : plannedPath[plannedPath.length - 1]
+    : null;
+  const plannedEndPing =
+    plannedPath.length >= 2 && Array.isArray(plannedEnd)
+      ? {
+          lat: Number(plannedEnd[0]),
+          lng: Number(plannedEnd[1]),
+          t: Number(trip?.endMs) || aroundMs || Date.now(),
+          source: "planned-route",
+        }
+      : null;
   const lastPing =
+    (plannedPath.length >= 2 && preserveRecordedRun ? plannedEndPing : null) ||
     currentLivePing ||
     (preserveRecordedRun
       ? recordedTrailEndPing(trackedGps)
@@ -6506,7 +6595,7 @@ async function startRoutePlayback({
         : clipTrailPathAtPing(fastBase, clipPing, { failClosed: true })
       : [];
   const scene = {
-    trackedGps,
+    trackedGps: plannedPath.length >= 2 ? [] : trackedGps,
     lastPing,
     isHistorical,
     usingTracked,
@@ -6519,7 +6608,13 @@ async function startRoutePlayback({
   const label =
     lineName +
     (headsign ? " → " + headsign : "") +
-    (actualRouteRequired ? " · actual GPS route" : usingTracked ? " · GPS path" : " · timetable");
+    (plannedPath.length >= 2
+      ? " · A50 route"
+      : actualRouteRequired
+        ? " · actual GPS route"
+        : usingTracked
+          ? " · GPS path"
+          : " · timetable");
   if (requestId !== playbackRequestSeq) return;
   playback = {
     requestId,
@@ -6533,29 +6628,39 @@ async function startRoutePlayback({
     label,
     line: lineName,
     tracked: Boolean(usingTracked),
-    showTail: Boolean(usingTracked),
+    showTail: Boolean(usingTracked || plannedPath.length >= 2),
     stops: tripStops,
     diverted: actualRouteRequired,
     operator: opName,
     headsign,
     date: journeyDate,
     lastPing,
-    replayRecorded: preserveRecordedRun,
+    replayRecorded: preserveRecordedRun && plannedPath.length < 2,
   };
   // Offer a true GPS replay when we recorded pings for this journey. A live
   // replay must never fall back to the un-clipped allGps window.
   let replayPoints =
-    trackedGps.length >= 2
-      ? trackedGps
-      : preserveRecordedRun
-        ? allGps
-        : currentLivePing
-          ? clipGpsPointsAtPing(allGps, currentLivePing)
-          : [];
+    plannedReplayPoints.length >= 2
+      ? plannedReplayPoints
+      : trackedGps.length >= 2
+        ? trackedGps
+        : preserveRecordedRun
+          ? allGps
+          : currentLivePing
+            ? clipGpsPointsAtPing(allGps, currentLivePing)
+            : [];
   if (replayOnly) {
-    const roadSource = replayPoints.length >= 2 ? replayPoints : tracked;
+    const roadSource = plannedPath.length >= 2
+      ? plannedPath
+      : replayPoints.length >= 2
+        ? replayPoints
+        : tracked;
     const roadPath = await prepareRoadTrail(roadSource, undefined, alignBreak);
-    const roadReplayPoints = roadPathToReplayPoints(roadPath, replayPoints, alignBreak);
+    const roadReplayPoints = roadPathToReplayPoints(
+      roadPath,
+      plannedPath.length >= 2 ? plannedReplayPoints : replayPoints,
+      alignBreak,
+    );
     if (roadReplayPoints.length < 2) {
       showMessage("No road-matched GPS is available for this replay yet — the planned route will not be shown");
       return;
@@ -9732,6 +9837,28 @@ function tripPathFromTimes(times) {
     if (loc) push(Number(loc[1]), Number(loc[0]));
   }
   return path;
+}
+
+function plannedPathReplayPoints(path, { startMs = Date.now(), endMs = 0, direction = "" } = {}) {
+  const flat = Array.isArray(path?.[0]?.[0]) ? path.flat() : path;
+  const points = (Array.isArray(flat) ? flat : [])
+    .map((point) => [Number(point?.[0]), Number(point?.[1])])
+    .filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng));
+  if (points.length < 2) return [];
+  const start = Number.isFinite(Number(startMs)) ? Number(startMs) : Date.now();
+  const end = Number.isFinite(Number(endMs)) && Number(endMs) > start ? Number(endMs) : start + Math.max(60_000, points.length * 1000);
+  return points.map(([lat, lng], index) => {
+    const prev = points[Math.max(0, index - 1)];
+    const next = points[Math.min(points.length - 1, index + 1)];
+    return {
+      lat,
+      lng,
+      t: start + ((end - start) * index) / (points.length - 1),
+      heading: segmentBearing(prev, next),
+      direction: normalizeTrailDirection(direction),
+      speedMph: null,
+    };
+  });
 }
 
 async function tripEnds(tripId, { force = false, date = "" } = {}) {
