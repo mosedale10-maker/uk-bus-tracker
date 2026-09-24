@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleBodsOccupancy, handleBodsVehicles, fetchBodsVehiclesJson } from "./bods-occupancy.js";
 import { handleDgAtTimetable } from "./dg-at-timetable.js";
-import { handleFirstStopTimes } from "./first-departures.js";
+import { handleFirstStopTimes, firstOccupancyNearBus } from "./first-departures.js";
 import { startFirstStream, streamOccupancyForBus } from "./first-stream.mjs";
 import {
   initAuthStore,
@@ -454,19 +454,27 @@ app.get("/api/build", (_req, res) => {
 });
 // Live First Bus seat / wheelchair counts (cached gateway proxy — see first-departures.js).
 app.get("/api/first-stop-times", (req, res) => handleFirstStopTimes(req, res));
-app.get("/api/first-occupancy", (req, res) => {
+app.get("/api/first-occupancy", async (req, res) => {
   const url = new URL(req.url, "http://localhost");
   startFirstStream();
   const latRaw = url.searchParams.get("lat");
   const lngRaw = url.searchParams.get("lng");
-  const hit = streamOccupancyForBus({
+  const query = {
     line: String(url.searchParams.get("line") || "").slice(0, 20),
-    dir: String(url.searchParams.get("direction") || url.searchParams.get("dir") || "").slice(0, 20),
-    description: String(url.searchParams.get("destination") || url.searchParams.get("description") || "").slice(0, 160),
+    direction: String(url.searchParams.get("direction") || url.searchParams.get("dir") || "").slice(0, 20),
+    destination: String(url.searchParams.get("destination") || url.searchParams.get("description") || "").slice(0, 160),
     vehicle: String(url.searchParams.get("vehicle") || "").slice(0, 80),
     lat: latRaw == null ? null : Number(latRaw),
     lng: lngRaw == null ? null : Number(lngRaw),
-  });
+  };
+  let hit = streamOccupancyForBus(query);
+  if (!hit) {
+    try {
+      hit = await firstOccupancyNearBus(query);
+    } catch {
+      hit = null;
+    }
+  }
   res.setHeader("Cache-Control", "no-store");
   res.json({
     ok: true,

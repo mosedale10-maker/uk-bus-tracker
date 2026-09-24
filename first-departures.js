@@ -161,6 +161,131 @@ export function enrichTimesWithStream(times, atco) {
   return touched ? out : times;
 }
 
+const FIRST_NEARBY_CACHE_TTL_MS = 15_000;
+const firstNearbyCache = new Map();
+const firstNearbyInflight = new Map();
+
+function firstDirection(value) {
+  const d = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (/^(in|inbound)$/.test(d)) return "in";
+  if (/^(out|outbound)$/.test(d)) return "out";
+  return "";
+}
+
+function firstText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ");
+}
+
+function firstRowMatches(row, { line = "", destination = "", direction = "" } = {}) {
+  if (!row || typeof row !== "object") return false;
+  const rowLine = String(row.line || row.line_name || row.ServiceNumber || row["line-name"] || "")
+    .trim()
+    .toUpperCase();
+  if (line && rowLine !== String(line).trim().toUpperCase()) return false;
+  const rowDirection = firstDirection(row.lineDirection || row["line-direction"] || row.direction);
+  const wantDirection = firstDirection(direction);
+  if (wantDirection && rowDirection && rowDirection !== wantDirection) return false;
+  const operator = String(row.operator || row.operator_name || row.operatorName || "");
+  if (operator && !/FPOT|First/i.test(operator)) return false;
+  const actualDestination = firstText(row.direction || row.Destination || row.destination);
+  const wantedDestination = firstText(destination);
+  if (wantedDestination && actualDestination) {
+    const matches =
+      actualDestination === wantedDestination ||
+      actualDestination.includes(wantedDestination) ||
+      wantedDestination.includes(actualDestination) ||
+      actualDestination.split(" ").some((word) => word.length >= 5 && wantedDestination.includes(word));
+    if (!matches) return false;
+  }
+  return true;
+}
+
+function firstOccupancyFromRow(row) {
+  const types = row?.occupancy?.types;
+  if (!Array.isArray(types) || !types.length) return null;
+  return {
+    occupancy: row.occupancy,
+    vehicle_id: String(row.vehicle_id || row.vehicleId || ""),
+    recorded_at_time: String(row.recorded_at_time || row.scheduledTime || ""),
+    description: String(row.direction || row.Destination || row.destination || ""),
+  };
+}
+
+async function firstNearbyStops(lat, lng) {
+  const key = appKey();
+  if (!key || !Number.isFinite(lat) || !Number.isFinite(lng)) return [];
+  const jwt = await gatewayToken(key);
+  const url = `${BASE}/bus/stop/nearby?Lat=${encodeURIComponent(String(lat))}&Lng=${encodeURIComponent(String(lng))}`;
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      "Ocp-Apim-Subscription-Key": key,
+      Accept: "application/json",
+    },
+    signal: AbortSignal.timeout(6_000),
+  });
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => null);
+  return Array.isArray(data?.["bus-data"]) ? data["bus-data"] : [];
+}
+
+/**
+ * Find a live First departure near a bus when the websocket has not published
+ * that vehicle yet. Nearby stop boards are only a fallback; rows still have to
+ * match the card's line/direction/destination and contain app occupancy types.
+ */
+export async function firstOccupancyNearBus({ line = "", destination = "", direction = "", lat = null, lng = null } = {}) {
+  if (!String(line || "").trim() || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const cacheKey = [
+    String(line).trim().toUpperCase(),
+    firstText(destination).slice(0, 80),
+    firstDirection(direction),
+    Number(lat).toFixed(3),
+    Number(lng).toFixed(3),
+  ].join("|");
+  const cached = firstNearbyCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < FIRST_NEARBY_CACHE_TTL_MS) return cached.value;
+  if (firstNearbyInflight.has(cacheKey)) return firstNearbyInflight.get(cacheKey);
+  const job = (async () => {
+    startFirstStream();
+    const nearby = await firstNearbyStops(Number(lat), Number(lng));
+    const candidates = nearby
+      .map((row) => String(row?.["atco-code"] || row?.atco || row?.id || "").trim())
+      .filter(Boolean)
+      .slice(0, 8);
+    const results = await Promise.allSettled(
+      candidates.map(async (atco) => {
+        const body = await loadStopTimes(atco);
+        return enrichTimesWithStream(body.times, atco);
+      }),
+    );
+    const matches = [];
+    for (const result of results) {
+      if (result.status !== "fulfilled") continue;
+      for (const row of result.value || []) {
+        if (!firstRowMatches(row, { line, destination, direction })) continue;
+        const hit = firstOccupancyFromRow(row);
+        if (!hit) continue;
+        const expected = Number(row.expectedTimeInMinutes);
+        matches.push({ hit, expected: Number.isFinite(expected) ? Math.abs(expected) : 1e6 });
+      }
+    }
+    matches.sort((a, b) => a.expected - b.expected);
+    return matches[0]?.hit || null;
+  })()
+    .then((value) => {
+      firstNearbyCache.set(cacheKey, { at: Date.now(), value });
+      return value;
+    })
+    .finally(() => firstNearbyInflight.delete(cacheKey));
+  firstNearbyInflight.set(cacheKey, job);
+  return job;
+}
+
 export async function handleFirstStopTimes(req, res) {
   if (req.method !== "GET") {
     res.statusCode = 405;
