@@ -2099,6 +2099,84 @@ export async function fetchCoachHistoryFromTrails({
   }
 }
 
+const FLEET_REPLAY_DAYS = 7;
+const vehicleReplayCache = new Map();
+const vehicleReplayInflight = new Map();
+
+/** Trail-store keys used to find a vehicle's recent GPS runs. */
+function vehicleReplayTrailKeys(vehicle = {}) {
+  const id = String(vehicle.id || "").trim();
+  const reg = compactQuery(vehicle.reg);
+  const noc = String(vehicle.operator?.noc || vehicle.operator?.id || "").trim().toUpperCase();
+  const keys = [
+    id,
+    /^\d+$/.test(id) ? `jny:${id}` : "",
+    reg ? `reg:${reg}` : "",
+  ];
+  // First/BODS recorders commonly use a normalised BODS vehicle key as well as reg:.
+  if (noc && /^[A-Z]{2}\d{2}[A-Z]{3}$/.test(reg)) {
+    const bodsKey = `bods-${noc}-${noc}-${reg.slice(0, 4)}_${reg.slice(4)}`;
+    keys.push(bodsKey, bodsKey.replace("_", ""));
+  }
+  return [...new Set(keys.filter(Boolean))].slice(0, 12);
+}
+
+/** Build replay rows from the seven-day GPS trail store for one Fleet vehicle. */
+async function fetchVehicleReplayRuns(vehicle = {}, { days = FLEET_REPLAY_DAYS } = {}) {
+  const trailKeys = vehicleReplayTrailKeys(vehicle);
+  if (!trailKeys.length) return [];
+  const noc = String(vehicle.operator?.noc || vehicle.operator?.id || "").trim().toUpperCase();
+  const keepDays = Math.min(FLEET_REPLAY_DAYS, Math.max(1, Number(days) || FLEET_REPLAY_DAYS));
+  const busMode = !["FLIX", "NATX"].includes(noc);
+  const rows = await fetchCoachHistoryFromTrails({
+    trailKeys,
+    line: "",
+    days: keepDays,
+    operator: noc,
+    busMode,
+  });
+  const cutoff = Date.now() - keepDays * 86_400_000;
+  const seen = new Set();
+  return rows
+    .filter((row) => {
+      const when = Date.parse(row.datetime || "");
+      return !Number.isFinite(when) || when >= cutoff;
+    })
+    .map((row, index) => ({
+      ...row,
+      id: `replay-${row.id || `${row.trailKey || trailKeys[0]}-${row.datetime || index}`}`,
+      replayTrailKey: String(row.trailKey || trailKeys[0] || ""),
+      vehicleId: String(vehicle.id || ""),
+      reg: vehicle.reg || row.reg || "",
+      operator: row.operator || (noc ? { noc, id: noc } : null),
+    }))
+    .filter((row) => {
+      const key = `${row.datetime || ""}|${row.route_name || ""}|${row.replayTrailKey}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => String(b.datetime || "").localeCompare(String(a.datetime || "")))
+    .slice(0, 80);
+}
+
+async function cachedVehicleReplayRuns(vehicle = {}) {
+  const trailKeys = vehicleReplayTrailKeys(vehicle);
+  const cacheKey = trailKeys.join("|");
+  if (!cacheKey) return [];
+  const hit = vehicleReplayCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < 60_000) return hit.rows;
+  if (vehicleReplayInflight.has(cacheKey)) return vehicleReplayInflight.get(cacheKey);
+  const promise = fetchVehicleReplayRuns(vehicle)
+    .then((rows) => {
+      vehicleReplayCache.set(cacheKey, { at: Date.now(), rows });
+      return rows;
+    })
+    .finally(() => vehicleReplayInflight.delete(cacheKey));
+  vehicleReplayInflight.set(cacheKey, promise);
+  return promise;
+}
+
 function liverySwatch(livery) {
   const colour = livery?.left || livery?.right || "#64748b";
   return `<span class="fleet-livery-swatch" style="background:${esc(colour)}" title="${esc(livery?.name || "")}"></span>`;
@@ -3239,6 +3317,9 @@ export function createFleetBrowser({
     savedError: "",
     vehicleRoutes: [],
     vehicleRoutesLoading: false,
+    replayRuns: [],
+    replayRunsLoading: false,
+    replayRunsError: "",
     photo: null,
     photoPending: false,
     photoStatus: "",
@@ -3704,7 +3785,7 @@ export function createFleetBrowser({
     const list = state.savedVehicles;
     return `<section class="fleet-section fleet-saved">
       <h2 class="fleet-section-title">Your vehicles${list.length ? ` · ${list.length}` : ""}</h2>
-      <p class="fleet-muted fleet-section-note">Add a registration to keep a bus here. Route numbers (27, 27A, …) come from its recorded journeys.</p>
+      <p class="fleet-muted fleet-section-note">Add a registration to keep a bus here. Route numbers (27, 27A, …) come from its recorded journeys. Replay history is kept for the last 7 days.</p>
       <form id="fleet-add-vehicle-form" class="fleet-add-vehicle">
         <label class="sr-only" for="fleet-add-vehicle-query">Vehicle registration</label>
         <input id="fleet-add-vehicle-query" type="search" placeholder="Vehicle reg e.g. YX23 ABC" autocomplete="off" />
@@ -3725,13 +3806,25 @@ export function createFleetBrowser({
                 const lastRoute = latest
                   ? { route: latest.line, dest: latest.dest, trackedAt: latest.lastAt }
                   : null;
+                const replayWhen = lastRoute?.trackedAt || latest?.lastAt || "";
+                const replayBtn = row.id && replayWhen
+                  ? `<button type="button" class="fleet-link-btn fleet-list-replay" data-action="play-journey" data-replay="1" ${fleetMapDataAttrs({
+                      vehicleId: row.id,
+                      trailKey: row.id || `reg:${compactQuery(row.reg)}`,
+                      reg: row.reg || "",
+                      line: lastRoute?.route || latest?.line || "",
+                      operator: row.operatorName || "",
+                      dest: lastRoute?.dest || latest?.dest || "",
+                      datetime: replayWhen,
+                    })}>▶ Replay</button>`
+                  : "";
                 return `<li class="fleet-saved-card">
                   <div class="fleet-saved-head">
                     <button type="button" class="fleet-list-btn" data-action="open-vehicle" data-id="${esc(row.id)}">
                       <span class="fleet-list-main">${esc(row.fleet || "—")} ${plateHtml(row.reg)}${lastRouteHtml(lastRoute)}${lastTrackedHtml(lastRoute)}</span>
                       <span class="fleet-list-sub">${esc(row.operatorName || "Saved bus")}${routes.length ? ` · ${routes.length} route${routes.length === 1 ? "" : "s"}` : ""}</span>
                     </button>
-                    <button type="button" class="fleet-saved-remove" data-action="remove-saved-vehicle" data-id="${esc(row.id)}" data-reg="${esc(row.reg)}" title="Remove ${esc(row.reg || "vehicle")}" aria-label="Remove ${esc(row.reg || "vehicle")}">Remove</button>
+                    <div class="fleet-saved-actions">${replayBtn}<button type="button" class="fleet-saved-remove" data-action="remove-saved-vehicle" data-id="${esc(row.id)}" data-reg="${esc(row.reg)}" title="Remove ${esc(row.reg || "vehicle")}" aria-label="Remove ${esc(row.reg || "vehicle")}">Remove</button></div>
                   </div>
                   ${renderRouteNumberChips(routes, {
                     loading: state.savedBusy && !routes.length,
@@ -4479,12 +4572,24 @@ export function createFleetBrowser({
                             datetime: when,
                           })}>Map</button>`
                         : "";
+                      const replayBtn = (v.id || v.reg) && when
+                        ? `<button type="button" class="fleet-link-btn fleet-list-replay" data-action="play-journey" data-replay="1" ${fleetMapDataAttrs({
+                            vehicleId: v.id || "",
+                            trailKey: v.id || `reg:${compactQuery(v.reg)}`,
+                            reg: v.reg || "",
+                            line: route,
+                            operator: op.noc || "",
+                            direction: v.lastRoute?.direction || "",
+                            dest,
+                            datetime: when,
+                          })}>▶ Replay</button>`
+                        : "";
                       return `<li class="fleet-list-row">
                         <button type="button" class="fleet-list-btn" data-action="open-vehicle" data-id="${esc(v.id)}" data-line="${esc(route)}">
                           ${vehicleMainHtml(v)}
                           <span class="fleet-list-sub">${esc(v.vehicle_type?.name || "Unknown type")}${v.livery?.name ? ` · ${esc(v.livery.name)}` : ""}</span>
                         </button>
-                        ${mapBtn}
+                        ${replayBtn}${mapBtn}
                       </li>`;
                     })
                     .join("")}</ul>`
@@ -4539,6 +4644,51 @@ export function createFleetBrowser({
           : vehiclesHtml
       }
     `;
+  }
+
+  function renderVehicleReplayRuns(v) {
+    const runs = Array.isArray(state.replayRuns) ? state.replayRuns : [];
+    const count = runs.length;
+    const body = state.replayRunsLoading && !count
+      ? `<p class="fleet-muted">Loading recorded GPS replays…</p>`
+      : state.replayRunsError
+        ? `<p class="fleet-error">${esc(state.replayRunsError)}</p>`
+        : count
+          ? `<ul class="fleet-list fleet-replay-list">${runs
+              .map((row) => {
+                const line = row.route_name && row.route_name !== "?" ? row.route_name : "GPS run";
+                const when = formatTrackedWhen({ trackedAt: row.datetime, date: row.date });
+                const direction = normalizeFleetDirection(row.direction);
+                const directionLabel = direction === "in" ? "Inbound" : direction === "out" ? "Outbound" : "";
+                const destination = row.destination || "Recorded GPS route";
+                const replayAttrs = fleetMapDataAttrs({
+                  tripId: row.trip_id || row.tripId || "",
+                  journeyId: row.journey_id || row.journeyId || "",
+                  vehicleId: v.id || row.vehicleId || "",
+                  trailKey: row.replayTrailKey || row.trailKey || v.id || "",
+                  reg: v.reg || row.reg || "",
+                  line: row.route_name && row.route_name !== "?" ? row.route_name : "",
+                  operator: v.operator?.noc || v.operator?.id || "",
+                  direction: row.direction || "",
+                  dest: row.destination || "",
+                  datetime: row.datetime || "",
+                });
+                return `<li class="fleet-list-row fleet-replay-row">
+                  <div class="fleet-list-btn fleet-replay-info">
+                    <span class="fleet-list-main"><span class="fleet-route">${esc(line)}</span>${when ? `<span class="fleet-last-tracked">${esc(when)}</span>` : ""}</span>
+                    <span class="fleet-list-sub">${esc(destination)}${directionLabel ? ` · ${esc(directionLabel)}` : ""}</span>
+                  </div>
+                  <button type="button" class="fleet-link-btn fleet-list-replay" data-action="play-journey" data-replay="1" ${replayAttrs}>▶ Replay</button>
+                </li>`;
+              })
+              .join("")}</ul>`
+          : `<p class="fleet-muted">No GPS replay recorded for this bus in the last 7 days.</p>`;
+    return `<section class="fleet-section fleet-vehicle-replays">
+      <h2 class="fleet-section-title">Replay · last 7 days${count ? ` · ${count}` : ""}</h2>
+      <p class="fleet-muted fleet-section-note">Recorded GPS runs for this bus, newest first. Replay uses the roads and positions actually recorded; older runs are removed after 7 days.</p>
+      ${state.replayRunsLoading && count ? `<p class="fleet-muted">Refreshing recorded replays…</p>` : ""}
+      ${body}
+    </section>`;
   }
 
   function renderVehicle() {
@@ -4659,6 +4809,7 @@ export function createFleetBrowser({
           openLine: true,
         })}
       </section>
+      ${renderVehicleReplayRuns(v)}
       <label class="fleet-date">
         <span class="sr-only">Date</span>
         <select id="fleet-date">${Array.from({ length: 14 }, (_, i) => {
@@ -4775,6 +4926,9 @@ export function createFleetBrowser({
     state.vehicleHits = [];
     state.vehicleRoutes = [];
     state.vehicleRoutesLoading = false;
+    state.replayRuns = [];
+    state.replayRunsLoading = false;
+    state.replayRunsError = "";
     if (compactQuery(query).length >= 2) {
       setLoading(true);
       try {
@@ -4829,6 +4983,34 @@ export function createFleetBrowser({
       }
     }
     return [...map.values()].sort((a, b) => compareLineNames(a.line, b.line));
+  }
+
+  async function loadVehicleReplayRuns(vehicle, token = vehicleLoadToken) {
+    const id = String(vehicle?.id || "").trim();
+    const reg = String(vehicle?.reg || "").trim();
+    if (!id && !reg) {
+      state.replayRuns = [];
+      state.replayRunsLoading = false;
+      state.replayRunsError = "This vehicle has no replay identity yet.";
+      return;
+    }
+    state.replayRunsLoading = true;
+    state.replayRunsError = "";
+    if (state.view === "vehicle" && String(state.vehicle?.id) === id) render();
+    try {
+      const rows = await cachedVehicleReplayRuns(vehicle);
+      if (token !== vehicleLoadToken || String(state.vehicle?.id) !== id) return;
+      state.replayRuns = Array.isArray(rows) ? rows : [];
+    } catch (error) {
+      if (token !== vehicleLoadToken || String(state.vehicle?.id) !== id) return;
+      state.replayRuns = [];
+      state.replayRunsError = error?.message || "Could not load recorded replays";
+    } finally {
+      if (token === vehicleLoadToken && String(state.vehicle?.id) === id) {
+        state.replayRunsLoading = false;
+        if (state.view === "vehicle") render();
+      }
+    }
   }
 
   async function loadVehicleRouteSummary(vehicle) {
@@ -5564,6 +5746,9 @@ export function createFleetBrowser({
     if (String(state.vehicle?.id) !== String(id)) {
       state.vehicleRoutes = [];
       state.vehicleRoutesLoading = true;
+      state.replayRuns = [];
+      state.replayRunsLoading = false;
+      state.replayRunsError = "";
     }
 
     // First paint: shell from map/live seed (or keep prior vehicle if same id) before network.
@@ -5838,6 +6023,7 @@ export function createFleetBrowser({
       // Paint today's bustimes journeys immediately — do not wait on 7-day AT trails.
       applyJourneysToState(vehicle, journeys, state.lineFilter);
       void loadVehicleRouteSummary(vehicle);
+      void loadVehicleReplayRuns(vehicle, token);
 
       void mergeAtHistoryDeferred({
         token,
@@ -6027,6 +6213,7 @@ export function createFleetBrowser({
         direction: btn.dataset.direction,
         dest: btn.dataset.dest,
         datetime: btn.dataset.datetime,
+        autoReplay: btn.dataset.replay === "1",
       });
     }
   });

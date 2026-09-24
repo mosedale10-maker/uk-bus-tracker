@@ -5285,6 +5285,11 @@ async function startRoutePlayback({
   let toMs = 0;
   let aroundMs = 0;
   const historicalPlayback = datetime && Date.now() - new Date(datetime).getTime() > 12 * 60_000;
+  // An explicit Replay action is a recorded-run view, even when the run is
+  // recent. This keeps the animation on the stored pings instead of clipping
+  // it to a still-live bus marker. Ordinary Show route remains live-clipped.
+  const replayRecordedRun = autoReplay === true;
+  const preserveRecordedRun = Boolean(historicalPlayback || replayRecordedRun);
   if (datetime) {
     const start = new Date(datetime).getTime();
     if (Number.isFinite(start)) {
@@ -5435,11 +5440,16 @@ async function startRoutePlayback({
       aroundMs: aroundMs || Number(allGps[0].t) || 0,
     });
   }
+  if (replayRecordedRun) {
+    // Never animate a clock-skewed/future recorder point as if it were history.
+    const maxRecordedT = Date.now() + OBSERVED_STOP_FUTURE_GRACE_MS;
+    trackedGps = trackedGps.filter((point) => Number(point.t) <= maxRecordedT);
+  }
 
   // A live route may already contain a few recorder pings beyond the bus's current
   // position. Cut the selected run at the bus before building the path, timetable
   // observations, replay, or pinned tail; historical replays keep the whole run.
-  const currentLivePing = historicalPlayback
+  const currentLivePing = preserveRecordedRun
     ? null
     : livePingForTrailFilter(
         {
@@ -5512,7 +5522,7 @@ async function startRoutePlayback({
   }
   if (path.length < 2) {
     showMessage(
-      "No GPS path recorded yet for that coach — keep the live map open while it runs so we can record the roads it takes, then open Map again",
+      "No GPS path recorded yet for that journey — keep the live map open while it runs so we can record the roads it takes, then try Replay again",
     );
     return;
   }
@@ -5535,8 +5545,7 @@ async function startRoutePlayback({
 
   const lastPing =
     currentLivePing || resolvePlaybackVehiclePing({ vehicleId, trailKey, reg, trackedGps });
-  const histAgeMs = datetime ? Date.now() - new Date(datetime).getTime() : NaN;
-  const isHistorical = Number.isFinite(histAgeMs) && histAgeMs > 12 * 60_000;
+  const isHistorical = preserveRecordedRun;
   const clipPing = isHistorical ? null : lastPing;
 
   showMessage(usingTracked ? "Matching GPS to roads…" : "Matching route to roads…");
@@ -12493,7 +12502,7 @@ const fleetBrowser = fleetContentEl
       },
       onPlayJourney: (opts) => {
         setAppTab("map");
-        startRoutePlayback({ ...opts, showTail: true });
+        startRoutePlayback({ ...opts, showTail: true, autoReplay: Boolean(opts?.autoReplay) });
       },
       onShowRouteTails: (opts) => {
         showFleetRouteTails(opts);

@@ -4724,10 +4724,20 @@ html.map-night .leaflet-control-container {
   min-width: 0;
 }
 
-.fleet-list-map {
+.fleet-list-map,
+.fleet-list-replay {
   flex: 0 0 auto;
   align-self: center;
   margin-right: 10px;
+  white-space: nowrap;
+}
+
+.fleet-replay-info {
+  cursor: default;
+}
+
+.fleet-replay-info:hover {
+  background: transparent;
 }
 
 .fleet-list-btn {
@@ -5355,6 +5365,12 @@ button.fleet-route:hover {
   gap: 8px;
   align-items: stretch;
   margin-bottom: 8px;
+}
+
+.fleet-saved-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .fleet-saved-remove {
