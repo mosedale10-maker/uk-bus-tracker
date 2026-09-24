@@ -12806,12 +12806,17 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
     isStaffsTrailOperator(breakOpts.operator) ||
     isAltonLine(breakOpts.line);
   const actualRoute = Boolean(breakOpts.actualRoute);
-  const key = `${trailPathHash(latlngs)}|${actualRoute ? "actual" : coach ? "coach" : staffs ? "staffs" : "bus"}|v7`;
+  const key = `${trailPathHash(latlngs)}|${actualRoute ? "actual" : coach ? "coach" : staffs ? "staffs" : "bus"}|v8`;
   if (trailAlignCache.has(key)) return trailAlignCache.get(key);
   if (trailAlignPending.has(key)) return trailAlignPending.get(key);
   const pending = (async () => {
     try {
-      await ensureSnapRoadsForPath(latlngs, signal);
+      // Warm the local road tiles, but do not let a slow tile fetch block the
+      // OSRM road match that keeps live tails visible.
+      await Promise.race([
+        ensureSnapRoadsForPath(latlngs, signal).catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, 900)),
+      ]);
       const flat = Array.isArray(latlngs?.[0]?.[0]) ? latlngs.flat() : latlngs;
       let aligned = null;
       let segs = [];
