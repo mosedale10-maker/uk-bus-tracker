@@ -5254,8 +5254,26 @@ function pinVehicleTrail({
   updatePlaybackChrome();
 }
 
+function clearTrailArtifacts(layer) {
+  if (!layer?.eachLayer) return;
+  layer.eachLayer((child) => {
+    const className = String(child?.options?.className || "");
+    const title = String(child?.options?.title || "");
+    const element = child?.getElement?.();
+    const elementClass = String(element?.className || "");
+    const isTrailLine = className.includes("trail-line") || elementClass.includes("trail-line");
+    const isTrailArrow =
+      title.startsWith("Bus here at") ||
+      title === "Tracked position" ||
+      elementClass.includes("trail-arrow-icon") ||
+      Boolean(element?.querySelector?.(".trail-arrow-chevron"));
+    if (isTrailLine || isTrailArrow) layer.removeLayer(child);
+  });
+}
+
 function clearPinnedTrails() {
   for (const pair of pinnedTrailLines.values()) removeTrailPair(pair, liveTrailLayer);
+  clearTrailArtifacts(liveTrailLayer);
   pinnedTrailLines.clear();
   pinnedTrailKeys.clear();
   pinnedTrailFilters.clear();
@@ -5264,12 +5282,19 @@ function clearPinnedTrails() {
 }
 
 function setLiveTrailFocus(key) {
-  liveTrailKey = key ? String(key) : "";
+  const nextKey = key ? String(key) : "";
+  if (liveTrailKey && liveTrailKey !== nextKey && liveTrailLine) {
+    removeTrailPair(liveTrailLine, liveTrailLayer);
+    liveTrailLine = null;
+    clearTrailArtifacts(liveTrailLayer);
+  }
+  liveTrailKey = nextKey;
   if (!liveTrailKey) {
     if (liveTrailLine) {
       removeTrailPair(liveTrailLine, liveTrailLayer);
       liveTrailLine = null;
     }
+    clearTrailArtifacts(liveTrailLayer);
     return;
   }
   rememberTrailVehicle(liveTrailKey);
@@ -5923,7 +5948,7 @@ async function startRoutePlayback({
   // current marker. Fleet history replays opt into the complete recorded run
   // separately, so they can show the whole journey that was actually stored.
   const replayRecordedRun = requestedRecordedReplay;
-  const preserveRecordedRun = replayRecordedRun;
+  let preserveRecordedRun = replayRecordedRun;
   if (datetime) {
     const start = new Date(datetime).getTime();
     if (Number.isFinite(start)) {
@@ -6071,6 +6096,26 @@ async function startRoutePlayback({
     });
     trackedRunIndex = findTrailRunIndex(tripSegments, trackedGps, aroundMs);
   }
+  const liveFilter = {
+    liveVehicleId: vehicleId,
+    liveTrailKey: trailKey,
+    liveReg: reg,
+    liveJourneyId: safeJourneyId,
+    liveTripId: resolvedTripId || tripId,
+  };
+  const lastRecordedT = Number(trackedGps[trackedGps.length - 1]?.t);
+  const recordedRunFresh =
+    Number.isFinite(lastRecordedT) &&
+    Date.now() - lastRecordedT >= 0 &&
+    Date.now() - lastRecordedT <= 90_000;
+  const candidateLivePing = livePingForTrailFilter(liveFilter, trackedGps);
+  // A Fleet row can still be marked historical while its final GPS ping is
+  // only a few seconds old (the recorder updates after the row was rendered).
+  // Follow that run live until it goes quiet; explicit Replay remains recorded.
+  if (preserveRecordedRun && !autoReplay && recordedRunFresh && (live || candidateLivePing)) {
+    preserveRecordedRun = false;
+  }
+
   if (preserveRecordedRun && trackedRunIndex >= 0 && tripSegments.length > 1) {
     trackedGps = mergeRecordedReplayRuns(tripSegments, trackedRunIndex, {
       line: line || trackedGps.find((p) => p?.line)?.line || "",
@@ -6087,18 +6132,7 @@ async function startRoutePlayback({
   // A live route may already contain a few recorder pings beyond the bus's current
   // position. Cut the selected run at the bus before building the path, timetable
   // observations, replay, or pinned tail; historical replays keep the whole run.
-  const currentLivePing = preserveRecordedRun
-    ? null
-    : livePingForTrailFilter(
-        {
-          liveVehicleId: vehicleId,
-          liveTrailKey: trailKey,
-          liveReg: reg,
-          liveJourneyId: safeJourneyId,
-          liveTripId: resolvedTripId || tripId,
-        },
-        trackedGps,
-      );
+  const currentLivePing = preserveRecordedRun ? null : candidateLivePing;
   if (currentLivePing) {
     trackedGps = clipGpsPointsAtPing(trackedGps, currentLivePing);
   }
