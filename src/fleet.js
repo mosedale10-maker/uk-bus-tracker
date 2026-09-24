@@ -5539,7 +5539,15 @@ export function createFleetBrowser({
     // Vehicle day view always lists every route for that day (no per-line chips).
     state.lineFilter = "";
     const knownVehicle = !opts.seed
-      ? [...(state.vehicles || []), ...(state.vehicleHits || []), ...(state.savedVehicles || [])].find(
+      ? [
+          ...(state.vehicles || []),
+          ...(state.vehicleHits || []),
+          ...(state.routeVehicles || []),
+          ...(state.atVehicles || []),
+          ...(state.schoolVehicles || []),
+          ...(state.matchdayVehicles || []),
+          ...(state.savedVehicles || []),
+        ].find(
           (row) => String(row?.id || "") === String(id),
         )
       : null;
