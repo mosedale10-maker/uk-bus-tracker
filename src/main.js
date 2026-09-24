@@ -6295,7 +6295,7 @@ async function startRoutePlayback({
   const exactJourneyGps = safeJourneyId
     ? allGps.filter((point) => String(point.journeyId || "") === safeJourneyId)
     : [];
-  const exactTripGps = !safeJourneyId && resolvedTripId
+  const exactTripGps = resolvedTripId
     ? allGps.filter((point) => String(point.tripId || "") === String(resolvedTripId))
     : [];
   const scopedGps = exactJourneyGps.length >= 2
@@ -6322,12 +6322,21 @@ async function startRoutePlayback({
       trackedGps = match;
       trackedRunIndex = tripSegments.indexOf(match);
     } else if (wantJny && allGps.filter((p) => String(p.journeyId || "") === wantJny).length < 2) {
-      // Never substitute a nearby return leg when the selected Fleet journey
-      // has no usable GPS of its own. A planned route may be used as a labelled
-      // fallback below, but it must not masquerade as this journey's tail.
-      exactJourneyUnavailable = true;
-      trackedGps = [];
-      trackedRunIndex = -1;
+      // Bustimes history IDs and recorder IDs can differ. If the exact journey
+      // is absent, use the nearest same-direction stint only when the selected
+      // trip/time still identifies a real GPS run.
+      const nearby = clipPointsToSingleDirectionRun(scopedGps, {
+        direction: safeDirection,
+        aroundMs: aroundMs || (scopedGps[0] ? Number(scopedGps[0].t) : 0),
+      });
+      if (nearby.length >= 2) {
+        trackedGps = nearby;
+        trackedRunIndex = findTrailRunIndex(tripSegments, trackedGps, aroundMs);
+      } else {
+        exactJourneyUnavailable = true;
+        trackedGps = [];
+        trackedRunIndex = -1;
+      }
     } else {
       trackedGps = clipPointsToSingleDirectionRun(scopedGps, {
         direction: safeDirection,
