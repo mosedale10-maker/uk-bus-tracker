@@ -255,12 +255,9 @@ const ROAD_NOTICES = [
       [52.98865, -2.1337],
       [52.98845, -2.1332],
     ],
-    // TEST WINDOW — temporarily active all day so the sign can be checked on the map.
-    // Restore the real closure times once testing is done:
-    //   from:  "2026-09-24T19:00:00+01:00"   (7pm Thu 24th)
-    //   until: "2026-09-27T15:00:00+01:00"   (3pm Sun 27th)
-    from: "2026-09-24T00:00:00+01:00",
-    until: "2026-09-24T23:59:00+01:00",
+    // Sign goes live 6:40pm, though the wording above still says 7pm.
+    from: "2026-09-24T18:40:00+01:00",
+    until: "2026-09-27T15:00:00+01:00",
   },
 ];
 
