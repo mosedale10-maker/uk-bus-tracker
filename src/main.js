@@ -6068,28 +6068,20 @@ async function startRoutePlayback({
     },
   );
   const coachOp = coachPlayback;
-  // Prefer real GPS where the coach/bus actually drove. Timetable is fallback only.
-  // GPS-tail playbacks (Staffs locals, coaches, AT) never hard-fail on missing
-  // bustimes geometry — the recorded GPS path IS the route.
-  let usingTracked = !historicalPlayback && tracked.length >= 2;
-  if (historicalPlayback && tripPath.length < 2 && tracked.length >= 2) {
-    // Historical run with GPS but no bustimes geometry — replay the GPS tail instead.
-    usingTracked = true;
-  }
-  if (coachOp && tracked.length >= 2) {
+  // Prefer the recorded GPS whenever this journey has a usable recorded run,
+  // including historical Fleet rows. A scheduled/timetable path is only a
+  // fallback when no GPS was captured; otherwise the row can silently show a
+  // planned line instead of the route the bus actually drove.
+  const hasRecordedGps = tracked.length >= 2;
+  let usingTracked = hasRecordedGps;
+  if (coachOp && hasRecordedGps) {
     // Coaches: always show the roads actually driven — never substitute the full timetable.
     usingTracked = true;
-  } else if (!historicalPlayback && !coachOp && tripPath.length >= 2 && tracked.length >= 2) {
-    const gpsLen = pathLengthMeters(tracked);
-    const tripLen = pathLengthMeters(tripPath);
-    if (gpsLen >= 800 || trackedGps.length >= 6) usingTracked = true;
-    else if (tripLen > 25000 && gpsLen < tripLen * 0.15) usingTracked = false;
   }
-  if (actualRouteRequired && tracked.length >= 2) usingTracked = true;
   // An explicit Replay must use the recorded GPS line, not the complete planned
   // timetable path. The replay layer will reveal that line progressively.
   const replayOnly = Boolean(autoReplay);
-  if (autoReplay) usingTracked = true;
+  if (autoReplay) usingTracked = hasRecordedGps;
   let path = actualRouteRequired
     ? tracked
     : replayOnly
