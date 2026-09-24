@@ -5326,9 +5326,9 @@ export function createFleetBrowser({
     state.vehicle = vehicle;
     state.loading = false;
     state.error = "";
-    if (state.vehicleRoutes.length) {
-      state.vehicleRoutes = unionRouteLines(state.vehicleRoutes, journeys);
-    }
+    // Always union: AT1–AT3 exist only in GPS trails, so a bus whose whole route history
+    // is AT work starts with an empty list and must still pick its routes up here.
+    state.vehicleRoutes = unionRouteLines(state.vehicleRoutes, journeys);
     render();
   }
 
@@ -5346,7 +5346,13 @@ export function createFleetBrowser({
     const isDg =
       String(vehicle.operator?.id || vehicle.operator?.noc || "").toUpperCase() === "DAGC" ||
       /d-g-coach|D\s*&\s*G/i.test(`${vehicle.operator?.slug || ""} ${vehicle.operator?.name || ""}`);
-    if (!(atLineFilter || at || isDg)) return;
+    // AT1–AT3 have no bustimes service, so they only ever come from GPS trails. Do not
+    // require the bus to still be live (`at`): once it finishes the route the live match
+    // goes null and these routes would vanish from "Routes this bus has run".
+    const lastLine = String(vehicle.lastRoute?.line || "").toUpperCase();
+    const hasAtSignal =
+      atLineFilter || at || isDg || AT_LINE_SET.has(lastLine) || /d-g-coach|D\s*&\s*G/i.test(String(vehicle.operatorName || ""));
+    if (!hasAtSignal) return;
     const regKey = compactQuery(vehicle.reg);
     const trailKeys = [
       at?.ref ? `staff-${at.ref}` : "",
@@ -5369,6 +5375,11 @@ export function createFleetBrowser({
         trailKey: row.trailKey || defaultTrail,
       }));
       applyJourneysToState(vehicle, merged, state.lineFilter);
+      // Cache AT routes on saved vehicles so they are still listed after a reload,
+      // even though they exist only in GPS trails and never in bustimes.
+      if (state.vehicleRoutes.length && isSavedVehicle(vehicle)) {
+        upsertSavedVehicle(vehicle, state.vehicleRoutes);
+      }
     } catch {
       // AT trail history is optional enrichment.
     }
