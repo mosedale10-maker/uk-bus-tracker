@@ -10,6 +10,7 @@
  */
 import fs from "node:fs";
 import { startFirstStream, streamOccupancyFor } from "./first-stream.mjs";
+import { stopsInBounds } from "./stop-store.mjs";
 
 const BASE = "https://api.firstbus.co.uk/gofirst-transport/api";
 const TOKEN_TTL_MS = 50 * 60_000; // tokens are valid 60 min
@@ -239,6 +240,36 @@ async function firstNearbyStops(lat, lng) {
  * that vehicle yet. Nearby stop boards are only a fallback; rows still have to
  * match the card's line/direction/destination and contain app occupancy types.
  */
+function localRouteStopIds(line, lat, lng, radius = 0.035) {
+  const want = String(line || "").trim().toUpperCase();
+  if (!want || !Number.isFinite(lat) || !Number.isFinite(lng)) return [];
+  const data = stopsInBounds({
+    south: Number(lat) - radius,
+    west: Number(lng) - radius,
+    north: Number(lat) + radius,
+    east: Number(lng) + radius,
+    limit: 4000,
+  });
+  const lat0 = Number(lat) * Math.PI / 180;
+  const rows = (data.features || [])
+    .filter((feature) => {
+      const services = feature?.properties?.services || [];
+      return services.some((service) => String(service).trim().toUpperCase() === want);
+    })
+    .map((feature) => {
+      const coords = feature?.geometry?.coordinates || [];
+      const stopLng = Number(coords[0]);
+      const stopLat = Number(coords[1]);
+      const dLat = (stopLat - Number(lat)) * Math.PI / 180;
+      const dLng = (stopLng - Number(lng)) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat0) * Math.cos(stopLat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+      return { atco: String(feature?.properties?.atco || "").trim(), distance: 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(a))) };
+    })
+    .filter((row) => row.atco)
+    .sort((a, b) => a.distance - b.distance);
+  return rows.slice(0, 12).map((row) => row.atco);
+}
+
 export async function firstOccupancyNearBus({ line = "", destination = "", direction = "", lat = null, lng = null } = {}) {
   if (!String(line || "").trim() || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   const cacheKey = [
@@ -254,10 +285,13 @@ export async function firstOccupancyNearBus({ line = "", destination = "", direc
   const job = (async () => {
     startFirstStream();
     const nearby = await firstNearbyStops(Number(lat), Number(lng));
-    const candidates = nearby
+    const nearbyIds = nearby
       .map((row) => String(row?.["atco-code"] || row?.atco || row?.id || "").trim())
-      .filter(Boolean)
-      .slice(0, 6);
+      .filter(Boolean);
+    const candidates = [...new Set([
+      ...localRouteStopIds(line, Number(lat), Number(lng)),
+      ...nearbyIds,
+    ])].slice(0, 12);
     const results = await Promise.allSettled(
       candidates.map(async (atco) => {
         const body = await loadStopTimes(atco);
