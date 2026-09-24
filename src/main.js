@@ -4887,6 +4887,8 @@ async function showFleetRouteTails({
   tripId = "",
   datetime = "",
   direction = "",
+  plannedTripId = "",
+  plannedDate = "",
 } = {}) {
   const code = String(line || "").trim();
   const opCode = String(operator || "").trim().toUpperCase();
@@ -5010,8 +5012,9 @@ async function showFleetRouteTails({
   let plannedRoutePath = [];
   if (usesPlannedRouteOverride(code, opCode) && targets.length) {
     for (const v of targets.slice(0, 4)) {
-      const directTrip = String(v.trip_id || v.tripId || "").trim();
+      const directTrip = String(v.trip_id || v.tripId || plannedTripId || "").trim();
       const numericVehicle = String(v.id || v.btId || v.vehicleId || "").trim();
+      const plannedTripDate = String(plannedDate || v.datetime || v.recordedAtTime || "").slice(0, 10);
       let candidateTrip = directTrip;
       if (!candidateTrip && /^\d+$/.test(numericVehicle)) {
         candidateTrip = await Promise.race([
@@ -5025,7 +5028,7 @@ async function showFleetRouteTails({
       }
       if (!candidateTrip) continue;
       const trip = await Promise.race([
-        tripEnds(candidateTrip, { date: String(v.datetime || v.recordedAtTime || "").slice(0, 10) }),
+        tripEnds(candidateTrip, { date: plannedTripDate }),
         new Promise((resolve) => setTimeout(() => resolve(null), 4500)),
       ]);
       const candidatePath = Array.isArray(trip?.path) ? thinTrailPoints(trip.path, 55) : [];
