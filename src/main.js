@@ -4144,15 +4144,14 @@ function buildTrailArrowsAlongRoad(path, layer, opts = {}) {
   const gps = opts.gpsPoints || opts.gpsPath || null;
   const total = segs.reduce((sum, seg) => sum + pathLengthMeters(seg), 0);
   if (!(total > 1)) return arrows;
-  const maxArrows = 480;
+  const maxArrows = 72;
   const z = map.getZoom();
-  // Fewer, smaller markers when zoomed out so the trail stays readable.
-  const spacingMul = z < 12 ? 2.2 : z < 13 ? 1.7 : z < 14 ? 1.25 : z < 15 ? 1 : 0.9;
+  // Keep direction markers readable: one arrow every ~80–100m, not one on
+  // every GPS/road vertex. Dense chevrons can make a valid route look like a
+  // loop or a second bus trail.
+  const spacingMul = z < 12 ? 2 : z < 13 ? 1.6 : z < 14 ? 1.25 : z < 15 ? 1 : 0.9;
   const spacing =
-    Math.max(
-      24,
-      Math.min(46, total / Math.max(24, Math.min(maxArrows, Math.ceil(total / 30)))),
-    ) * spacingMul;
+    Math.max(50, Math.min(100, total / Math.max(12, Math.ceil(total / 85)))) * spacingMul;
   let placed = 0;
   let covered = 0;
   const placeArrow = (lat, lng, bear, frac) => {
