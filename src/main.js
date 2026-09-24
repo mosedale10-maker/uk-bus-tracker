@@ -3577,8 +3577,8 @@ function pinSeparateTripTails(segments, { baseKey = "bus", line = "", operator =
     pinnedTrailFilters.set(key, {
       line: String(line || "").trim(),
       direction: dir,
-      fromMs: startT - 30_000,
-      toMs: endT + 30_000,
+      fromMs: startT,
+      toMs: endT,
       operator: String(operator || "").trim().toUpperCase(),
     });
     pinnedTrailKeys.add(key);
@@ -6092,10 +6092,13 @@ async function startRoutePlayback({
     staffs: isStaffsTrailOperator(operator) || isAltonLine(lineName),
   };
 
+  // A historical Map view still has a live vehicle marker when the bus is
+  // tracked now. Use that position (or the final recorded ping as fallback)
+  // for every visible tail; a planned/recorded route must never run past it.
+  const isHistorical = preserveRecordedRun;
   const lastPing =
     currentLivePing || resolvePlaybackVehiclePing({ vehicleId, trailKey, reg, trackedGps });
-  const isHistorical = preserveRecordedRun;
-  const clipPing = isHistorical ? null : lastPing;
+  const clipPing = lastPing;
 
   showMessage(usingTracked ? "Matching GPS to roads…" : "Matching route to roads…");
   let drawPath = path;
@@ -6135,6 +6138,12 @@ async function startRoutePlayback({
         );
         if (want.length >= 2) segs = [want];
       }
+      // Historical Map rows may still have a current live marker. Clip every
+      // pinned segment to that marker before drawing it; never leave a second
+      // full-route stroke ahead of the bus.
+      segs = lastPing
+        ? segs.map((seg) => clipGpsPointsAtPing(seg, lastPing)).filter((seg) => seg.length >= 2)
+        : [];
       pinSeparateTripTails(segs, {
         baseKey: liveKey || resolvedTripId || tripId || safeJourneyId || "hist",
         line: lineName,
@@ -6204,7 +6213,7 @@ async function startRoutePlayback({
   const fastPath = clipTrailPathAtPing(
     flattenTrailLatLngs(fastBase).length >= 2 ? fastBase : path,
     clipPing,
-    { failClosed: !isHistorical },
+    { failClosed: true },
   );
   const scene = {
     trackedGps,
@@ -6283,7 +6292,7 @@ async function startRoutePlayback({
             .map((stop) => [stop.lat, stop.lng]);
           if (stopPath.length >= 2) upgraded = stopPath;
         }
-        const upPath = clipTrailPathAtPing(upgraded, clipPing, { failClosed: !isHistorical });
+        const upPath = clipTrailPathAtPing(upgraded, clipPing, { failClosed: true });
         if (flattenTrailLatLngs(upPath).length >= 2) {
           drawPlaybackScene(upPath, scene, { fit: false });
           playback.path = upPath;
