@@ -9725,12 +9725,15 @@ function upsertLiveBus(bus, snapped) {
     t: bus.datetime ? new Date(bus.datetime).getTime() || Date.now() : Date.now(),
     reg,
   };
-  if (!snapped.coasting) {
-    recordVehicleTrail(bus.id, snapped.lat, snapped.lng, snapped.heading, trailMeta);
-    const btId = bus.btId ?? bus.vehicle?.id;
-    if (btId != null && String(btId) !== String(bus.id) && /^\d+$/.test(String(btId))) {
-      recordVehicleTrail(String(btId), snapped.lat, snapped.lng, snapped.heading, trailMeta);
-    }
+  const [rawLng, rawLat] = bus.coordinates || [];
+  const recordLat = Number.isFinite(Number(rawLat)) ? Number(rawLat) : snapped.lat;
+  const recordLng = Number.isFinite(Number(rawLng)) ? Number(rawLng) : snapped.lng;
+  // Store the feed's real position, never the short forward coast used to smooth
+  // the moving marker; coasting must not make the recorded tail run ahead.
+  recordVehicleTrail(bus.id, recordLat, recordLng, snapped.heading, trailMeta);
+  const btId = bus.btId ?? bus.vehicle?.id;
+  if (btId != null && String(btId) !== String(bus.id) && /^\d+$/.test(String(btId))) {
+    recordVehicleTrail(String(btId), recordLat, recordLng, snapped.heading, trailMeta);
   }
   if (existing) {
     existing.bus = bus;
