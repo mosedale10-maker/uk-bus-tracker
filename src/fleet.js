@@ -33,7 +33,7 @@ export const STAFFS_OPERATORS = [
   { name: "Evolve Bus & Coach", slug: "evolve-bus-coach", noc: "EVOL", kind: "private-hire" },
   { name: "First Potteries", slug: "first-potteries", noc: "FPOT", note: "Includes BS1–BS2 matchday shuttles · Ticketer OOS / dead runs" },
   { name: "Flexibus", slug: "flexibus", noc: null },
-  { name: "FlixBus", slug: "flixbus", noc: "FLIX", note: "UK + Europe coaches · live map + GPS history (not bustimes)" },
+  { name: "FlixBus", slug: "flixbus", noc: "FLIX", note: "UK + Europe coaches · live map + GPS history" },
   { name: "High Peak", slug: "high-peak", noc: "HIPK" },
   { name: "Hotspur", slug: "hotspur", noc: "HOTS" },
   {
@@ -4633,9 +4633,9 @@ export function createFleetBrowser({
       }
       ${
         String(op.noc || "").toUpperCase() === "DAGC"
-          ? `<p class="fleet-muted fleet-section-note">Public routes and AT1–AT3 employee services list every trip separately, same layout as bustimes.</p>`
+          ? `<p class="fleet-muted fleet-section-note">Public routes and AT1–AT3 employee services list every trip separately.</p>`
           : ["FLIX", "NATX", "FPOT"].includes(String(op.noc || "").toUpperCase())
-            ? `<p class="fleet-muted fleet-section-note">Routes and timetables list every trip separately (Vehicle · Trip · To · Map), same layout as bustimes.</p>`
+            ? `<p class="fleet-muted fleet-section-note">Routes and timetables list every trip separately (Vehicle · Trip · To · Map).</p>`
             : ""
       }
       ${

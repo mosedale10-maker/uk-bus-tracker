@@ -44,7 +44,7 @@ function bodsVehiclesPlugin(apiKey) {
       });
       const emptyList = JSON.stringify({ count: 0, next: null, previous: null, results: [] });
       const gone = JSON.stringify({
-        detail: "Not available (bustimes.org unused for this endpoint)",
+        detail: "Not available for this endpoint",
       });
       const emptyStops = JSON.stringify({ type: "FeatureCollection", features: [] });
       server.middlewares.use((req, res, next) => {

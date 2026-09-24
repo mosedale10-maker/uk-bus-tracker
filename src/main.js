@@ -2419,7 +2419,7 @@ function showJourneyPanel({
   if (journeyPanelMetaEl) {
     const bits = [`Service: ${ln}`];
     if (date) bits.push(`Date: ${date}`);
-    bits.push(`${(stops || []).length} stops · bustimes.org`);
+    bits.push(`${(stops || []).length} stops`);
     journeyPanelMetaEl.textContent = bits.join(" · ");
   }
   renderJourneyPanelStops(stops, { lat, lng });
@@ -10018,7 +10018,7 @@ async function loadBuses({ replace = false } = {}) {
     hint.textContent = "History map · live buses hidden · pan or press ✕ to restore";
   } else if (histFocus?.journeyOnly) {
     hint.hidden = false;
-    hint.textContent = "Journey map · bustimes.org";
+    hint.textContent = "Journey map";
   } else if (overStaffs && zoom < 9) {
     hint.hidden = false;
     hint.textContent = "Staffordshire locals loaded · zoom in for more detail";

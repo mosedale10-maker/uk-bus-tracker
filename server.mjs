@@ -814,7 +814,7 @@ function stubBtList(_req, res) {
 function stubBtGone(_req, res) {
   res.setHeader("Cache-Control", "public, max-age=60");
   res.setHeader("X-Data-Source", "none");
-  res.status(404).json({ detail: "Not available (bustimes.org is only used for tails / history)" });
+  res.status(404).json({ detail: "Not available" });
 }
 
 function mountBtStub(path, handler) {
@@ -1463,7 +1463,7 @@ app.use("/api/trails", (req, res, next) => {
       wiped: pathOnly === "/admin/reclaim",
       days: TRAIL_KEEP_DAYS,
       disabled: true,
-      note: "GPS tails removed — history is bustimes.org journeys only",
+      note: "GPS history is currently unavailable",
     });
   }
   if (pathOnly === "/keys" || pathOnly.endsWith("/keys")) {
@@ -1472,7 +1472,7 @@ app.use("/api/trails", (req, res, next) => {
       days: TRAIL_KEEP_DAYS,
       keys: [],
       disabled: true,
-      note: "GPS tails removed — history is bustimes.org journeys only",
+      note: "GPS history is currently unavailable",
     });
   }
   if (pathOnly === "/dead-runs" || pathOnly.endsWith("/dead-runs")) {
@@ -1483,7 +1483,7 @@ app.use("/api/trails", (req, res, next) => {
     days: TRAIL_KEEP_DAYS,
     trails: {},
     disabled: true,
-    note: "GPS tails removed — history is bustimes.org journeys only",
+    note: "GPS history is currently unavailable",
   });
 });
 
