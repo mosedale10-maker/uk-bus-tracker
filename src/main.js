@@ -9725,10 +9725,12 @@ function upsertLiveBus(bus, snapped) {
     t: bus.datetime ? new Date(bus.datetime).getTime() || Date.now() : Date.now(),
     reg,
   };
-  recordVehicleTrail(bus.id, snapped.lat, snapped.lng, snapped.heading, trailMeta);
-  const btId = bus.btId ?? bus.vehicle?.id;
-  if (btId != null && String(btId) !== String(bus.id) && /^\d+$/.test(String(btId))) {
-    recordVehicleTrail(String(btId), snapped.lat, snapped.lng, snapped.heading, trailMeta);
+  if (!snapped.coasting) {
+    recordVehicleTrail(bus.id, snapped.lat, snapped.lng, snapped.heading, trailMeta);
+    const btId = bus.btId ?? bus.vehicle?.id;
+    if (btId != null && String(btId) !== String(bus.id) && /^\d+$/.test(String(btId))) {
+      recordVehicleTrail(String(btId), snapped.lat, snapped.lng, snapped.heading, trailMeta);
+    }
   }
   if (existing) {
     existing.bus = bus;
@@ -11298,7 +11300,9 @@ function advanceLiveMarkers() {
     const snapped = staffWhere(item);
     if (snapped.stalled) continue;
     moveMarkerTo(marker, snapped.lat, snapped.lng);
-    recordStaffTrail(marker, snapped.lat, snapped.lng, snapped.heading);
+    if (!snapped.coasting) {
+      recordStaffTrail(marker, snapped.lat, snapped.lng, snapped.heading);
+    }
     const prev = marker._roadHeading;
     if (!Number.isFinite(prev) || angleDiff(prev, snapped.heading) > 8) {
       marker._roadHeading = snapped.heading;
@@ -11310,7 +11314,7 @@ function advanceLiveMarkers() {
 
 function placeOnRoad(marker, snapped) {
   moveMarkerTo(marker, snapped.lat, snapped.lng);
-  if (marker.bus && !snapped.stalled) {
+  if (marker.bus && !snapped.stalled && !snapped.coasting) {
     recordVehicleTrail(marker.bus.id, snapped.lat, snapped.lng, snapped.heading, {
       journeyId: marker.bus.journey_id,
       tripId: marker.bus.trip_id,
