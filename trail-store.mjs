@@ -14,6 +14,7 @@ const MAX_KEYS_PER_QUERY = 24;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DIR = path.join(__dirname, "data", "trails");
+const RECORDING_START_FILE = "recording-started-at";
 
 let db = null;
 let ready = null;
@@ -21,10 +22,39 @@ let lastPruneAt = 0;
 let lastWalCheckpointAt = 0;
 let lastWalWarnAt = 0;
 let backend = "none";
+let recordingStartedAt = 0;
 const WAL_WARN_BYTES = 500 * 1024 * 1024; // 500MB — previously ballooned to ~244GB
 
 function trailDataDir() {
   return String(process.env.TRAIL_DATA_DIR || DEFAULT_DIR).trim() || DEFAULT_DIR;
+}
+
+function recordingStartPath() {
+  return path.join(trailDataDir(), RECORDING_START_FILE);
+}
+
+function loadRecordingStartedAt() {
+  try {
+    const value = Number(fs.readFileSync(recordingStartPath(), "utf8").trim());
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function markRecordingStarted(at = Date.now()) {
+  const value = Number(at);
+  const safe = Number.isFinite(value) && value > 0 ? Math.round(value) : Date.now();
+  const target = recordingStartPath();
+  const temp = `${target}.tmp`;
+  try {
+    fs.writeFileSync(temp, `${safe}\n`, "utf8");
+    fs.renameSync(temp, target);
+  } catch (error) {
+    console.warn("[trails] could not persist recording start marker:", error?.message || error);
+  }
+  recordingStartedAt = safe;
+  return safe;
 }
 
 function dbSslOption() {
@@ -96,6 +126,7 @@ export async function initTrailStore() {
   ready = (async () => {
     const dir = trailDataDir();
     fs.mkdirSync(dir, { recursive: true });
+    recordingStartedAt = loadRecordingStartedAt();
     const filePath = path.join(dir, "trails.sqlite");
     const opened = openSqlite(filePath);
     if (!opened) {
@@ -178,6 +209,7 @@ function normalizePoint(raw) {
   if (!Number.isFinite(t) || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
   const age = Date.now() - t;
+  if (recordingStartedAt && t < recordingStartedAt) return null;
   if (age > TRAIL_KEEP_DAYS * 86400000 || age < -5 * 60_000) return null;
   const heading = Number(raw?.heading);
   return {
@@ -306,8 +338,9 @@ export async function clearAllTrailPoints() {
     db.transaction(reset)();
   }
   checkpointWal({ force: true });
-  console.log(`[trails] cleared ${deleted} recorded GPS points`);
-  return { ok: true, deleted };
+  const startedAt = markRecordingStarted();
+  console.log(`[trails] cleared ${deleted} recorded GPS points; fresh recording starts ${new Date(startedAt).toISOString()}`);
+  return { ok: true, deleted, startedAt };
 }
 
 /** Drop old Postgres trail table so Plus login can use the small Railway DB volume. */
