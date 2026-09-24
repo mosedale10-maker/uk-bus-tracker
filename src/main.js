@@ -5528,7 +5528,12 @@ async function startRoutePlayback({
           : [];
   usingTracked = path === tracked && tracked.length >= 2;
   if (path.length < 2 && tripSegments.some((seg) => seg.length >= 2)) {
-    trackedGps = tripSegments.reduce((best, run) => (run.length > best.length ? run : best), tripSegments[0]);
+    const fallbackRun = tripSegments.reduce((best, run) => (run.length > best.length ? run : best), tripSegments[0]);
+    trackedGps = preserveRecordedRun
+      ? fallbackRun
+      : currentLivePing
+        ? clipGpsPointsAtPing(fallbackRun, currentLivePing)
+        : [];
     tracked = pathFromGpsPoints(trackedGps);
     path = tracked;
     usingTracked = path.length >= 2;
@@ -5695,8 +5700,17 @@ async function startRoutePlayback({
     lastPing,
     replayRecorded: preserveRecordedRun,
   };
-  // Offer a true GPS replay when we recorded pings for this journey.
-  gpsReplaySetup(trackedGps.length >= 2 ? trackedGps : allGps);
+  // Offer a true GPS replay when we recorded pings for this journey. A live
+  // replay must never fall back to the un-clipped allGps window.
+  const replayPoints =
+    trackedGps.length >= 2
+      ? trackedGps
+      : preserveRecordedRun
+        ? allGps
+        : currentLivePing
+          ? clipGpsPointsAtPing(allGps, currentLivePing)
+          : [];
+  gpsReplaySetup(replayPoints);
   showJourneyPanel({
     operator: opName,
     line: lineName,
