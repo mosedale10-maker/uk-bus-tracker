@@ -1024,13 +1024,24 @@ app.get("/api/bt-paint", async (req, res, next) => {
   }
 });
 
-// Overpass is optional speed-limit enrichment. Bound concurrent upstream work
-// so a burst of marker selections cannot exhaust nginx's file descriptors.
+// Overpass is optional speed-limit enrichment. Keep it off by default: the
+// public endpoints aggressively rate-limit bursts, while local OFM tiles are
+// already used for road snapping. Set OVERPASS_ENABLED=1 only with a proxy/cache.
+const OVERPASS_ENABLED = String(process.env.OVERPASS_ENABLED || "").trim() === "1";
 const OVERPASS_MAX_ACTIVE = 4;
 let overpassActive = 0;
 let overpassBlockedAt = 0;
 app.use(["/api/overpass", "/api/overpass-alt"], (req, res, next) => {
   if (req.method !== "GET" && req.method !== "HEAD") return next();
+  if (!OVERPASS_ENABLED) {
+    res.setHeader("Retry-After", "60");
+    res.setHeader("Cache-Control", "no-store");
+    res.status(503).type("json").json({
+      error: "overpass_disabled",
+      message: "Road-limit lookup is unavailable; local road data remains available.",
+    });
+    return;
+  }
   if (overpassActive >= OVERPASS_MAX_ACTIVE) {
     const now = Date.now();
     if (now - overpassBlockedAt > 60_000) {

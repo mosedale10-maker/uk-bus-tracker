@@ -7912,7 +7912,7 @@ function nearestRoadLimit(lat, lng) {
   return bestD <= 180 && Number.isFinite(best) ? best : null;
 }
 
-/** Best available speed limit for the card (snap → cached extra → Overpass later). */
+/** Best available speed limit for the card (local road snap → cached vehicle value). */
 function resolveLimitMph(bus, extra = {}, lat, lng) {
   const fromExtra = Number(extra?.limitMph);
   if (Number.isFinite(fromExtra) && fromExtra > 0) return fromExtra;
@@ -7938,7 +7938,7 @@ async function fetchLimitNear(lat, lng, fallback) {
   return result;
 }
 
-/** Keep limit on the marker and refresh the card once Overpass/snap has a value. */
+/** Keep limit on the marker and refresh the card once the local road snap has a value. */
 function ensureMarkerSpeedLimit(marker) {
   if (!marker?.bus) return;
   const bus = marker.bus;
