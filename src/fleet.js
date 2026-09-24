@@ -3808,7 +3808,7 @@ export function createFleetBrowser({
                   : null;
                 const replayWhen = lastRoute?.trackedAt || latest?.lastAt || "";
                 const replayBtn = row.id && replayWhen
-                  ? `<button type="button" class="fleet-link-btn fleet-list-replay" data-action="play-journey" data-replay="1" ${fleetMapDataAttrs({
+                  ? `<button type="button" class="fleet-link-btn fleet-list-replay" data-action="play-journey" data-replay="1" data-replay-recorded="1" ${fleetMapDataAttrs({
                       vehicleId: row.id,
                       trailKey: row.id || `reg:${compactQuery(row.reg)}`,
                       reg: row.reg || "",
@@ -4573,7 +4573,7 @@ export function createFleetBrowser({
                           })}>Map</button>`
                         : "";
                       const replayBtn = (v.id || v.reg) && when
-                        ? `<button type="button" class="fleet-link-btn fleet-list-replay" data-action="play-journey" data-replay="1" ${fleetMapDataAttrs({
+                        ? `<button type="button" class="fleet-link-btn fleet-list-replay" data-action="play-journey" data-replay="1" data-replay-recorded="1" ${fleetMapDataAttrs({
                             vehicleId: v.id || "",
                             trailKey: v.id || `reg:${compactQuery(v.reg)}`,
                             reg: v.reg || "",
@@ -4678,7 +4678,7 @@ export function createFleetBrowser({
                     <span class="fleet-list-main"><span class="fleet-route">${esc(line)}</span>${when ? `<span class="fleet-last-tracked">${esc(when)}</span>` : ""}</span>
                     <span class="fleet-list-sub">${esc(destination)}${directionLabel ? ` · ${esc(directionLabel)}` : ""}</span>
                   </div>
-                  <button type="button" class="fleet-link-btn fleet-list-replay" data-action="play-journey" data-replay="1" ${replayAttrs}>▶ Replay</button>
+                  <button type="button" class="fleet-link-btn fleet-list-replay" data-action="play-journey" data-replay="1" data-replay-recorded="1" ${replayAttrs}>▶ Replay</button>
                 </li>`;
               })
               .join("")}</ul>`
@@ -6193,6 +6193,7 @@ export function createFleetBrowser({
         dest: btn.dataset.dest,
         datetime: btn.dataset.datetime,
         autoReplay: btn.dataset.replay === "1",
+        recordedReplay: btn.dataset.replayRecorded === "1",
       });
     }
   });

@@ -5244,6 +5244,7 @@ async function startRoutePlayback({
   showTail = false,
   diverted = false,
   autoReplay = false,
+  recordedReplay = false,
 } = {}) {
   const playKey = tripId || journeyId || trailKey || vehicleId || regTrailKey(reg);
   if (!playKey) {
@@ -5285,10 +5286,10 @@ async function startRoutePlayback({
   let toMs = 0;
   let aroundMs = 0;
   const historicalPlayback = datetime && Date.now() - new Date(datetime).getTime() > 12 * 60_000;
-  // An explicit Replay action is a recorded-run view, even when the run is
-  // recent. This keeps the animation on the stored pings instead of clipping
-  // it to a still-live bus marker. Ordinary Show route remains live-clipped.
-  const replayRecordedRun = autoReplay === true;
+  // A live bus-card Replay follows the bus and must remain clipped to its
+  // current marker. Fleet history replays opt into the complete recorded run
+  // separately, so they can show the whole journey that was actually stored.
+  const replayRecordedRun = recordedReplay === true;
   const preserveRecordedRun = Boolean(historicalPlayback || replayRecordedRun);
   if (datetime) {
     const start = new Date(datetime).getTime();
@@ -12426,7 +12427,12 @@ const fleetBrowser = fleetContentEl
       },
       onPlayJourney: (opts) => {
         setAppTab("map");
-        startRoutePlayback({ ...opts, showTail: true, autoReplay: Boolean(opts?.autoReplay) });
+        startRoutePlayback({
+          ...opts,
+          showTail: true,
+          autoReplay: Boolean(opts?.autoReplay),
+          recordedReplay: Boolean(opts?.recordedReplay),
+        });
       },
       onShowRouteTails: (opts) => {
         showFleetRouteTails(opts);
