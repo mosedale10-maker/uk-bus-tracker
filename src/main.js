@@ -3845,6 +3845,14 @@ function livePingForTrailFilter(filter = {}, fallbackPoints = []) {
     regs: new Set(reg ? [reg] : []),
   };
   const hasIdentity = vehicleId || trailKey || reg;
+  const explicitLivePing = filter.livePing;
+  if (
+    explicitLivePing &&
+    Number.isFinite(Number(explicitLivePing.lat)) &&
+    Number.isFinite(Number(explicitLivePing.lng))
+  ) {
+    return { ...explicitLivePing, source: explicitLivePing.source || "playback" };
+  }
   const candidates = [];
 
   for (const marker of markers.values()) {
@@ -4603,6 +4611,7 @@ function pinVehicleTrail({
   liveToMs = 0,
   live = false,
   liveFocus = true,
+  livePing = null,
 } = {}) {
   const safeDirection = normalizeTrailDirection(direction);
   const keys = trailKeysForVehicle({
@@ -4638,6 +4647,7 @@ function pinVehicleTrail({
     liveReg: followLive ? compactReg(reg) : "",
     liveJourneyId: followLive ? String(journeyId || "") : "",
     liveTripId: followLive ? String(tripId || "") : "",
+    livePing: followLive ? livePing : null,
   };
   multiTailActiveGroup = null;
   for (const key of keys) {
@@ -5097,10 +5107,12 @@ function gpsPointsForJourneyArrows(roadPath, lastPing, trackedGps = [], datetime
 const PLAYBACK_LINE_COLOR = "#5b51e3";
 
 /** Cut a path at the bus's current ping so the tail never runs ahead of it. */
-function clipTrailPathAtPing(path, ping) {
-  if (!ping || !Number.isFinite(ping.lat) || !Number.isFinite(ping.lng)) return path;
+function clipTrailPathAtPing(path, ping, { failClosed = false } = {}) {
+  if (!ping || !Number.isFinite(ping.lat) || !Number.isFinite(ping.lng)) {
+    return failClosed ? [] : path;
+  }
   const segs = asTrailLatLngs(path);
-  if (!segs.length) return path;
+  if (!segs.length) return failClosed ? [] : path;
   let bestSeg = -1;
   let bestIdx = -1;
   let bestD = Infinity;
@@ -5116,7 +5128,7 @@ function clipTrailPathAtPing(path, ping) {
     }
   }
   // Ping must sit on this path (±350m) — otherwise it belongs to another leg; don't clip.
-  if (bestSeg < 0 || bestIdx < 1 || bestD > 350) return path;
+  if (bestSeg < 0 || bestIdx < 1 || bestD > 350) return failClosed ? [] : path;
   const out = segs.slice(0, bestSeg).map((seg) => seg.slice());
   const tail = segs[bestSeg].slice(0, bestIdx + 1);
   tail.push([ping.lat, ping.lng]);
@@ -5642,6 +5654,7 @@ async function startRoutePlayback({
         liveFromMs: Number(trackedGps[0]?.t) > 0 ? Number(trackedGps[0]?.t) - 30_000 : 0,
         live: true,
         liveFocus: false,
+        livePing: currentLivePing || lastPing,
       });
       const pinned = pinnedTrailLines.get(liveKey) || pinnedTrailLines.get(String(vehicleId || ""));
       if (pinned?.line) {
@@ -5666,6 +5679,7 @@ async function startRoutePlayback({
   const fastPath = clipTrailPathAtPing(
     flattenTrailLatLngs(fastBase).length >= 2 ? fastBase : path,
     clipPing,
+    { failClosed: !isHistorical },
   );
   const scene = {
     trackedGps,
@@ -5743,7 +5757,7 @@ async function startRoutePlayback({
             .map((stop) => [stop.lat, stop.lng]);
           if (stopPath.length >= 2) upgraded = stopPath;
         }
-        const upPath = clipTrailPathAtPing(upgraded, clipPing);
+        const upPath = clipTrailPathAtPing(upgraded, clipPing, { failClosed: !isHistorical });
         if (flattenTrailLatLngs(upPath).length >= 2) {
           drawPlaybackScene(upPath, scene, { fit: false });
           playback.path = upPath;
