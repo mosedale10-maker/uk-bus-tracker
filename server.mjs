@@ -1034,26 +1034,18 @@ let overpassBlockedAt = 0;
 app.use(["/api/overpass", "/api/overpass-alt"], (req, res, next) => {
   if (req.method !== "GET" && req.method !== "HEAD") return next();
   if (!OVERPASS_ENABLED) {
-    res.setHeader("Retry-After", "60");
     res.setHeader("Cache-Control", "no-store");
-    res.status(503).type("json").json({
-      error: "overpass_disabled",
-      message: "Road-limit lookup is unavailable; local road data remains available.",
-    });
+    res.type("json").json({ elements: [], roadLookup: "local-only" });
     return;
   }
   if (overpassActive >= OVERPASS_MAX_ACTIVE) {
     const now = Date.now();
     if (now - overpassBlockedAt > 60_000) {
       overpassBlockedAt = now;
-      console.warn("[overpass] busy — rejecting excess speed-limit lookup");
+      console.warn("[overpass] busy — returning empty speed-limit enrichment");
     }
-    res.setHeader("Retry-After", "5");
     res.setHeader("Cache-Control", "no-store");
-    res.status(503).type("json").json({
-      error: "overpass_busy",
-      message: "Road-limit lookup is busy; using the cached road data.",
-    });
+    res.type("json").json({ elements: [], roadLookup: "busy" });
     return;
   }
   overpassActive += 1;
