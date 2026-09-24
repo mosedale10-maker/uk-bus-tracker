@@ -3089,6 +3089,16 @@ html.map-night .leaflet-control-container {
   pointer-events: none;
 }
 
+.gps-replay-tail-casing,
+.gps-replay-tail-line,
+.gps-replay-travelled-line {
+  vector-effect: non-scaling-stroke;
+}
+
+.gps-replay-tail-casing {
+  filter: drop-shadow(0 1px 2px rgba(15, 23, 42, 0.55));
+}
+
 /* While Replay owns the map, hide static route/tail arrows and strokes. */
 .map-wrap.gps-replay-active .trail-arrow-icon:not(.replay-arrow-icon),
 .map-wrap.gps-replay-active .trail-line {

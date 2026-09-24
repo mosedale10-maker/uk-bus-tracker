@@ -2040,6 +2040,11 @@ function gpsReplayControls(show) {
 /** Bustimes-style travelled-so-far overlay: a green stroke revealed by the replay cursor. */
 const REPLAY_TRAVELLED_COLOR = "#22a447";
 const REPLAY_TRAVELLED_WEIGHT = 5;
+/** Indigo/white casing makes the replay tail read like the route view in the reference image. */
+const REPLAY_TAIL_COLOR = "#5b51e3";
+const REPLAY_TAIL_WEIGHT = 7;
+const REPLAY_TAIL_CASING_COLOR = "#f8fafc";
+const REPLAY_TAIL_CASING_WEIGHT = 10;
 
 function replayArrowSpacingM() {
   const zoom = map.getZoom();
@@ -2132,21 +2137,47 @@ function gpsReplayUpdateDirectionArrows(t) {
   replay.arrowT = t;
 }
 
-/** Grow the green "been here" line up to the replay cursor. */
+/** Grow the replay tail only up to the replay cursor. */
 function gpsReplayUpdateTravelled(t) {
-  const line = gpsReplay?.travelledLine;
-  if (!line || !gpsReplay?.pts?.length) return;
-  const pts = gpsReplay.pts;
-  const latlngs = [[pts[0].lat, pts[0].lng]];
-  for (let i = 1; i < pts.length; i += 1) {
-    if (pts[i].t > t) break;
-    latlngs.push([pts[i].lat, pts[i].lng]);
+  const replay = gpsReplay;
+  if (!replay?.pts?.length || !replay.travelledLine) return;
+  const pts = replay.pts;
+  let endIndex = -1;
+  while (endIndex + 1 < pts.length && pts[endIndex + 1].t <= t) endIndex += 1;
+
+  const current = gpsReplayInterp(pts, t);
+  const goingBackwards =
+    !Number.isFinite(replay.travelledT) || t < replay.travelledT || endIndex < replay.travelledEndIndex;
+  let latlngs;
+  if (!goingBackwards && replay.travelledPath?.length) {
+    // Forward playback only appends newly covered GPS points.
+    latlngs = replay.travelledPath.slice();
+    const firstNew = Math.max(1, Number(replay.travelledEndIndex || 0) + 1);
+    for (let i = firstNew; i <= endIndex; i += 1) {
+      latlngs.push([pts[i].lat, pts[i].lng]);
+    }
+  } else {
+    // Scrubbing backwards needs one rebuild; do not leave future points visible.
+    latlngs = [[pts[0].lat, pts[0].lng]];
+    for (let i = 1; i <= endIndex; i += 1) {
+      latlngs.push([pts[i].lat, pts[i].lng]);
+    }
   }
-  const p = gpsReplayInterp(pts, t);
-  if (p && (!latlngs.length || latlngs[latlngs.length - 1][0] !== p.lat || latlngs[latlngs.length - 1][1] !== p.lng)) {
-    latlngs.push([p.lat, p.lng]);
+  if (
+    current &&
+    (!latlngs.length ||
+      latlngs[latlngs.length - 1][0] !== current.lat ||
+      latlngs[latlngs.length - 1][1] !== current.lng)
+  ) {
+    latlngs.push([current.lat, current.lng]);
   }
-  if (latlngs.length >= 1) line.setLatLngs(latlngs);
+
+  for (const line of [replay.travelledLine, replay.tailLine, replay.tailCasing]) {
+    line?.setLatLngs(latlngs);
+  }
+  replay.travelledPath = latlngs;
+  replay.travelledEndIndex = endIndex;
+  replay.travelledT = t;
   gpsReplayUpdateDirectionArrows(t);
 }
 
@@ -2155,13 +2186,33 @@ function gpsReplayTravelledLine() {
   if (gpsReplay.travelledLine) return gpsReplay.travelledLine;
   const first = gpsReplay.pts?.[0];
   if (!first) return null;
-  gpsReplay.travelledLine = L.polyline([[first.lat, first.lng]], {
-    color: REPLAY_TRAVELLED_COLOR,
-    weight: REPLAY_TRAVELLED_WEIGHT,
-    opacity: 0.95,
+  const initial = [[first.lat, first.lng]];
+  const shared = {
     lineJoin: "round",
     lineCap: "round",
     interactive: false,
+  };
+  // Casing + indigo stroke sit below the existing green replay core, giving the
+  // tail the same high-contrast route appearance as the reference image.
+  gpsReplay.tailCasing = L.polyline(initial, {
+    ...shared,
+    color: REPLAY_TAIL_CASING_COLOR,
+    weight: REPLAY_TAIL_CASING_WEIGHT,
+    opacity: 0.92,
+    className: "gps-replay-tail-casing",
+  }).addTo(playbackLayer);
+  gpsReplay.tailLine = L.polyline(initial, {
+    ...shared,
+    color: REPLAY_TAIL_COLOR,
+    weight: REPLAY_TAIL_WEIGHT,
+    opacity: 0.96,
+    className: "gps-replay-tail-line",
+  }).addTo(playbackLayer);
+  gpsReplay.travelledLine = L.polyline(initial, {
+    ...shared,
+    color: REPLAY_TRAVELLED_COLOR,
+    weight: REPLAY_TRAVELLED_WEIGHT,
+    opacity: 0.95,
     className: "gps-replay-travelled-line",
   }).addTo(playbackLayer);
   return gpsReplay.travelledLine;
@@ -2291,6 +2342,8 @@ function gpsReplayTeardown() {
   if (gpsReplay?.marker) playbackLayer.removeLayer(gpsReplay.marker);
   if (gpsReplay?.arrow) playbackLayer.removeLayer(gpsReplay.arrow);
   if (gpsReplay?.travelledLine) playbackLayer.removeLayer(gpsReplay.travelledLine);
+  if (gpsReplay?.tailLine) playbackLayer.removeLayer(gpsReplay.tailLine);
+  if (gpsReplay?.tailCasing) playbackLayer.removeLayer(gpsReplay.tailCasing);
   for (const marker of gpsReplay?.directionArrows || []) {
     try {
       playbackLayer.removeLayer(marker);
@@ -2320,6 +2373,8 @@ function gpsReplayTeardown() {
 function restoreGpsReplayLayers() {
   if (!gpsReplay) return;
   const layers = [
+    gpsReplay.tailCasing,
+    gpsReplay.tailLine,
     gpsReplay.travelledLine,
     ...(gpsReplay.directionArrows || []),
     gpsReplay.marker,
@@ -2354,6 +2409,11 @@ function gpsReplaySetup(pts) {
     marker: null,
     arrow: null,
     travelledLine: null,
+    tailLine: null,
+    tailCasing: null,
+    travelledPath: null,
+    travelledEndIndex: -1,
+    travelledT: Number.NaN,
     directionArrows: [],
     arrowScanIndex: 0,
     arrowLastPoint: clean[0],
