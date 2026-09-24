@@ -561,9 +561,9 @@ refreshUkLiveCountInBackground().catch((error) => {
 /** Short in-memory cache for live vehicles.json (bbox + operator polls). */
 const vehiclesJsonCache = new Map();
 const vehiclesJsonInflight = new Map();
-/** Fresh window — keep ≈ client BUS_POLL_MS (7s) so refresh hits memory, not upstream. */
+/** Fresh window — keep ≈ client BUS_POLL_MS (6s) so refresh hits memory, not upstream. */
 const VEHICLES_JSON_TTL_MS = 5000;
-const VEHICLES_OPERATOR_TTL_MS = 7_000;
+const VEHICLES_OPERATOR_TTL_MS = 6_000;
 /** Serve expired bodies while a background refresh runs (avoids stampede + empty map).
  *  Wide Staffs bboxes can take 6–15s upstream, so keep a generous stale window — that
  *  turns a slow refresh into a background task instead of a stalled map. */

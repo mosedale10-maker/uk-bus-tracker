@@ -714,7 +714,7 @@ let busesGen = 0;
 /** Last bustimes paint rows — reused on BODS position polls so pins stay light/fast. */
 let lastPaintBuses = [];
 let lastPaintAt = 0;
-const BUS_POLL_MS = 7000;
+const BUS_POLL_MS = 6000;
 const STALE_PING_MS = 5 * 60 * 1000;
 /** Staffs Ticketer buses often sit quietly at termini on overnight routes — keep them a bit longer. */
 const STAFFS_STALE_PING_MS = 20 * 60 * 1000;
@@ -9980,8 +9980,18 @@ function dropServiceBus(id) {
   markers.delete(id);
 }
 
+function busFeedTime(bus) {
+  const value = bus?.datetime ? new Date(bus.datetime).getTime() : NaN;
+  return Number.isFinite(value) ? value : 0;
+}
+
 function upsertLiveBus(bus, snapped) {
   const existing = markers.get(bus.id);
+  const incomingAt = busFeedTime(bus);
+  const existingAt = busFeedTime(existing?.bus);
+  // Do not let a slower/out-of-order upstream response move a marker back to
+  // an older GPS point. The next poll will replace it when a newer ping arrives.
+  if (existing && incomingAt && existingAt && incomingAt + 1_000 < existingAt) return existing;
   const reg =
     busRegistration(bus, existing?.extra || {}) ||
     existing?.extra?.vehicle?.reg ||
@@ -11398,6 +11408,11 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
 function updateMotion(id, lat, lng, iso) {
   const at = iso ? new Date(iso).getTime() : Date.now();
   const prev = motion.get(id);
+  // BODS and the paint feed can arrive out of order. Never let an older ping
+  // replace the newer motion/speed baseline used by marker smoothing.
+  if (prev && iso && Number.isFinite(at) && Number.isFinite(prev.at) && at < prev.at - 1_000) {
+    return Number.isFinite(prev.speedMph) ? prev.speedMph : null;
+  }
   let speedMph = prev?.speedMph;
   if (prev && Number.isFinite(at) && at > prev.at) {
     const dt = (at - prev.at) / 1000;
