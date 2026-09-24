@@ -64,7 +64,7 @@ function exitHistoryMapMode({ reload = false } = {}) {
   return had;
 }
 
-const map = L.map("map", { zoomControl: true }).setView([54.2, -2.5], 6);
+const map = L.map("map", { zoomControl: true }).setView([54.2, -2.5], 7);
 
 /** Day / night street basemap — OSM tiles (no API key). Night look via CSS filter on the tile pane.
  *  Carto free URLs now watermark “API KEY REQUIRED” and blank the map. */
@@ -540,7 +540,7 @@ function refreshMarkerIconsForZoom() {
     if (!item) continue;
     const heading = Number(item.positioning?.bearing) || 0;
     const zoomBand = map.getZoom() >= 15 ? "close" : "mid";
-    const iconKey = `${zoomBand}|${marker.line}|${Math.round(heading)}|${Math.round(item.speedMph || 0)}|${liveryCss(marker.staffLivery) || ""}`;
+    const iconKey = `${zoomBand}|${marker.line}|${Math.round(heading)}|${speedBucket(item.speedMph)}|${liveryCss(marker.staffLivery) || ""}`;
     if (marker._iconKey === iconKey) continue;
     marker._iconKey = iconKey;
     marker.setIcon(staffIcon(marker.line, heading, marker.staffLivery, item.speedMph));
@@ -8382,6 +8382,11 @@ function staffIcon(line, heading, livery = null, speedMph = null) {
   return vehicleIcon(line, heading, paint?.colour || STAFF_COLOURS[line] || "#cc181a", paint, speedMph);
 }
 
+function speedBucket(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n / 5) * 5 : 0;
+}
+
 function busIconKey(bus, heading = null, speedMph = null) {
   const liv = resolveBusLivery(bus);
   const livId = liv?.id || liveryIdOf(bus);
@@ -8391,7 +8396,7 @@ function busIconKey(bus, heading = null, speedMph = null) {
   return [
     zoomBand,
     Math.round(h),
-    Math.round(speed),
+    speedBucket(speed),
     livId,
     liveryCss(liv) || bus?.vehicle?.colour || "",
     bus?.service?.line_name || "",
@@ -9943,12 +9948,14 @@ async function loadAltonTowers() {
           existing.on("click", () => selectMapMarker(existing));
         }
         moveMarkerTo(existing, snapped.lat, snapped.lng);
-        const iconKey = `${line}|${Math.round(snapped.heading || 0)}|${Math.round(item.speedMph || 0)}|${liveryCss(livery) || ""}`;
+        const iconKey = `${line}|${Math.round(snapped.heading || 0)}|${speedBucket(item.speedMph)}|${liveryCss(livery) || ""}`;
         if (existing._iconKey !== iconKey) {
           existing._iconKey = iconKey;
           existing.setIcon(staffIcon(line, snapped.heading, livery, item.speedMph));
         }
-        refreshPopup(existing);
+        if (selectedMapMarker === existing || existing.isPopupOpen?.() || isFollowingMarker(existing)) {
+          refreshPopup(existing);
+        }
         if (existing === announceFollow) announceJourney(existing);
         keepFollowedInView(existing);
       } else {
@@ -10386,12 +10393,24 @@ async function loadBuses({ replace = false } = {}) {
       live.push({ bus, snapped });
     }
 
-    // Bustimes CSS must be ready before pins are drawn, or Staffs sticks on brand stripes.
-    try {
-      await ensureLiveries(live.map((row) => row.bus));
-    } catch {
-      /* ignore */
-    }
+    // Livery CSS is useful but should not delay live positions. Paint the
+    // markers immediately, then refresh their icons when the CSS arrives.
+    ensureLiveries(live.map((row) => row.bus))
+      .then(() => {
+        if (gen !== busesGen) return;
+        for (const marker of markers.values()) {
+          const bus = marker.bus;
+          if (!bus) continue;
+          const heading = Number.isFinite(Number(bus.heading)) ? Number(bus.heading) : 0;
+          const iconKey = busIconKey(bus, heading, bus.speedMph);
+          if (marker._iconKey === iconKey) continue;
+          marker._iconKey = iconKey;
+          marker.setIcon(busIcon(bus, heading));
+        }
+      })
+      .catch(() => {
+        /* livery is optional; keep the live marker */
+      });
 
     for (const { bus, snapped } of live) {
       seenService.add(bus.id);
@@ -10446,7 +10465,7 @@ async function loadBuses({ replace = false } = {}) {
           if (!item?.positioning) continue;
           const snapped = staffWhere(item);
           moveMarkerTo(marker, snapped.lat, snapped.lng);
-          const iconKey = `${marker.line}|${Math.round(snapped.heading || 0)}|${Math.round(item.speedMph || 0)}|${liveryCss(marker.staffLivery) || ""}`;
+          const iconKey = `${marker.line}|${Math.round(snapped.heading || 0)}|${speedBucket(item.speedMph)}|${liveryCss(marker.staffLivery) || ""}`;
           if (marker._iconKey !== iconKey) {
             marker._iconKey = iconKey;
             marker.setIcon(staffIcon(marker.line, snapped.heading, marker.staffLivery, item.speedMph));
@@ -10467,15 +10486,20 @@ async function loadBuses({ replace = false } = {}) {
   }
 }
 
+function refreshAltonIfRelevant() {
+  if (!mapOverlapsStaffordshire() && !staffMarkers.size) return;
+  loadAltonTowers().catch(() => {});
+}
+
 function schedule() {
   clearInterval(timer);
   clearInterval(coastTimer);
   loadBuses({ replace: true });
-  loadAltonTowers();
+  refreshAltonIfRelevant();
   timer = setInterval(() => {
     pruneStaleMarkers();
     loadBuses();
-    loadAltonTowers();
+    refreshAltonIfRelevant();
   }, BUS_POLL_MS);
   coastTimer = setInterval(advanceLiveMarkers, 1000);
 }
@@ -10496,6 +10520,7 @@ map.on("moveend", () => {
     loadBuses({ replace: true });
   }, 120);
   scheduleMapStops();
+  refreshAltonIfRelevant();
 });
 
 function stopAtcoFromFeature(feature) {
@@ -11341,6 +11366,8 @@ const JUNCTION_M = 18;
 let ofmTileTemplate = null;
 const decodedTileCache = new Map();
 let snapRoads = [];
+let snapRoadsKey = "";
+let snapRoadsAt = 0;
 const motion = new Map();
 
 function roadsForSnap() {
@@ -12355,10 +12382,14 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
 async function ensureSnapRoads(signal) {
   if (map.getZoom() < MIN_ZOOM) {
     snapRoads = [];
+    snapRoadsKey = "";
+    snapRoadsAt = 0;
     return;
   }
-  const template = await getOfmTemplate();
   const bounds = map.getBounds().pad(0.06);
+  const key = `${map.getZoom()}|${bounds.getNorth().toFixed(3)}|${bounds.getSouth().toFixed(3)}|${bounds.getEast().toFixed(3)}|${bounds.getWest().toFixed(3)}`;
+  if (snapRoadsKey === key && snapRoadsAt && Date.now() - snapRoadsAt < 30_000) return;
+  const template = await getOfmTemplate();
   let z = Math.min(Math.max(map.getZoom(), 13), 14);
   let tiles = tilesForBounds(bounds, z);
   if (tiles.length > 20) {
@@ -12371,6 +12402,8 @@ async function ensureSnapRoads(signal) {
   );
   if (signal?.aborted) return;
   snapRoads = decoded.flat();
+  snapRoadsKey = key;
+  snapRoadsAt = Date.now();
 }
 
 function minDistToRoad(p, latlngs) {
