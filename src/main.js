@@ -2022,8 +2022,9 @@ const GPS_REPLAY_SPEEDS = [1, 15, 60, 240];
 const REPLAY_ARROW_SPACING_ZOOMED_M = 52;
 const REPLAY_ARROW_SPACING_M = 28;
 const REPLAY_ARROW_LIMIT = 480;
-const REPLAY_PREVIEW_FRACTION = 0.02;
-const REPLAY_PREVIEW_MAX_MS = 120_000;
+const REPLAY_PREVIEW_FRACTION = 0.1;
+const REPLAY_PREVIEW_MAX_MS = 5 * 60_000;
+const REPLAY_PREVIEW_MIN_METERS = 800;
 
 function setGpsReplayActive(active) {
   mapWrapEl?.classList.toggle("gps-replay-active", Boolean(active));
@@ -2051,7 +2052,23 @@ const REPLAY_TAIL_CASING_WEIGHT = 10;
 function replayPreviewPosition(replay) {
   const span = Math.max(0, Number(replay?.t1) - Number(replay?.t0));
   if (!Number.isFinite(span) || span <= 0) return 0;
-  return Math.min(span * REPLAY_PREVIEW_FRACTION, REPLAY_PREVIEW_MAX_MS, span - 1);
+  let byDistance = span - 1;
+  let distance = 0;
+  for (let i = 1; i < (replay.pts?.length || 0); i += 1) {
+    const a = replay.pts[i - 1];
+    const b = replay.pts[i];
+    distance += haversineMeters(a.lat, a.lng, b.lat, b.lng);
+    if (distance >= REPLAY_PREVIEW_MIN_METERS) {
+      byDistance = Math.max(0, b.t - replay.t0);
+      break;
+    }
+  }
+  return Math.min(
+    span * REPLAY_PREVIEW_FRACTION,
+    REPLAY_PREVIEW_MAX_MS,
+    byDistance,
+    span - 1,
+  );
 }
 
 function replayArrowSpacingM() {
