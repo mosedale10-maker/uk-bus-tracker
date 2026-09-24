@@ -2135,9 +2135,9 @@ function gpsReplaySetup(pts) {
     arrow: null,
     travelledLine: null,
   };
-  // Show the whole recorded path as "travelled" until the replay is started/scrubbed.
+  // Start with no travelled line; it grows only as the replay marker advances.
   gpsReplayTravelledLine();
-  gpsReplayUpdateTravelled(gpsReplay.t1);
+  gpsReplayUpdateTravelled(gpsReplay.t0);
   gpsReplayControls(true);
 }
 const journeyPanelEl = document.getElementById("journey-panel");
@@ -5597,6 +5597,11 @@ async function startRoutePlayback({
         : 18 * 60_000;
 
     if (isHistorical || !liveKey) {
+      if (autoReplay && usingTracked) {
+        // Replay draws its travelled line progressively; do not pin the full
+        // historical tail ahead of the replay marker.
+        multiTailActiveGroup = null;
+      } else {
       let segs = segmentTrailIntoTrips(trackedGps, { gapMs });
       const clipped = clipPointsToSingleDirectionRun(trackedGps, {
         direction: safeDirection,
@@ -5637,6 +5642,7 @@ async function startRoutePlayback({
         } catch {
           /* ignore */
         }
+      }
       }
     } else if (liveKey) {
       pinVehicleTrail({
