@@ -2110,6 +2110,7 @@ function addReplayDirectionArrow(replay, point, bearing, t) {
     opacity: 0.95,
     zIndexOffset: 220,
   }).addTo(playbackLayer);
+  trailArrowMarkers.add(marker);
   marker._replayT = Number.isFinite(t) ? t : point.t;
   replay.directionArrows.push(marker);
 }
@@ -2138,6 +2139,7 @@ function gpsReplayUpdateDirectionArrows(t) {
       /* already removed */
     }
     replay.directionArrows.splice(i, 1);
+    trailArrowMarkers.delete(marker);
   }
   if (!Number.isFinite(replay.arrowT)) replay.arrowT = Number.NEGATIVE_INFINITY;
   if (t < pts[0].t) return;
@@ -2427,6 +2429,7 @@ function gpsReplayTeardown() {
     } catch {
       /* already gone */
     }
+    trailArrowMarkers.delete(marker);
   }
   gpsReplay = null;
   if (playbackReplayEl) {
@@ -2561,6 +2564,8 @@ function syncJourneyTimetableMinimized() {
 
 const playbackLayer = L.layerGroup().addTo(map);
 const liveTrailLayer = L.layerGroup().addTo(map);
+/** Every generated direction arrow, including orphaned pairs from a replaced selection. */
+const trailArrowMarkers = new Set();
 /** Active static route overlay (not animated playback). */
 let playback = null;
 /** Live bus / staff marker shown in the left side panel (replaces the old popup card). */
@@ -4043,6 +4048,7 @@ function clearTrailArrows(pair, layer) {
     } catch {
       /* already gone */
     }
+    trailArrowMarkers.delete(marker);
   }
   pair.arrows = [];
 }
@@ -4166,6 +4172,7 @@ function buildTrailArrowsAlongRoad(path, layer, opts = {}) {
       marker.openPopup();
     });
     marker.addTo(layer);
+    trailArrowMarkers.add(marker);
     arrows.push(marker);
     placed += 1;
   };
@@ -5269,6 +5276,15 @@ function clearTrailArtifacts(layer) {
       Boolean(element?.querySelector?.(".trail-arrow-chevron"));
     if (isTrailLine || isTrailArrow) layer.removeLayer(child);
   });
+  // Clean pairs that lost their map reference during a rapid row switch.
+  for (const marker of [...trailArrowMarkers]) {
+    try {
+      marker.remove?.();
+    } catch {
+      /* already removed */
+    }
+    trailArrowMarkers.delete(marker);
+  }
 }
 
 function clearPinnedTrails() {
