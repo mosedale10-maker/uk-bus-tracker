@@ -5247,18 +5247,30 @@ async function startRoutePlayback({
   recordedReplay = false,
 } = {}) {
   const playKey = tripId || journeyId || trailKey || vehicleId || regTrailKey(reg);
+  const requestedRecordedReplay =
+    recordedReplay === true ||
+    Boolean(
+      datetime &&
+        Number.isFinite(new Date(datetime).getTime()) &&
+        Date.now() - new Date(datetime).getTime() > 12 * 60_000,
+    );
   if (!playKey) {
     showMessage("No route to show");
     return;
   }
   if (routeOverlayActive(playKey, { vehicleId, trailKey })) {
-    // Already showing this route — Replay should animate it rather than hide it.
-    if (autoReplay && gpsReplay?.pts?.length >= 2) {
+    // Reuse an existing replay only when it has the same live/recorded mode.
+    // Switching from a Fleet history replay to a live bus replay must rebuild
+    // the clipped path rather than merely restarting the full historical one.
+    const sameReplayMode = Boolean(playback?.replayRecorded) === requestedRecordedReplay;
+    if (autoReplay && gpsReplay?.pts?.length >= 2 && sameReplayMode) {
       gpsReplayStart();
       return;
     }
-    stopRoutePlayback("", { clearTail: true });
-    return;
+    if (!autoReplay || sameReplayMode) {
+      stopRoutePlayback("", { clearTail: true });
+      return;
+    }
   }
   gpsReplayTeardown();
   showMessage("Loading route…");
@@ -5681,6 +5693,7 @@ async function startRoutePlayback({
     headsign,
     date: journeyDate,
     lastPing,
+    replayRecorded: preserveRecordedRun,
   };
   // Offer a true GPS replay when we recorded pings for this journey.
   gpsReplaySetup(trackedGps.length >= 2 ? trackedGps : allGps);
