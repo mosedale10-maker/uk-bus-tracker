@@ -7880,6 +7880,7 @@ function classLimitMph(cls) {
   return null;
 }
 
+const SPEED_LIMIT_CACHE_TTL_MS = 10 * 60_000;
 const speedLimitCache = new Map();
 
 function limitCacheKey(lat, lng) {
@@ -7926,40 +7927,13 @@ function resolveLimitMph(bus, extra = {}, lat, lng) {
 
 async function fetchLimitNear(lat, lng, fallback) {
   const key = limitCacheKey(lat, lng);
-  if (speedLimitCache.has(key)) return speedLimitCache.get(key);
-  const pending = (async () => {
-    const query = `[out:json][timeout:8];way(around:80,${lat.toFixed(5)},${lng.toFixed(5)})["highway"];out tags center;`;
-    try {
-      const json = await fetchOverpassJson(query, 8000);
-      let best = null;
-      let bestD = Infinity;
-      for (const el of json.elements || []) {
-        const elat = Number(el.center?.lat ?? el.lat);
-        const elng = Number(el.center?.lon ?? el.lon);
-        if (!Number.isFinite(elat) || !Number.isFinite(elng)) continue;
-        const hw = el.tags?.highway;
-        if (!hw || /^(footway|path|steps|pedestrian|cycleway|bridleway|track|corridor)$/i.test(hw)) {
-          continue;
-        }
-        const limit = parseMaxspeedMph(el.tags) ?? classLimitMph(hw) ?? 30;
-        if (limit == null) continue;
-        const d = haversineMeters(lat, lng, elat, elng);
-        if (d < bestD) {
-          bestD = d;
-          best = limit;
-        }
-      }
-      if (best != null && bestD <= 90) return best;
-    } catch {
-      // Fall back to the snapped road class.
-    }
-    if (Number.isFinite(fallback) && fallback > 0) return fallback;
-    return nearestRoadLimit(lat, lng);
-  })();
-  speedLimitCache.set(key, pending);
-  const result = await pending;
-  if (!Number.isFinite(result)) speedLimitCache.delete(key);
-  else speedLimitCache.set(key, result);
+  const hit = speedLimitCache.get(key);
+  if (hit && Date.now() - hit.at < SPEED_LIMIT_CACHE_TTL_MS) return hit.value;
+  // Use the local OpenFreeMap road snap only. Public Overpass endpoints are
+  // rate-limited and must never be called for every marker selection.
+  const result =
+    Number.isFinite(fallback) && fallback > 0 ? fallback : nearestRoadLimit(lat, lng);
+  speedLimitCache.set(key, { at: Date.now(), value: Number.isFinite(result) ? result : null });
   if (speedLimitCache.size > 400) speedLimitCache.delete(speedLimitCache.keys().next().value);
   return result;
 }
@@ -12076,56 +12050,6 @@ function minDistToRoad(p, latlngs) {
     if (d < best) best = d;
   }
   return best;
-}
-
-function combinedSignal(parent, ms) {
-  if (typeof AbortSignal.timeout === "function" && typeof AbortSignal.any === "function") {
-    return AbortSignal.any([parent, AbortSignal.timeout(ms)]);
-  }
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
-  const abort = () => {
-    clearTimeout(timer);
-    ctrl.abort();
-  };
-  if (parent.aborted) abort();
-  else parent.addEventListener("abort", abort, { once: true });
-  return ctrl.signal;
-}
-
-async function fetchOverpassJson(query, ms = 8000) {
-  const ctrl = new AbortController();
-  const endpoints = [
-    "/api/overpass",
-    "/api/overpass-alt",
-    `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`,
-    `https://overpass.osm.ch/api/interpreter?data=${encodeURIComponent(query)}`,
-  ];
-  const attempts = endpoints.map(async (url) => {
-    const res = await fetch(
-      url.startsWith("/") ? `${url}?data=${encodeURIComponent(query)}` : url,
-      { signal: combinedSignal(ctrl.signal, ms) },
-    );
-    if (!res.ok) throw new Error(`Overpass ${res.status}`);
-    return res.json();
-  });
-  return new Promise((resolve, reject) => {
-    let pending = attempts.length;
-    for (const attempt of attempts) {
-      attempt.then(
-        (json) => {
-          if (!pending) return;
-          pending = 0;
-          ctrl.abort();
-          resolve(json);
-        },
-        () => {
-          pending -= 1;
-          if (!pending) reject(new Error("Overpass failed"));
-        },
-      );
-    }
-  });
 }
 
 async function getOfmTemplate() {

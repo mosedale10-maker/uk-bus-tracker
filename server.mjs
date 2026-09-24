@@ -1024,6 +1024,39 @@ app.get("/api/bt-paint", async (req, res, next) => {
   }
 });
 
+// Overpass is optional speed-limit enrichment. Bound concurrent upstream work
+// so a burst of marker selections cannot exhaust nginx's file descriptors.
+const OVERPASS_MAX_ACTIVE = 4;
+let overpassActive = 0;
+let overpassBlockedAt = 0;
+app.use(["/api/overpass", "/api/overpass-alt"], (req, res, next) => {
+  if (req.method !== "GET" && req.method !== "HEAD") return next();
+  if (overpassActive >= OVERPASS_MAX_ACTIVE) {
+    const now = Date.now();
+    if (now - overpassBlockedAt > 60_000) {
+      overpassBlockedAt = now;
+      console.warn("[overpass] busy — rejecting excess speed-limit lookup");
+    }
+    res.setHeader("Retry-After", "5");
+    res.setHeader("Cache-Control", "no-store");
+    res.status(503).type("json").json({
+      error: "overpass_busy",
+      message: "Road-limit lookup is busy; using the cached road data.",
+    });
+    return;
+  }
+  overpassActive += 1;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    overpassActive = Math.max(0, overpassActive - 1);
+  };
+  res.once("finish", release);
+  res.once("close", release);
+  next();
+});
+
 app.use(
   "/api/overpass",
   proxy({
@@ -1034,6 +1067,8 @@ app.use(
       return `/api/interpreter${q}`;
     },
     headers: { "User-Agent": UA },
+    timeout: 12_000,
+    proxyTimeout: 12_000,
   }),
 );
 app.use(
@@ -1046,6 +1081,8 @@ app.use(
       return `/api/interpreter${q}`;
     },
     headers: { "User-Agent": UA },
+    timeout: 12_000,
+    proxyTimeout: 12_000,
   }),
 );
 app.use(
