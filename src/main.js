@@ -3695,7 +3695,8 @@ function isStaffsTrailOperator(operator) {
 
 /** Route 36A is displayed against its published A50 alignment when requested. */
 function usesPlannedRouteOverride(line, operator) {
-  return sameServiceLine(line, "36A") && String(operator || "").trim().toUpperCase() === "FPOT";
+  const noc = String(operator || "").trim().toUpperCase();
+  return sameServiceLine(line, "36A") && (!noc || noc === "FPOT");
 }
 
 function trailBreakLimits({ coach = false, staffs = false, operator = "", continuous = false } = {}) {
