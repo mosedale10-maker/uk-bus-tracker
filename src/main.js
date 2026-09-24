@@ -1081,6 +1081,16 @@ function inferDelaySeconds(stops, lat, lng, iso) {
   return delta;
 }
 
+function actualClockLabel(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (raw.includes("T")) {
+    const ms = Date.parse(raw);
+    if (Number.isFinite(ms)) return observedClockLabel(ms);
+  }
+  return clockLabel(raw);
+}
+
 function mapTripStops(times) {
   return (times || []).map((row) => {
     const loc = row.stop?.location;
@@ -1090,9 +1100,9 @@ function mapTripStops(times) {
     const aimedDep = clockLabel(row.aimed_departure_time);
     const aimed = clockLabel(rowAimed(row));
     const expected = clockLabel(row.expected_departure_time || row.expected_arrival_time || row.expected);
-    const actualArr = clockLabel(row.actual_arrival_time);
-    const actualDep = clockLabel(row.actual_departure_time);
-    const actual = clockLabel(row.actual_departure_time || row.actual_arrival_time);
+    const actualArr = actualClockLabel(row.actual_arrival_time);
+    const actualDep = actualClockLabel(row.actual_departure_time);
+    const actual = actualClockLabel(row.actual_departure_time || row.actual_arrival_time);
     return {
       name: row.stop?.name || row.stop?.common_name || row.name || "",
       atco: row.stop?.atco_code || row.stop?.atcocode || "",
@@ -1132,8 +1142,9 @@ const OBSERVED_CLOCK_FMT = new Intl.DateTimeFormat("en-GB", {
 });
 
 function observedPointTimestamp(point) {
-  let t = Number(point?.t);
-  if (!Number.isFinite(t)) t = Date.parse(point?.t || "");
+  const raw = Array.isArray(point) ? point[3] : point?.t;
+  let t = Number(raw);
+  if (!Number.isFinite(t)) t = Date.parse(raw || "");
   if (Number.isFinite(t) && t > 0 && t < 100_000_000_000) t *= 1000;
   return Number.isFinite(t) ? t : null;
 }
@@ -1147,15 +1158,15 @@ function observedClockLabel(ms) {
 /** Select the GPS points belonging to one trip, without mixing another bus run. */
 function observedGpsPoints(
   gpsPoints,
-  { tripId = "", line = "", fromMs = 0, toMs = 0, nowMs = Date.now() } = {},
+  { tripId = "", journeyId = "", line = "", fromMs = 0, toMs = 0, nowMs = Date.now() } = {},
 ) {
   const base = (Array.isArray(gpsPoints) ? gpsPoints : [])
     .map((point) => {
       const t = observedPointTimestamp(point);
-      const lat = Number(point?.lat);
-      const lng = Number(point?.lng);
+      const lat = Number(Array.isArray(point) ? point[0] : point?.lat);
+      const lng = Number(Array.isArray(point) ? point[1] : point?.lng);
       if (!Number.isFinite(t) || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-      return { ...point, t, lat, lng };
+      return { ...(Array.isArray(point) ? {} : point), t, lat, lng };
     })
     .filter(Boolean)
     .sort((a, b) => a.t - b.t);
@@ -1171,6 +1182,14 @@ function observedGpsPoints(
     const exact = points.filter((point) => String(point.tripId || "").trim() === wantedTrip);
     // A trip id is stronger than line metadata: BODS can briefly report 11 for an 11X run.
     if (exact.length) points = exact;
+  } else {
+    const wantedJourney = String(journeyId || "").trim();
+    if (wantedJourney) {
+      const exact = points.filter(
+        (point) => String(point.journeyId || "").trim() === wantedJourney,
+      );
+      if (exact.length) points = exact;
+    }
   }
   const wantedLine = String(line || "").trim();
   if (wantedLine) {
@@ -2137,12 +2156,13 @@ let playback = null;
 /** Live bus / staff marker shown in the left side panel (replaces the old popup card). */
 let selectedMapMarker = null;
 
-function journeyStopTimeStack(arr, dep) {
+function journeyStopTimeStack(arr, dep, source = "") {
   const a = String(arr || "").trim();
   const d = String(dep || "").trim();
+  const title = source === "gps" ? ' title="Observed from the bus GPS trail"' : "";
   if (!a && !d) return `<span class="is-empty">—</span>`;
-  if (a && d && a !== d) return `<span>${esc(a)}</span><span>${esc(d)}</span>`;
-  return `<span>${esc(a || d)}</span>`;
+  if (a && d && a !== d) return `<span${title}>${esc(a)}</span><span${title}>${esc(d)}</span>`;
+  return `<span${title}>${esc(a || d)}</span>`;
 }
 
 function setJourneyPanelOpen(open) {
@@ -2179,7 +2199,7 @@ function renderJourneyPanelStops(stops, { lat = null, lng = null } = {}) {
       return `<div class="journey-stop${cls}">
         <p class="journey-stop-name">${esc(stop.name || "Stop")}</p>
         <div class="journey-stop-times">${journeyStopTimeStack(stop.aimedArr, stop.aimedDep || stop.aimed)}</div>
-        <div class="journey-stop-times is-actual">${journeyStopTimeStack(stop.actualArr, stop.actualDep || stop.actual)}</div>
+        <div class="journey-stop-times is-actual">${journeyStopTimeStack(stop.actualArr, stop.actualDep || stop.actual, stop.actualSource)}</div>
       </div>`;
     })
     .join("");
@@ -4549,6 +4569,7 @@ function refreshObservedStopTimes(marker, { force = false } = {}) {
   const end = Number(extra.tripEndMs);
   extra.stops = attachObservedStopTimes(extra.stops, points, {
     tripId,
+    journeyId: bus.journey_id || "",
     line,
     fromMs: Number.isFinite(start) && start > 0 ? start - 60 * 60_000 : 0,
     toMs: Number.isFinite(end) && end > 0 ? end + 60 * 60_000 : 0,
@@ -5193,6 +5214,7 @@ async function startRoutePlayback({
     trackedGps,
     {
       tripId: resolvedTripId || tripId,
+      journeyId: safeJourneyId,
       line: line || trip?.line || "",
       fromMs,
       toMs,
