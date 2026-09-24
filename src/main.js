@@ -721,7 +721,9 @@ const STAFFS_STALE_PING_MS = 20 * 60 * 1000;
 /** Only bridge short gaps between AVL polls — never keep driving once the feed stalls. */
 const COAST_MIN_AGE_MS = 900;
 const COAST_MAX_AGE_MS = 4500;
-const COAST_MAX_M = 36;
+// Do not extrapolate authoritative AVL positions: replacing the bus object on
+// each poll otherwise discards coast state and makes markers snap backwards.
+const COAST_MAX_M = 0;
 
 function showMessage(text) {
   messageEl.hidden = !text;
@@ -7100,6 +7102,9 @@ function mergeTicketerOosFromBods(byId, bodsVehicles) {
     }
     if (matchedId != null) {
       const existing = byId.get(matchedId);
+      const existingAt = busFeedTime(existing);
+      const taggedAt = busFeedTime(tagged);
+      const taggedPositionNewer = !existingAt || (taggedAt && taggedAt >= existingAt);
       byId.set(matchedId, {
         ...existing,
         ...tagged,
@@ -7118,10 +7123,18 @@ function mergeTicketerOosFromBods(byId, bodsVehicles) {
           line_name: tagged.service?.line_name || existing.service?.line_name || "",
         },
         operator: existing.operator || tagged.operator,
-        coordinates: tagged.coordinates || existing.coordinates,
-        heading: Number.isFinite(tagged.heading) ? tagged.heading : existing.heading,
-        datetime: tagged.datetime || existing.datetime,
-        destination: tagged.destination || existing.destination,
+        coordinates: taggedPositionNewer
+          ? tagged.coordinates || existing.coordinates
+          : existing.coordinates || tagged.coordinates,
+        heading: taggedPositionNewer && Number.isFinite(tagged.heading)
+          ? tagged.heading
+          : existing.heading ?? tagged.heading,
+        datetime: taggedPositionNewer
+          ? tagged.datetime || existing.datetime
+          : existing.datetime || tagged.datetime,
+        destination: taggedPositionNewer
+          ? tagged.destination || existing.destination
+          : existing.destination || tagged.destination,
         nis: true,
         deadRun: tagged.deadRun || existing.deadRun,
         depotOos: tagged.depotOos,
@@ -9869,17 +9882,25 @@ async function enrichStaff(eventOrMarker) {
   loadPhotoIntoMarker(marker);
 }
 
+let altonLoadBusy = false;
+let altonLoadGen = 0;
+
 async function loadAltonTowers() {
   if (historyMapFocus()) {
     applyHistoryMapFocusToLiveMarkers();
     return;
   }
+  if (altonLoadBusy) return;
+  const gen = ++altonLoadGen;
+  altonLoadBusy = true;
   try {
     const response = await fetch(
       "/api/dg-vehicles?regionId=526&showBusesNotInService=true",
     );
     if (!response.ok) throw new Error(`Alton Towers feed ${response.status}`);
+    if (gen !== altonLoadGen) return;
     const data = await response.json();
+    if (gen !== altonLoadGen) return;
     const items = data.items || [];
     const seen = new Set();
 
@@ -9892,13 +9913,18 @@ async function loadAltonTowers() {
       if (!id) continue;
       if (dgIsNotInService(item)) continue;
       if (!ALTON_LINES.has(staffLineName(item))) continue;
+      const existing = staffMarkers.get(id);
+      const incomingAt = item.recordedAtTime ? new Date(item.recordedAtTime).getTime() : 0;
+      const existingAt = existing?.staff?.recordedAtTime
+        ? new Date(existing.staff.recordedAtTime).getTime()
+        : 0;
       seen.add(id);
+      if (existing && incomingAt && existingAt && incomingAt + 1_000 < existingAt) continue;
       const line = staffLineName(item);
       const heading = Number(item.positioning?.bearing);
       item.speedMph = updateMotion(`staff-${id}`, lat, lng, item.recordedAtTime);
       const snapped = staffWhere(item);
       item.limitMph = snapped.limitMph ?? nearestRoadLimit(snapped.lat, snapped.lng);
-      const existing = staffMarkers.get(id);
       recordStaffTrail(existing || { staff: item, extra: {} }, snapped.lat, snapped.lng, snapped.heading, {
         t: item.recordedAtTime ? new Date(item.recordedAtTime).getTime() || Date.now() : Date.now(),
       });
@@ -9964,6 +9990,8 @@ async function loadAltonTowers() {
     revealPendingFocus();
   } catch {
     // Keep the rest of the map working if the D&G feed is down.
+  } finally {
+    if (gen === altonLoadGen) altonLoadBusy = false;
   }
 }
 
@@ -9983,6 +10011,21 @@ function dropServiceBus(id) {
 function busFeedTime(bus) {
   const value = bus?.datetime ? new Date(bus.datetime).getTime() : NaN;
   return Number.isFinite(value) ? value : 0;
+}
+
+function isBackwardPositionJump(existing, bus, snapped) {
+  if (!existing || !Number.isFinite(Number(bus?.coordinates?.[1])) || !Number.isFinite(snapped?.heading)) return false;
+  const incomingAt = busFeedTime(bus);
+  const previousAt = busFeedTime(existing.bus);
+  if (!incomingAt || !previousAt || incomingAt <= previousAt) return false;
+  const dtSec = (incomingAt - previousAt) / 1000;
+  if (dtSec > 20) return false;
+  const previous = existing.getLatLng?.();
+  if (!previous) return false;
+  const distance = haversineMeters(previous.lat, previous.lng, snapped.lat, snapped.lng);
+  if (distance < 180) return false;
+  const bearing = segmentBearing([previous.lat, previous.lng], [snapped.lat, snapped.lng]);
+  return angleDiff(bearing, snapped.heading) > 120;
 }
 
 function upsertLiveBus(bus, snapped) {
