@@ -2502,6 +2502,10 @@ function selectMapMarker(marker) {
   }
   selectedMapMarker = marker;
   marker._lastPopupStructure = "";
+  if (marker._occRetry) clearTimeout(marker._occRetry);
+  marker._occRetry = null;
+  marker._occRetryAt = 0;
+  marker._occAttempts = 0;
   marker._occAt = 0;      // bypass the 60s cooldown on selection
   marker._occBusy = false;
   const crumb = sidePanelCrumbForMarker(marker);
@@ -7613,12 +7617,40 @@ function matchFirstDeparture(data, bus, stopIso = "") {
   return withOcc[0] || destPool.find((row) => parseFirstOccupancy(row)) || destPool[0];
 }
 
-async function firstOccupancyFor(bus, extra, lat, lng) {
+async function fetchFirstStreamOccupancy(bus, extra = {}, lat = null, lng = null) {
   if (!(isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))) return null;
-  // Live seats come from the First Bus app's departure board (?live=true) — server-cached.
-  // Unserved stops only (their boards still carry THIS trip's row — served stops' rows are
-  // gone, and borrowing a later trip there was the wrong-bus bug); each row is pinned to this
-  // trip by its own aimed time in matchFirstDeparture.
+  const params = new URLSearchParams();
+  const line = String(bus.service?.line_name || extra.line || "").trim();
+  if (line) params.set("line", line);
+  const destination = String(extra.to || bus.destination || "").trim();
+  if (destination) params.set("destination", destination);
+  const direction = String(extra.direction || bus.direction || "").trim();
+  if (direction) params.set("direction", direction);
+  const vehicle = String(
+    extra.vehicle?.reg || extra.btVehicle?.reg || bus.vehicle?.reg || bus.vehicle?.name || "",
+  ).trim();
+  if (vehicle) params.set("vehicle", vehicle);
+  if (Number.isFinite(lat)) params.set("lat", String(Number(lat)));
+  if (Number.isFinite(lng)) params.set("lng", String(Number(lng)));
+  try {
+    const res = await fetch(`/api/first-occupancy?${params}`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    return parseFirstOccupancy(data);
+  } catch {
+    return null;
+  }
+}
+
+async function firstOccupancyFor(bus, extra = {}, lat, lng) {
+  if (!(isFirstPotteriesBus(bus, extra) || isFirstBus(bus, extra))) return null;
+  // The continuous First vehicle stream is the fast path: it already contains
+  // this bus's live seat/wheelchair counts before a stop board is queried.
+  const streamOccupancy = await fetchFirstStreamOccupancy(bus, extra, lat, lng);
+  if (streamOccupancy) return streamOccupancy;
+  // Fallback to the exact departure-board row when the stream has not seen this
+  // vehicle yet. Unserved stops still carry this trip's row; each is pinned to
+  // its own aimed time in matchFirstDeparture.
   const upcoming = upcomingStops(extra.stops || [], lat, lng);
   const list = (upcoming.length ? upcoming : extra.stops || []).filter(
     (stop) => stop?.atco && !stop.done,
@@ -7636,42 +7668,71 @@ async function firstOccupancyFor(bus, extra, lat, lng) {
 }
 
 const FIRST_OCCUPANCY_REFRESH_MS = 60_000;
+const FIRST_OCCUPANCY_RETRY_MS = 900;
 
 /** Re-fetch live seats for an open First Bus card and repaint when the numbers change. */
 async function refreshFirstOccupancy(marker, gen) {
-  if (!marker?.bus) return;
+  if (!marker?.bus) return null;
   marker.extra ||= {};
   const ll = marker.getLatLng?.() || {};
   const occ = await firstOccupancyFor(marker.bus, marker.extra, ll.lat, ll.lng);
-  if ((marker._enrichGen || 0) !== gen) return; // card re-selected mid-fetch
+  if ((marker._enrichGen || 0) !== gen) return null; // card re-selected mid-fetch
   const prev = marker.extra.firstOccupancy || null;
+  // Keep the last good app reading through a transient stream/board miss.
+  const value = occ || prev;
   const same =
-    (prev?.seats ?? null) === (occ?.seats ?? null) &&
-    (prev?.remaining ?? null) === (occ?.remaining ?? null) &&
-    (prev?.occupied ?? null) === (occ?.occupied ?? null) &&
-    (prev?.wheelchairLeft ?? null) === (occ?.wheelchairLeft ?? null);
-  marker.extra.firstOccupancy = occ;
-  if (same) return;
-  refreshPopup(marker, { force: true }); // seats sit outside the structure key
+    (prev?.seats ?? null) === (value?.seats ?? null) &&
+    (prev?.remaining ?? null) === (value?.remaining ?? null) &&
+    (prev?.occupied ?? null) === (value?.occupied ?? null) &&
+    (prev?.wheelchairLeft ?? null) === (value?.wheelchairLeft ?? null);
+  if (value) marker.extra.firstOccupancy = value;
+  if (!same) refreshPopup(marker, { force: true }); // seats sit outside the structure key
+  return value || null;
 }
 
 /** Called from refreshPopup — polls First seats at most once a minute while the card is open,
  *  but loads immediately the first time a bus is selected (no prior data yet). */
 function refreshFirstOccupancyIfDue(marker) {
   const bus = marker?.bus;
-  if (!bus || !marker.extra?.stops?.length) return;
+  if (!bus) return;
   if (!(isFirstPotteriesBus(bus, marker.extra) || isFirstBus(bus, marker.extra))) return;
   if (!(selectedMapMarker === marker || marker.isPopupOpen?.())) return;
   const now = Date.now();
   // Load immediately when there is no prior occupancy data (first click).
   const hasPriorData = marker.extra?.firstOccupancy != null;
   if (hasPriorData && marker._occAt && now - marker._occAt < FIRST_OCCUPANCY_REFRESH_MS) return;
+  if (!hasPriorData && marker._occRetryAt && now < marker._occRetryAt) return;
   if (marker._occBusy) return;
-  marker._occAt = now;
   marker._occBusy = true;
   const gen = marker._enrichGen || 0;
   refreshFirstOccupancy(marker, gen)
-    .catch(() => {})
+    .then((value) => {
+      if (value) {
+        marker._occAt = Date.now();
+        marker._occAttempts = 0;
+        marker._occRetryAt = 0;
+        return;
+      }
+      // The websocket may still be connecting on the first card view. Retry
+      // briefly so the seat block appears without waiting for the next poll.
+      if (hasPriorData) {
+        marker._occAt = Date.now();
+        return;
+      }
+      marker._occAttempts = (marker._occAttempts || 0) + 1;
+      const delay = marker._occAttempts < 3 ? FIRST_OCCUPANCY_RETRY_MS : 10_000;
+      marker._occRetryAt = Date.now() + delay;
+      if (!marker._occRetry) {
+        marker._occRetry = setTimeout(() => {
+          marker._occRetry = null;
+          marker._occRetryAt = 0;
+          refreshFirstOccupancyIfDue(marker);
+        }, delay);
+      }
+    })
+    .catch(() => {
+      marker._occRetryAt = Date.now() + FIRST_OCCUPANCY_RETRY_MS;
+    })
     .finally(() => {
       marker._occBusy = false;
     });
@@ -9639,6 +9700,9 @@ async function enrichBustimes(eventOrMarker) {
     marker.extra.tripDate = ends.date || bus.date || "";
     marker.extra.tripStartMs = ends.startMs;
     marker.extra.tripEndMs = ends.endMs;
+    // Start the live seat lookup as soon as this trip's stops are available;
+    // do not make the open card wait for the remaining vehicle/history requests.
+    refreshFirstOccupancyIfDue(marker);
     marker.extra.delaySec = resolveLiveDelaySec(
       bus,
       { ...marker.extra, stops: ends.stops, delaySec: ends.delaySec },

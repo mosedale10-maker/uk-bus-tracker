@@ -174,8 +174,10 @@ export async function handleFirstStopTimes(req, res) {
     return;
   }
   try {
+    // Connect the continuous vehicle stream while the stop board is loading;
+    // the board can be slow, but the stream often already has this bus's seats.
+    startFirstStream();
     const body = await cachedStop(stop);
-    startFirstStream(); // lazy, idempotent — websocket fills rows without board readings
     json(res, 200, { ok: true, ...body, times: enrichTimesWithStream(body.times, stop) });
   } catch (error) {
     const missingKey = String(error?.message || "").includes("first_app_key_missing");

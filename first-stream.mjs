@@ -98,6 +98,7 @@ export function ingestFrame(text) {
       stops: Array.isArray(m.stops) ? m.stops : [],
       occupancy: m.status.occupancy, // { types:[{name,capacity,occupied}] } — app-exact
       vehicleId: id,
+      location: m.location || m.status?.location || null,
       recordedAt: String(m.status.recorded_at_time || ""),
       lastSeen: now,
     });
@@ -249,6 +250,112 @@ export function streamOccupancyFor({ line, dir = "", atco, scheduled = "" }) {
   }
   if (timeless.length === 1) return occupancyPayload(timeless[0]);
   return null;
+}
+
+function streamDirection(value) {
+  const d = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (/^(in|inbound|outward)$/.test(d)) return "in";
+  if (/^(out|outbound)$/.test(d)) return "out";
+  return "";
+}
+
+function streamText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function streamLocation(location) {
+  if (Array.isArray(location)) {
+    const lat = Number(location[1]);
+    const lng = Number(location[0]);
+    return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+  }
+  const lat = Number(location?.lat ?? location?.latitude);
+  const lng = Number(location?.lng ?? location?.lon ?? location?.longitude);
+  return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+}
+
+function streamDistance(a, b) {
+  if (!a || !b) return Infinity;
+  const lat1 = Number(a.lat);
+  const lng1 = Number(a.lng);
+  const lat2 = Number(b.lat);
+  const lng2 = Number(b.lng);
+  if (![lat1, lng1, lat2, lng2].every(Number.isFinite)) return Infinity;
+  const rad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * rad;
+  const dLng = (lng2 - lng1) * rad;
+  const x =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLng / 2) ** 2;
+  return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(x)));
+}
+
+/**
+ * Match the current websocket vehicle to a live map card. This is intentionally
+ * conservative: a line/destination match is used only when it identifies one
+ * vehicle, or when the card's live position is close to one candidate.
+ */
+export function streamOccupancyForBus({
+  line = "",
+  dir = "",
+  description = "",
+  vehicle = "",
+  lat = null,
+  lng = null,
+} = {}) {
+  prune();
+  const wantLine = String(line || "").trim().toUpperCase();
+  if (!wantLine) return null;
+  let candidates = [...vehicles.values()].filter(
+    (v) => String(v.line || "").trim().toUpperCase() === wantLine,
+  );
+  const wantDir = streamDirection(dir);
+  if (wantDir) {
+    const sameDir = candidates.filter((v) => !v.dir || streamDirection(v.dir) === wantDir);
+    if (!sameDir.length) return null;
+    candidates = sameDir;
+  }
+
+  const wantVehicle = streamText(vehicle);
+  if (wantVehicle) {
+    const sameVehicle = candidates.filter((v) => {
+      const id = streamText(v.vehicleId);
+      const desc = streamText(v.description);
+      return id.includes(wantVehicle) || desc.includes(wantVehicle);
+    });
+    if (sameVehicle.length) candidates = sameVehicle;
+  }
+
+  const wantDescription = streamText(description);
+  if (wantDescription) {
+    const sameDescription = candidates.filter((v) => {
+      const actual = streamText(v.description);
+      return actual && (actual === wantDescription || actual.includes(wantDescription) || wantDescription.includes(actual));
+    });
+    if (sameDescription.length) candidates = sameDescription;
+  }
+
+  if (candidates.length === 1) return occupancyPayload(candidates[0]);
+  const hasHere =
+    lat !== null &&
+    lat !== undefined &&
+    lng !== null &&
+    lng !== undefined &&
+    Number.isFinite(Number(lat)) &&
+    Number.isFinite(Number(lng));
+  const here = hasHere ? { lat: Number(lat), lng: Number(lng) } : null;
+  if (!here || candidates.length < 2) return null;
+  const ranked = candidates
+    .map((v) => ({ v, distance: streamDistance(here, streamLocation(v.location)) }))
+    .sort((a, b) => a.distance - b.distance);
+  const nearest = ranked[0];
+  if (!nearest || nearest.distance > 2500) return null;
+  const close = ranked.filter((row) => row.distance <= nearest.distance + 500);
+  return close.length === 1 ? occupancyPayload(nearest.v) : null;
 }
 
 function occupancyPayload(v) {

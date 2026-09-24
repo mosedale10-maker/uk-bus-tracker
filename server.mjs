@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { handleBodsOccupancy, handleBodsVehicles, fetchBodsVehiclesJson } from "./bods-occupancy.js";
 import { handleDgAtTimetable } from "./dg-at-timetable.js";
 import { handleFirstStopTimes } from "./first-departures.js";
+import { startFirstStream, streamOccupancyForBus } from "./first-stream.mjs";
 import {
   initAuthStore,
   hasDatabase,
@@ -453,6 +454,27 @@ app.get("/api/build", (_req, res) => {
 });
 // Live First Bus seat / wheelchair counts (cached gateway proxy — see first-departures.js).
 app.get("/api/first-stop-times", (req, res) => handleFirstStopTimes(req, res));
+app.get("/api/first-occupancy", (req, res) => {
+  const url = new URL(req.url, "http://localhost");
+  startFirstStream();
+  const latRaw = url.searchParams.get("lat");
+  const lngRaw = url.searchParams.get("lng");
+  const hit = streamOccupancyForBus({
+    line: String(url.searchParams.get("line") || "").slice(0, 20),
+    dir: String(url.searchParams.get("direction") || url.searchParams.get("dir") || "").slice(0, 20),
+    description: String(url.searchParams.get("destination") || url.searchParams.get("description") || "").slice(0, 160),
+    vehicle: String(url.searchParams.get("vehicle") || "").slice(0, 80),
+    lat: latRaw == null ? null : Number(latRaw),
+    lng: lngRaw == null ? null : Number(lngRaw),
+  });
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    ok: true,
+    occupancy: hit?.occupancy || null,
+    vehicle_id: hit?.vehicle_id || "",
+    recorded_at_time: hit?.recorded_at_time || "",
+  });
+});
 
 /** Whole-UK live vehicle count (BODS SIRI-VM), refreshed about every 30s. */
 const UK_LIVE_BBOX = { xmin: -8.2, ymin: 49.8, xmax: 1.85, ymax: 60.9 };
