@@ -8496,7 +8496,10 @@ async function tripEnds(tripId, { force = false, date = "" } = {}) {
           const start = String(trip?.start || "");
           const end = String(trip?.end || "");
           const startMs = tripDate ? tripAimedMs(start, dateRef) : NaN;
-          const endMs = tripDate ? tripAimedMs(end, dateRef) : NaN;
+          let endMs = tripDate ? tripAimedMs(end, dateRef) : NaN;
+          if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs <= startMs) {
+            endMs += 24 * 60 * 60_000;
+          }
           return {
             from,
             to,
