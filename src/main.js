@@ -4247,13 +4247,57 @@ function trailPairBreakOpts(opts = {}, fallback = {}) {
   };
 }
 
+function isMultiTrailPath(latlngs) {
+  return Array.isArray(latlngs) && Array.isArray(latlngs[0]) && Array.isArray(latlngs[0][0]);
+}
+
+/**
+ * Leaflet's L.polyline accepts one coordinate list, not a MultiPolyline.
+ * Road matching deliberately returns multiple fragments when a sparse GPS
+ * bridge is unsafe; render those fragments as a LayerGroup of ordinary
+ * polylines instead of letting Leaflet flatten the nested array into a bogus
+ * zig-zag/loop.
+ */
+function makeTrailPathLayer(latlngs, options, target) {
+  if (!isMultiTrailPath(latlngs)) return L.polyline(latlngs, options).addTo(target);
+  const group = L.layerGroup().addTo(target);
+  const render = (next) => {
+    group.clearLayers();
+    const segments = isMultiTrailPath(next) ? next : next?.length ? [next] : [];
+    for (const segment of segments) {
+      if (!Array.isArray(segment) || segment.length < 2) continue;
+      group.addLayer(L.polyline(segment, options));
+    }
+  };
+  render(latlngs);
+  group.__trailMulti = true;
+  group.setLatLngs = render;
+  group.setStyle = (style) => {
+    group.eachLayer((child) => child.setStyle?.(style));
+    return group;
+  };
+  return group;
+}
+
+function setTrailPathLayerLatLngs(layer, latlngs) {
+  if (layer?.__trailMulti) {
+    layer.setLatLngs(latlngs);
+    return;
+  }
+  layer?.setLatLngs?.(latlngs);
+}
+
 function makeTrailPair(path, layer, opts = {}) {
   const breakOpts = trailPairBreakOpts(opts);
   const latlngs = asTrailLatLngs(path, breakOpts);
   // White casing + coloured centre keeps the route readable over both light
   // street maps and the dark night tiles, like the reference replay view.
-  const casing = L.polyline(latlngs, TRAIL_CASING).addTo(layer);
-  const line = L.polyline(latlngs, { ...TRAIL_STROKE, color: trailLineColor(breakOpts.operator) }).addTo(layer);
+  const casing = makeTrailPathLayer(latlngs, TRAIL_CASING, layer);
+  const line = makeTrailPathLayer(
+    latlngs,
+    { ...TRAIL_STROKE, color: trailLineColor(breakOpts.operator) },
+    layer,
+  );
   const gps = opts.gpsPoints || opts.gpsPath || null;
   const arrows = opts.deferArrows
     ? []
@@ -4280,8 +4324,8 @@ function setTrailPairPath(pair, path, opts = {}) {
   pair.breakOpts = breakOpts;
   pair.path = path;
   const latlngs = asTrailLatLngs(path, breakOpts);
-  pair.casing?.setLatLngs?.(latlngs);
-  pair.line.setLatLngs(latlngs);
+  setTrailPathLayerLatLngs(pair.casing, latlngs);
+  setTrailPathLayerLatLngs(pair.line, latlngs);
   if (opts.gpsPoints || opts.gpsPath) {
     pair.gpsPoints = opts.gpsPoints || opts.gpsPath;
   }
