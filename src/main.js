@@ -4975,14 +4975,14 @@ async function showFleetRouteTails({
     // Do not fall back to every recent run for that vehicle: that creates
     // several extra tails on the map. Route-wide tails without an ID still
     // intentionally show all recorded trips.
+    const singleSelectedRun = targets.length === 1 && Boolean(vWhen);
     if (vJourney) {
       gps = gps.filter((point) => String(point.journeyId || "") === vJourney);
     } else if (vTrip) {
       gps = gps.filter((point) => String(point.tripId || "") === vTrip);
-    } else if (targets.length === 1 && isAltonLine(vLine || code) && vWhen) {
-      // AT employee AVL journey IDs are intentionally ignored by the recorder.
-      // Select the single recorded stint nearest this Fleet row's start time
-      // instead of drawing every AT1/AT2/AT3 run in the surrounding window.
+    } else if (singleSelectedRun) {
+      // Flix/NATX and AT employee IDs can flap or be absent. Select the one
+      // recorded stint nearest the selected row's time, never every nearby run.
       const selected = clipPointsToSingleDirectionRun(gps, {
         direction: normalizeTrailDirection(v.direction || direction || ""),
         aroundMs: new Date(vWhen).getTime(),
@@ -4993,9 +4993,11 @@ async function showFleetRouteTails({
       isStaffsTrailOperator(opCode) ||
       isAltonLine(vLine || code) ||
       String(v.trailKey || trailKey || "").startsWith("staff-");
-    const segments = segmentTrailIntoTrips(gps, {
-      gapMs: staffsGap ? STAFFS_TRAIL_BREAK_GAP_MS : 18 * 60_000,
-    });
+    const segments = singleSelectedRun && gps.length >= 2
+      ? [gps]
+      : segmentTrailIntoTrips(gps, {
+          gapMs: staffsGap ? STAFFS_TRAIL_BREAK_GAP_MS : 18 * 60_000,
+        });
     const base =
       v.id ||
       v.btId ||
@@ -5021,7 +5023,9 @@ async function showFleetRouteTails({
   // Line-wide fallback: segment whatever keys we found for the route.
   const requestedSingleJourney = Boolean(
     String(targets[0]?.journey_id || targets[0]?.journeyId || journeyId || "").trim() ||
-      String(targets[0]?.trip_id || targets[0]?.tripId || tripId || "").trim(),
+      String(targets[0]?.trip_id || targets[0]?.tripId || tripId || "").trim() ||
+      (targets.length === 1 &&
+        String(targets[0]?.datetime || targets[0]?.recordedAtTime || targets[0]?.trackedAt || datetime || "").trim()),
   );
   if (!drawn.length && keys.size && !requestedSingleJourney) {
     const gps = collectTrailGpsForKeys([...keys], { line: code });
@@ -7208,7 +7212,9 @@ async function ensureLiveries(idsOrBuses) {
         if (!liveryCache.has(id)) {
           liveryCache.set(
             id,
-            fetch(`/api/bt-liveries/${encodeURIComponent(id)}/`)
+            fetch(`/api/bt-liveries/${encodeURIComponent(id)}/`, {
+              signal: AbortSignal.timeout(8_000),
+            })
               .then(async (res) => {
                 if (!res.ok) {
                   liveryCache.delete(id);

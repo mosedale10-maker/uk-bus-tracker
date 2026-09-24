@@ -966,6 +966,7 @@ app.get("/api/bt-liveries/:id/", async (req, res, next) => {
             Accept: "application/json",
             "User-Agent": "uk-bus-tracker/1.0 (marker livery css)",
           },
+          signal: AbortSignal.timeout(8_000),
         });
         const body = Buffer.from(await response.arrayBuffer());
         return { status: response.status, body, contentType: response.headers.get("content-type") };
@@ -986,7 +987,7 @@ app.get("/api/bt-liveries/:id/", async (req, res, next) => {
       return;
     }
     res.status(result.status);
-    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.setHeader("Cache-Control", "no-store");
     if (result.contentType) res.setHeader("Content-Type", result.contentType);
     else res.type("json");
     res.send(result.body);
