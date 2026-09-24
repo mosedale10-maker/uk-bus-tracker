@@ -5921,7 +5921,21 @@ async function openFleetVehiclePage({
 
   if (id) {
     try {
-      await fleetBrowser.showVehicle(id);
+      await fleetBrowser.showVehicle(id, undefined, {
+        seed: {
+          id,
+          reg,
+          fleet,
+          line,
+          operator: {
+            name: noc || operatorSlug || "Operator",
+            slug: operatorSlug,
+            id: noc || null,
+            noc: noc || null,
+          },
+          lastRoute: line ? { route: line, live: true, trackedAt: "" } : null,
+        },
+      });
       showMessage("");
       return;
     } catch {

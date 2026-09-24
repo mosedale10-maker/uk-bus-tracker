@@ -2691,6 +2691,7 @@ async function fetchAllOperatorVehicles(noc, { search = "", onPage } = {}) {
 
 const vehicleDetailCache = new Map();
 const vehicleJourneysCache = new Map();
+const liveVehicleLookupInflight = new Map();
 
 async function fetchVehicle(id) {
   const key = String(id || "");
@@ -2716,21 +2717,39 @@ async function fetchLiveVehicleById(id) {
     const row = hit?.byId?.get(key);
     if (row) return row;
   }
-  try {
-    const liveRes = await fetch(`/api/vehicles?id=${encodeURIComponent(key)}`);
-    if (!liveRes.ok) return null;
-    const live = await liveRes.json();
-    const rows = Array.isArray(live) ? live : [];
-    return rows.find((item) => String(item.id) === key) || rows[0] || null;
-  } catch {
-    return null;
-  }
+  if (liveVehicleLookupInflight.has(key)) return liveVehicleLookupInflight.get(key);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1400);
+  const promise = (async () => {
+    try {
+      // This endpoint can take several seconds on a cold BODS cache. It is optional
+      // enrichment for the fleet page, so never hold the vehicle shell hostage to it.
+      const liveRes = await fetch(`/api/vehicles?id=${encodeURIComponent(key)}`, {
+        signal: controller.signal,
+      });
+      if (!liveRes.ok) return null;
+      const live = await liveRes.json();
+      const rows = Array.isArray(live) ? live : [];
+      return rows.find((item) => String(item.id) === key) || rows[0] || null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  })().finally(() => liveVehicleLookupInflight.delete(key));
+  liveVehicleLookupInflight.set(key, promise);
+  return promise;
 }
 
-async function fetchVehicleJourneys(vehicleId, date) {
+async function fetchVehicleJourneys(vehicleId, date, { onPage } = {}) {
   const dayKeys = date ? fleetDayKeys(date) : [];
   const cacheKey = `${vehicleId}|${dayKeys.join(",") || date || ""}`;
-  if (vehicleJourneysCache.has(cacheKey)) return vehicleJourneysCache.get(cacheKey);
+  if (vehicleJourneysCache.has(cacheKey)) {
+    return vehicleJourneysCache.get(cacheKey).then((rows) => {
+      onPage?.(rows, { done: true, page: 0 });
+      return rows;
+    });
+  }
   const promise = (async () => {
     const params = new URLSearchParams({ vehicle: String(vehicleId) });
     // When "today" also includes yesterday, omit bustimes ?date= so overnight rows are returned.
@@ -2751,7 +2770,9 @@ async function fetchVehicleJourneys(vehicleId, date) {
         }
         rows.push(row);
       }
-      if (!url || !data.next) break;
+      const hasMore = Boolean(url && data.next);
+      onPage?.(rows.slice(), { done: !hasMore, page });
+      if (!hasMore) break;
       url = String(data.next).replace(
         /^https?:\/\/bustimes\.org\/api\/vehiclejourneys/,
         "/api/bt-vehiclejourneys",
@@ -4649,7 +4670,7 @@ export function createFleetBrowser({
       </label>
       ${state.error ? `<p class="fleet-error">${esc(state.error)}</p>` : ""}
       ${
-        state.loading
+        state.loading && !state.journeys.length
           ? `<p class="fleet-muted">Loading journeys…</p>`
           : state.journeys.length
             ? `<table class="fleet-table">
@@ -4698,7 +4719,7 @@ export function createFleetBrowser({
                     })
                     .join("")}
                 </tbody>
-              </table>`
+              </table>${state.loading ? `<p class="fleet-muted fleet-journeys-loading">Loading more journeys…</p>` : ""}`
             : `<p class="fleet-muted">No journeys recorded for this date.</p>`
       }
     `;
@@ -5309,7 +5330,11 @@ export function createFleetBrowser({
       previous_reg: seed.previous_reg || "",
       livery: seed.livery || null,
       vehicle_type: seed.vehicle_type || null,
-      operator: seed.operator || { name: "Operator", slug: "", id: null },
+      operator:
+        seed.operator ||
+        (seed.operatorName
+          ? { name: seed.operatorName, slug: seed.operatorSlug || "", id: seed.operatorNoc || null }
+          : { name: "Operator", slug: "", id: null }),
       lastRoute:
         seed.lastRoute ||
         (line
@@ -5344,11 +5369,11 @@ export function createFleetBrowser({
     return token;
   }
 
-  function applyJourneysToState(vehicle, journeys, lineFilter) {
+  function applyJourneysToState(vehicle, journeys, lineFilter, { loading = false } = {}) {
     state.allJourneys = journeys;
     state.journeys = filterJourneysByLine(journeys, lineFilter);
     state.vehicle = vehicle;
-    state.loading = false;
+    state.loading = Boolean(loading);
     state.error = "";
     // Always union: AT1–AT3 exist only in GPS trails, so a bus whose whole route history
     // is AT work starts with an empty list and must still pick its routes up here.
@@ -5513,7 +5538,14 @@ export function createFleetBrowser({
   async function showVehicle(id, date = state.date, opts = {}) {
     // Vehicle day view always lists every route for that day (no per-line chips).
     state.lineFilter = "";
-    const seed = opts.seed || null;
+    const knownVehicle = !opts.seed
+      ? [...(state.vehicles || []), ...(state.vehicleHits || []), ...(state.savedVehicles || [])].find(
+          (row) => String(row?.id || "") === String(id),
+        )
+      : null;
+    // Fleet/operator lists already contain most metadata. Use it for the first
+    // paint instead of showing a blank vehicle while the detail request runs.
+    const seed = opts.seed || knownVehicle || null;
     const token = ++vehicleLoadToken;
     state.photo = null;
     state.photoPending = false;
@@ -5573,17 +5605,41 @@ export function createFleetBrowser({
       render();
     }
 
+    // Start the independent history/route requests before the detail request
+    // finishes. The first page can render immediately; later pages enrich it.
+    let progressiveLiveBus = null;
+    const detailPromise = fetchVehicle(id);
+    const livePromise = fetchLiveVehicleById(id).then((row) => {
+      progressiveLiveBus = row;
+      return row;
+    });
+    const seedLooksFlix = Boolean(
+      seed &&
+        (/flix/i.test(`${seed.operator?.name || seed.operator || seed.operatorName || ""}`) ||
+          String(seed.operator?.noc || seed.operator?.id || "").toUpperCase() === "FLIX"),
+    );
+    const showProgressiveJourneys = (partial) => {
+      if (token !== vehicleLoadToken || state.view !== "vehicle") return;
+      if (String(state.vehicle?.id) !== String(id) || !partial?.length) return;
+      const current = state.vehicle || buildSeedVehicle(id, seed || {});
+      const rows = partial.map((row) => enrichJourneyRow(row, progressiveLiveBus));
+      applyJourneysToState(current, rows, state.lineFilter, { loading: true });
+    };
+    const journeysPromise = seedLooksFlix
+      ? Promise.resolve([])
+      : fetchVehicleJourneys(id, date, { onPage: showProgressiveJourneys }).catch(() => []);
+    const routeSummaryPromise = state.vehicle?.id
+      ? loadVehicleRouteSummary(state.vehicle)
+      : Promise.resolve();
+
     try {
       // Vehicle detail + live AVL in parallel (skip serial lastRoute / duplicate live fetch).
       let vehicle = null;
       let liveBus = null;
       try {
-        [vehicle, liveBus] = await Promise.all([
-          fetchVehicle(id),
-          fetchLiveVehicleById(id),
-        ]);
+        [vehicle, liveBus] = await Promise.all([detailPromise, livePromise]);
       } catch (detailError) {
-        liveBus = await fetchLiveVehicleById(id).catch(() => null);
+        liveBus = await livePromise.catch(() => null);
         const flixSeed =
           seed ||
           (liveBus &&
@@ -5639,12 +5695,8 @@ export function createFleetBrowser({
       }
 
       // Ensure Flix operator meta even when bustimes vehicle record is missing.
-      const seedIsFlix =
-        seed &&
-        (/flix/i.test(`${seed.operator?.name || seed.operator || seed.operatorName || ""}`) ||
-          String(seed.operator?.noc || seed.operator?.id || "").toUpperCase() === "FLIX");
       if (
-        seedIsFlix ||
+        seedLooksFlix ||
         String(liveBus?.operator?.noc || liveBus?._bods?.operator || "").toUpperCase() === "FLIX"
       ) {
         vehicle.operator = {
@@ -5681,11 +5733,9 @@ export function createFleetBrowser({
       const isFlixVehicle =
         vehicleNoc === "FLIX" ||
         /flix/i.test(`${vehicle.operator?.slug || ""} ${vehicle.operator?.name || ""}`) ||
-        seedIsFlix;
+        seedLooksFlix;
       if (!isFlixVehicle) {
-        journeys = (await fetchVehicleJourneys(vehicle.id, date)).map((row) =>
-          enrichJourneyRow(row, liveBus),
-        );
+        journeys = (await journeysPromise).map((row) => enrichJourneyRow(row, liveBus));
       }
       if (token !== vehicleLoadToken) return;
 

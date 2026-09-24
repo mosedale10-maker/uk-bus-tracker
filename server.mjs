@@ -669,9 +669,37 @@ function revalidateVehiclesInBackground(cacheKey) {
     .catch(() => {});
 }
 
+function cachedVehicleById(id) {
+  const want = String(id || "").trim();
+  if (!want) return null;
+  for (const entry of vehiclesJsonCache.values()) {
+    try {
+      const body = Buffer.isBuffer(entry.body) ? entry.body.toString("utf8") : String(entry.body || "");
+      const rows = JSON.parse(body);
+      if (!Array.isArray(rows)) continue;
+      const hit = rows.find((row) => String(row?.id || "") === want);
+      if (hit) return hit;
+    } catch {
+      /* ignore an incomplete cached body */
+    }
+  }
+  return null;
+}
+
 app.get("/api/vehicles", async (req, res, next) => {
   try {
-    const cacheKey = quantizeVehiclesQuery(vehiclesQueryFromReq(req));
+    const query = vehiclesQueryFromReq(req);
+    const wantedId = new URLSearchParams(query.replace(/^\?/, "")).get("id");
+    // Fleet vehicle pages only need an already-cached live match. A cold BODS
+    // lookup by id can take many seconds, so do not make page selection wait on it.
+    if (wantedId) {
+      const hit = cachedVehicleById(wantedId);
+      res.setHeader("Cache-Control", "public, max-age=2");
+      res.setHeader("X-Cache", hit ? "ID-HIT" : "ID-MISS");
+      res.type("json").send(JSON.stringify(hit ? [hit] : []));
+      return;
+    }
+    const cacheKey = quantizeVehiclesQuery(query);
     const ttl = vehiclesCacheTtl(cacheKey);
     const hit = vehiclesJsonCache.get(cacheKey);
     const now = Date.now();
