@@ -1598,8 +1598,9 @@ function fleetMapDataAttrs({
   direction = "",
   dest = "",
   datetime = "",
+  diverted = false,
 } = {}) {
-  return `data-trip-id="${esc(tripId || "")}" data-journey-id="${esc(journeyId || "")}" data-vehicle-id="${esc(vehicleId || "")}" data-trail-key="${esc(trailKey || "")}" data-reg="${esc(reg || "")}" data-line="${esc(line || "")}" data-operator="${esc(operator || "")}" data-direction="${esc(normalizeFleetDirection(direction))}" data-dest="${esc(dest || "")}" data-datetime="${esc(datetime || "")}"`;
+  return `data-trip-id="${esc(tripId || "")}" data-journey-id="${esc(journeyId || "")}" data-vehicle-id="${esc(vehicleId || "")}" data-trail-key="${esc(trailKey || "")}" data-reg="${esc(reg || "")}" data-line="${esc(line || "")}" data-operator="${esc(operator || "")}" data-direction="${esc(normalizeFleetDirection(direction))}" data-dest="${esc(dest || "")}" data-datetime="${esc(datetime || "")}" data-diverted="${diverted ? "1" : "0"}"`;
 }
 
 /**
@@ -4929,6 +4930,7 @@ export function createFleetBrowser({
                                 direction: row.direction || "",
                                 dest: row.destination || "",
                                 datetime: row.datetime || "",
+                                diverted: Boolean(row.diverted),
                               })}>Map</button>`;
                             })()
                           }

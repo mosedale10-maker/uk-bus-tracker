@@ -3546,7 +3546,7 @@ function collectTrailGpsForKeys(keys, filter = {}) {
  * Pin each trip as its own tail polyline (Hanley→Newcastle separate from Newcastle→Hanley).
  * Returns the synthetic keys that were drawn.
  */
-function pinSeparateTripTails(segments, { baseKey = "bus", line = "", operator = "" } = {}) {
+function pinSeparateTripTails(segments, { baseKey = "bus", line = "", operator = "", actualRoute = false } = {}) {
   const drawn = [];
   const base = String(baseKey || "bus")
     .replace(/[^A-Za-z0-9:_-]+/g, "_")
@@ -3580,6 +3580,7 @@ function pinSeparateTripTails(segments, { baseKey = "bus", line = "", operator =
       fromMs: startT,
       toMs: endT,
       operator: String(operator || "").trim().toUpperCase(),
+      actualRoute: Boolean(actualRoute),
     });
     pinnedTrailKeys.add(key);
     refreshPinnedTrailLine(key);
@@ -3992,18 +3993,19 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
   const op = String(filter?.operator || "").trim().toUpperCase();
   const line = String(filter?.line || "").trim().toUpperCase();
   const id = String(key || "");
+  const actualRoute = Boolean(filter?.actualRoute || filter?.diverted);
   const staffs =
     Boolean(filter?.staffs) ||
     isStaffsTrailOperator(op) ||
     isAltonLine(line) ||
     id.startsWith("staff-") ||
     id.startsWith("at:");
-  if (op) return { operator: op, coach: isCoachTrailOperator(op), staffs };
-  if (filter?.coach) return { coach: true, operator: op || "", staffs };
+  if (op) return { operator: op, coach: isCoachTrailOperator(op), staffs, actualRoute };
+  if (filter?.coach) return { coach: true, operator: op || "", staffs, actualRoute };
   const pts = trailMem.get(id) || [];
   for (let i = pts.length - 1; i >= 0; i -= 1) {
     const pOp = String(pts[i]?.operator || "").trim().toUpperCase();
-    if (pOp) return { operator: pOp, coach: isCoachTrailOperator(pOp), staffs: staffs || isStaffsTrailOperator(pOp) };
+    if (pOp) return { operator: pOp, coach: isCoachTrailOperator(pOp), staffs: staffs || isStaffsTrailOperator(pOp), actualRoute };
   }
   // Live Flix / NATX markers: bus.id is the trail key but points may lack operator yet.
   if (id) {
@@ -4011,11 +4013,11 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
       if (String(marker?.bus?.id) !== id) continue;
       if (isFlixBus(marker.bus) || isNationalExpress(marker.bus)) {
         const noc = trailOperatorForBus(marker.bus);
-        return { operator: noc, coach: true, staffs: false };
+        return { operator: noc, coach: true, staffs: false, actualRoute };
       }
     }
   }
-  return { staffs };
+  return { staffs, actualRoute };
 }
 
 /**
@@ -5116,6 +5118,7 @@ function pinVehicleTrail({
   live = false,
   liveFocus = true,
   livePing = null,
+  diverted = false,
 } = {}) {
   const safeDirection = normalizeTrailDirection(direction);
   const keys = trailKeysForVehicle({
@@ -5152,6 +5155,8 @@ function pinVehicleTrail({
     liveJourneyId: followLive ? String(journeyId || "") : "",
     liveTripId: followLive ? String(tripId || "") : "",
     livePing: followLive ? livePing : null,
+    diverted: Boolean(diverted),
+    actualRoute: Boolean(diverted),
   };
   multiTailActiveGroup = null;
   for (const key of keys) {
@@ -5162,7 +5167,9 @@ function pinVehicleTrail({
       filter.direction ||
       filter.operator ||
       filter.fromMs ||
-      filter.live
+      filter.live ||
+      filter.diverted ||
+      filter.actualRoute
     ) {
       pinnedTrailFilters.set(String(key), filter);
     } else {
@@ -5783,6 +5790,9 @@ async function startRoutePlayback({
         Number.isFinite(new Date(datetime).getTime()) &&
         Date.now() - new Date(datetime).getTime() > 12 * 60_000,
     );
+  // A diverted service must be drawn from the vehicle's recorded GPS. Never
+  // silently fall back to the published timetable/route geometry.
+  const actualRouteRequired = Boolean(diverted || isDivertedText(dest, line, operator));
   if (!playKey) {
     showMessage("No route to show");
     return;
@@ -5792,11 +5802,12 @@ async function startRoutePlayback({
     // Switching from a Fleet history replay to a live bus replay must rebuild
     // the clipped path rather than merely restarting the full historical one.
     const sameReplayMode = Boolean(playback?.replayRecorded) === requestedRecordedReplay;
-    if (autoReplay && gpsReplay?.pts?.length >= 2 && sameReplayMode) {
+    const sameActualRoute = Boolean(playback?.diverted) === actualRouteRequired;
+    if (autoReplay && gpsReplay?.pts?.length >= 2 && sameReplayMode && sameActualRoute) {
       gpsReplayStart();
       return;
     }
-    if (!autoReplay || sameReplayMode) {
+    if (!autoReplay || (sameReplayMode && sameActualRoute)) {
       stopRoutePlayback("", { clearTail: true });
       return;
     }
@@ -6041,22 +6052,24 @@ async function startRoutePlayback({
     if (gpsLen >= 800 || trackedGps.length >= 6) usingTracked = true;
     else if (tripLen > 25000 && gpsLen < tripLen * 0.15) usingTracked = false;
   }
-  if (diverted && tracked.length >= 2) usingTracked = true;
+  if (actualRouteRequired && tracked.length >= 2) usingTracked = true;
   // An explicit Replay must use the recorded GPS line, not the complete planned
   // timetable path. The replay layer will reveal that line progressively.
   const replayOnly = Boolean(autoReplay);
   if (autoReplay) usingTracked = true;
-  let path = replayOnly
+  let path = actualRouteRequired
     ? tracked
-    : historicalPlayback && tripPath.length >= 2 && !usingTracked
-      ? tripPath
-      : usingTracked
-        ? tracked
-        : tripPath.length >= 2
-          ? tripPath
-          : tracked.length >= 2
-            ? tracked
-            : [];
+    : replayOnly
+      ? tracked
+      : historicalPlayback && tripPath.length >= 2 && !usingTracked
+        ? tripPath
+        : usingTracked
+          ? tracked
+          : tripPath.length >= 2
+            ? tripPath
+            : tracked.length >= 2
+              ? tracked
+              : [];
   usingTracked = path === tracked && tracked.length >= 2;
   if (!autoReplay && path.length < 2 && tripSegments.some((seg) => seg.length >= 2)) {
     const fallbackRun = tripSegments.reduce((best, run) => (run.length > best.length ? run : best), tripSegments[0]);
@@ -6068,6 +6081,12 @@ async function startRoutePlayback({
     tracked = pathFromGpsPoints(trackedGps);
     path = tracked;
     usingTracked = path.length >= 2;
+  }
+  if (actualRouteRequired && tracked.length < 2) {
+    showMessage(
+      "This journey is diverted, but no recorded GPS is available yet — the planned route will not be shown",
+    );
+    return;
   }
   if (path.length < 2 && !(replayOnly && allGps.length >= 2)) {
     showMessage(
@@ -6090,6 +6109,7 @@ async function startRoutePlayback({
     line: lineName,
     coach: coachOp || isCoachTrailOperator(operator),
     staffs: isStaffsTrailOperator(operator) || isAltonLine(lineName),
+    actualRoute: actualRouteRequired,
   };
 
   // A historical Map view still has a live vehicle marker when the bus is
@@ -6148,6 +6168,7 @@ async function startRoutePlayback({
         baseKey: liveKey || resolvedTripId || tripId || safeJourneyId || "hist",
         line: lineName,
         operator,
+        actualRoute: actualRouteRequired,
       });
       multiTailActiveGroup = {
         id: `hist:${playKey}`,
@@ -6189,6 +6210,7 @@ async function startRoutePlayback({
         live: true,
         liveFocus: false,
         livePing: currentLivePing || lastPing,
+        diverted: actualRouteRequired,
       });
       const pinned = pinnedTrailLines.get(liveKey) || pinnedTrailLines.get(String(vehicleId || ""));
       if (pinned?.line) {
@@ -6229,7 +6251,7 @@ async function startRoutePlayback({
   const label =
     lineName +
     (headsign ? " → " + headsign : "") +
-    (usingTracked ? " · GPS path" : " · timetable");
+    (actualRouteRequired ? " · actual GPS route" : usingTracked ? " · GPS path" : " · timetable");
   playback = {
     playKey,
     tripId: resolvedTripId || tripId,
@@ -6243,6 +6265,7 @@ async function startRoutePlayback({
     tracked: Boolean(usingTracked),
     showTail: Boolean(usingTracked),
     stops: tripStops,
+    diverted: actualRouteRequired,
     operator: opName,
     headsign,
     date: journeyDate,
@@ -6589,7 +6612,8 @@ function playRouteButtonHtml(bus, extra = {}) {
       bus?.currentJourney?.directionRef ||
       "",
   );
-  return `<button type="button" class="play-route-btn${on ? " is-on" : ""}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(bus?.journey_id || "")}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(bus?.service?.line_name || extra.line || "")}" data-operator="${esc(trailOperatorForBus(bus) || extra.operator || "")}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || bus?.destination || "")}" data-datetime="${esc(bus?.datetime || "")}">${on ? "Hide route" : "Show route"}</button>`;
+  const diverted = isDivertedText(extra.to, bus?.destination, extra.notes, bus?.origin);
+  return `<button type="button" class="play-route-btn${on ? " is-on" : ""}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(bus?.journey_id || "")}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(bus?.service?.line_name || extra.line || "")}" data-operator="${esc(trailOperatorForBus(bus) || extra.operator || "")}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || bus?.destination || "")}" data-datetime="${esc(bus?.datetime || "")}" data-diverted="${diverted ? "1" : "0"}">${on ? "Hide route" : "Show route"}</button>`;
 }
 
 /**
@@ -6614,7 +6638,8 @@ function replayBusButtonHtml(bus, extra = {}) {
   const direction = normalizeTrailDirection(
     extra.direction || bus?.direction || bus?.directionRef || bus?.currentJourney?.directionRef || "",
   );
-  return `<button type="button" class="play-route-btn replay-bus-btn${on ? " is-on" : ""}" data-replay="1" data-trip-id="${esc(tripId)}" data-journey-id="${esc(bus?.journey_id || "")}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(bus?.service?.line_name || extra.line || "")}" data-operator="${esc(trailOperatorForBus(bus) || extra.operator || "")}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || bus?.destination || "")}" data-datetime="${esc(bus?.datetime || "")}" title="Replay the roads this bus has actually driven">⏵ Replay</button>`;
+  const diverted = isDivertedText(extra.to, bus?.destination, extra.notes, bus?.origin);
+  return `<button type="button" class="play-route-btn replay-bus-btn${on ? " is-on" : ""}" data-replay="1" data-trip-id="${esc(tripId)}" data-journey-id="${esc(bus?.journey_id || "")}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(bus?.service?.line_name || extra.line || "")}" data-operator="${esc(trailOperatorForBus(bus) || extra.operator || "")}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || bus?.destination || "")}" data-datetime="${esc(bus?.datetime || "")}" data-diverted="${diverted ? "1" : "0"}" title="Replay the roads this bus has actually driven">⏵ Replay</button>`;
 }
 
 function playStaffRouteButtonHtml(item, extra = {}) {
@@ -6634,7 +6659,8 @@ function playStaffRouteButtonHtml(item, extra = {}) {
   if (!trailKey && !vehicleId && !tripId && !compactReg(reg)) return "";
   const playKey = tripId || trailKey || vehicleId || regTrailKey(reg);
   const on = routeOverlayActive(playKey, { vehicleId, trailKey });
-  return `<button type="button" class="play-route-btn${on ? " is-on" : ""}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(journeyId)}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(line)}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || item.currentJourney?.destination?.name || "")}" data-datetime="${esc(latest?.datetime || item.recordedAtTime || "")}">${on ? "Hide route" : "Show route"}</button>`;
+  const diverted = isDivertedText(extra.to, item?.currentJourney?.destination?.name, extra.notes);
+  return `<button type="button" class="play-route-btn${on ? " is-on" : ""}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(journeyId)}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(line)}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || item.currentJourney?.destination?.name || "")}" data-datetime="${esc(latest?.datetime || item.recordedAtTime || "")}" data-diverted="${diverted ? "1" : "0"}">${on ? "Hide route" : "Show route"}</button>`;
 }
 
 function followedMarker() {
@@ -12732,7 +12758,8 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
     !!breakOpts.staffs ||
     isStaffsTrailOperator(breakOpts.operator) ||
     isAltonLine(breakOpts.line);
-  const key = `${trailPathHash(latlngs)}|${coach ? "coach" : staffs ? "staffs" : "bus"}|v6`;
+  const actualRoute = Boolean(breakOpts.actualRoute);
+  const key = `${trailPathHash(latlngs)}|${actualRoute ? "actual" : coach ? "coach" : staffs ? "staffs" : "bus"}|v7`;
   if (trailAlignCache.has(key)) return trailAlignCache.get(key);
   if (trailAlignPending.has(key)) return trailAlignPending.get(key);
   const pending = (async () => {
@@ -12743,7 +12770,13 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
       let segs = [];
       const alignOpts = { ...breakOpts, coach, staffs };
       try {
-        if (coach) {
+        if (actualRoute) {
+          // Diverted services: match the recorded GPS sequence itself. Do not
+          // replace a real diversion with a route inferred between sparse pings.
+          const thinned = thinTrailPoints(flat, 55);
+          aligned = await matchTrailViaOsrm(thinned.length >= 2 ? thinned : flat, signal, alignOpts);
+          segs = trailSegmentsOf(aligned, alignOpts);
+        } else if (coach) {
           // Flix / NATX: route-stitch first so sparse motorway AVL stays on roads.
           const thinned = thinTrailPoints(flat, 160);
           aligned = await stitchTrailViaOsrmRoutes(
