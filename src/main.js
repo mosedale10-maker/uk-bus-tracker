@@ -5136,8 +5136,16 @@ async function showFleetRouteTails({
     }
   }
 
-  // Line-wide server lookup only when not a single-vehicle operator (those must pick a bus).
-  if (!keys.size && code && !forceSingle) {
+  // Line-wide server lookup only when not a single-vehicle operator. A coach
+  // route with a Bustimes service/trip already has a planned path, so do not
+  // wait on a broad recorder lookup before drawing it.
+  const hasPlannedService = Boolean(plannedTripId || plannedServiceId);
+  if (
+    !keys.size &&
+    code &&
+    !forceSingle &&
+    !(isCoachTrailOperator(opCode) && hasPlannedService)
+  ) {
     const serverKeys = await fetchTrailKeysForGroup({
       id: `line:${code}`,
       label: `Route ${code}`,
@@ -5172,8 +5180,24 @@ async function showFleetRouteTails({
     });
     for (const key of expanded) keys.add(key);
   }
-  if (keys.size) await fetchServerTrailsChunked([...keys], { force: true });
+  const trailsPromise = keys.size
+    ? fetchServerTrailsChunked([...keys], { force: true }).catch(() => {})
+    : Promise.resolve();
   const plannedRoutePath = await plannedRoutePromise;
+  const plannedPathUsable =
+    plannedRoutePath.length >= 2 && !pathCrossesActiveRoadNotice(plannedRoutePath);
+  // A route-wide coach tail is useful immediately from the published path; do
+  // not make the user wait for a large/slow recorder response. If the planned
+  // path is blocked by an active closure, wait for the recorded GPS fallback.
+  // Explicit bus selections still wait for their recorded run so GPS can remain authoritative.
+  if (keys.size && !(isCoachTrailOperator(opCode) && !hasExplicitSelection && plannedPathUsable)) {
+    await trailsPromise;
+  } else if (keys.size) {
+    await Promise.race([
+      trailsPromise,
+      new Promise((resolve) => setTimeout(resolve, 1200)),
+    ]);
+  }
   if (!keys.size && plannedRoutePath.length < 2) {
     showMessage(
       hasExplicitSelection
@@ -5284,7 +5308,7 @@ async function showFleetRouteTails({
     }
   }
 
-  if (plannedRoutePath.length >= 2 && !pathCrossesActiveRoadNotice(plannedRoutePath)) {
+  if (plannedPathUsable) {
     clearPinnedTrails();
     const plannedStart = Date.now() - Math.max(60_000, plannedRoutePath.length * 1000);
     const plannedGps = plannedRoutePath.map((point, index) => ({
@@ -5324,7 +5348,6 @@ async function showFleetRouteTails({
     });
     drawn.push(...pinned);
   }
-
   updatePlaybackChrome();
   if (code) applyHistoryLineFilterToMarkers({ line: code, vehicleId, trailKey, reg });
 
