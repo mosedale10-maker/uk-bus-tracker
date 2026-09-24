@@ -1989,24 +1989,33 @@ export async function fetchCoachHistoryFromTrails({
         const sameTrip = Boolean(cur?.tripId && tid && cur.tripId === tid);
         const directionChanged = Boolean(cur?.direction && dir && cur.direction !== dir);
         // Intermediate stop / next-stop headsign changes must not split a continuous A→B run.
-        // Flix often changes journey id after Hanley — only split after a long layover.
-        const destChanged = Boolean(
+        // A real local-bus turnaround normally changes the destination and journey/trip ID
+        // within a minute or two; keep that boundary so Hanley→Newcastle and Newcastle→Hanley
+        // remain separate saved routes.
+        const rawDestChanged = Boolean(
           cur?.destination &&
             dest &&
             cur.destination !== dest &&
             !sameJourney &&
             !sameTrip &&
-            !directionChanged &&
-            gap >= journeyFlipMs,
+            !directionChanged,
         );
+        const terminalTurn = Boolean(busMode && cur && cur.n >= 8 && rawDestChanged && gap >= 60_000);
+        const destChanged = rawDestChanged && (gap >= journeyFlipMs || terminalTurn);
+        const idBoundary =
+          (journeyChanged || tripChanged) &&
+          (lineChanged || directionChanged || rawDestChanged || gap > journeyFlipMs);
+        const hardBoundary = Boolean(lineChanged || directionChanged || terminalTurn || (rawDestChanged && (journeyChanged || tripChanged)));
         const shouldSplit =
           !cur ||
           lineChanged ||
-          (journeyChanged && gap > journeyFlipMs) ||
-          (tripChanged && gap > journeyFlipMs) ||
+          idBoundary ||
           (!(sameJourney || sameTrip) && (directionChanged || destChanged || gap > coachGapMs));
         if (shouldSplit) {
-          if (cur && cur.n >= 2) segments.push(cur);
+          if (cur && cur.n >= 2) {
+            cur.hardBoundary = hardBoundary;
+            segments.push(cur);
+          }
           cur = {
             journeyId: jid,
             tripId: tid,
@@ -2025,6 +2034,7 @@ export async function fetchCoachHistoryFromTrails({
                 : key,
             rawKey: key,
             operator: pop || wantOp || "",
+            hardBoundary: false,
           };
         } else {
           cur.lastT = t;
@@ -2055,7 +2065,15 @@ export async function fetchCoachHistoryFromTrails({
         seg.line &&
         sameServiceLine(prev.line, seg.line) &&
         (!prev.operator || !seg.operator || prev.operator === seg.operator);
-      if (prev && sameLine && Number.isFinite(gap) && gap >= 0 && gap <= coachGapMs) {
+      if (
+        prev &&
+        sameLine &&
+        !prev.hardBoundary &&
+        !seg.hardBoundary &&
+        Number.isFinite(gap) &&
+        gap >= 0 &&
+        gap <= coachGapMs
+      ) {
         prev.lastT = Math.max(prev.lastT, seg.lastT);
         prev.n += seg.n;
         if (seg.destLabel) {
@@ -2105,7 +2123,7 @@ export async function fetchCoachHistoryFromTrails({
   }
 }
 
-const FLEET_REPLAY_DAYS = 7;
+const FLEET_REPLAY_DAYS = 5;
 const vehicleReplayCache = new Map();
 const vehicleReplayInflight = new Map();
 
