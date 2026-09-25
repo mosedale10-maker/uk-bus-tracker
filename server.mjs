@@ -1176,8 +1176,11 @@ app.use(
   "/api/ofm",
   proxy({
     target: "https://tiles.openfreemap.org",
-    pathRewrite: rewriteMount(""),
-    headers: { "User-Agent": UA },
+    // Pass the stripped path straight through. rewriteMount("") appended a
+    // trailing slash ("/planet/"), which openfreemap's edge answers with 403 —
+    // that killed the local road snapping that keeps tails on the road.
+    pathRewrite: (path) => path,
+    headers: { "User-Agent": UA, Accept: "*/*" },
   }),
 );
 app.use(
