@@ -13497,6 +13497,29 @@ async function loadBuses({ replace = false } = {}) {
     const paintAgeMs = lastPaintAt ? Date.now() - lastPaintAt : Infinity;
     const paintRequestAgeMs = lastPaintRequestAt ? Date.now() - lastPaintRequestAt : Infinity;
     const paintViewChanged = paintViewKey !== lastPaintViewKey;
+    /**
+     * A snapshot taken over a different patch of map says nothing about this one.
+     * Without this check the 10s move-debounce held every livery back after a
+     * search/zoom, which is exactly the "10 seconds then it corrects" behaviour.
+     */
+    const viewWest = bounds.getWest();
+    const viewSouth = bounds.getSouth();
+    const viewEast = bounds.getEast();
+    const viewNorth = bounds.getNorth();
+    const paintCoversView =
+      lastPaintBuses.length > 0 &&
+      lastPaintBuses.some((row) => {
+        const [lng, lat] = row?.coordinates || [];
+        return (
+          Number.isFinite(lng) &&
+          Number.isFinite(lat) &&
+          lng >= viewWest &&
+          lng <= viewEast &&
+          lat >= viewSouth &&
+          lat <= viewNorth
+        );
+      });
+    const paintViewUncovered = paintViewChanged && !paintCoversView;
     const staffsNeedPaint =
       overStaffs &&
       [...markers.values()].some(
@@ -13510,10 +13533,12 @@ async function loadBuses({ replace = false } = {}) {
     const paintDue =
       !lastPaintBuses.length ||
       paintAgeMs >= PAINT_REFRESH_MS ||
+      paintViewUncovered ||
       (paintViewChanged && paintAgeMs >= PAINT_MOVE_REFRESH_MS);
     const paintRetryAllowed =
       !Number.isFinite(paintRequestAgeMs) ||
-      paintRequestAgeMs >= (paintViewChanged ? 10_000 : 30_000);
+      paintRequestAgeMs >=
+        (paintViewUncovered ? 2_000 : paintViewChanged ? 10_000 : 30_000);
     const wantPaint =
       paintRetryAllowed && (paintDue || (staffsNeedPaint && paintAgeMs >= PAINT_STAFF_RETRY_MS));
     if (wantPaint) {
