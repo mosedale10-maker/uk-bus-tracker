@@ -3946,6 +3946,15 @@ function prefersRecordedDg27Route(line, operator, hasRecordedPoints = false) {
   );
 }
 
+/** First Potteries 11 is being diverted away from Potteries Way. */
+function prefersRecordedFpot11Route(line, operator, hasRecordedPoints = false) {
+  return (
+    hasRecordedPoints &&
+    sameServiceLine(line, "11") &&
+    String(operator || "").trim().toUpperCase() === "FPOT"
+  );
+}
+
 /** Canonical NOC for a Staffordshire live bus, including BODS rows with no operator field. */
 function staffsOperatorCode(bus, extra = {}) {
   const candidates = [
@@ -5327,6 +5336,9 @@ function clipTrailPathAtProgress(path, progress, ping) {
  */
 function liveFirstPotteriesGuidePath(filter = {}, gpsPoints = [], ping = null) {
   if (!(filter.live || filter.follow) || !isFirstPotteriesTrailOperator(filter.operator)) return null;
+  // The 11 is temporarily diverted from Potteries Way. Keep the recorded GPS
+  // alignment for this stint instead of snapping the tail back to the timetable.
+  if (sameServiceLine(filter.line, "11") && gpsPoints.length >= 2) return null;
   if (filter.actualRoute || filter.diverted || !Array.isArray(filter.plannedPath)) return null;
   const planned = filter.plannedPath;
   if (planned.length < 2 || !ping || !Number.isFinite(Number(ping.lat)) || !Number.isFinite(Number(ping.lng))) {
@@ -6010,11 +6022,12 @@ async function showFleetRouteTails({
   // wait on a broad recorder lookup before drawing it.
   const hasPlannedService = Boolean(plannedTripId || plannedServiceId);
   const needsDg27RecordedKeys = prefersRecordedDg27Route(code, opCode, true);
+  const needsFpot11RecordedKeys = prefersRecordedFpot11Route(code, opCode, true);
   if (
     code &&
     !hasExplicitSelection &&
-    (!keys.size || needsDg27RecordedKeys) &&
-    (!forceSingle || needsDg27RecordedKeys) &&
+    (!keys.size || needsDg27RecordedKeys || needsFpot11RecordedKeys) &&
+    (!forceSingle || needsDg27RecordedKeys || needsFpot11RecordedKeys) &&
     !(isCoachTrailOperator(opCode) && hasPlannedService)
   ) {
     const serverKeys = await fetchTrailKeysForGroup({
@@ -6331,7 +6344,8 @@ async function showFleetRouteTails({
   }
 
   const keepRecordedDg27 = prefersRecordedDg27Route(code, opCode, drawn.length > 0);
-  if (plannedPathUsable && !isCoachTrailOperator(opCode) && !hasExplicitSelection && !keepRecordedDg27) {
+  const keepRecordedFpot11 = prefersRecordedFpot11Route(code, opCode, drawn.length > 0);
+  if (plannedPathUsable && !isCoachTrailOperator(opCode) && !hasExplicitSelection && !keepRecordedDg27 && !keepRecordedFpot11) {
     clearPinnedTrails();
     const plannedFlatPath = flattenTrailLatLngs(plannedRoutePath);
     const plannedStart = Date.now() - Math.max(60_000, plannedFlatPath.length * 1000);
@@ -7808,9 +7822,13 @@ async function startRoutePlayback({
     toMs: toMs ? toMs + 30 * 60_000 : 0,
     force: true,
   });
-  if (prefersRecordedDg27Route(line, operator, true)) {
+  const needsRecordedDiversionKeys =
+    prefersRecordedDg27Route(line, operator, true) ||
+    prefersRecordedFpot11Route(line, operator, true);
+  if (needsRecordedDiversionKeys) {
+    const recordedOperator = String(operator || "").trim().toUpperCase() === "FPOT" ? "FPOT" : "DAGC";
     const recordedKeys = await fetchTrailKeysForGroup(
-      { operators: ["DAGC"], lines: [line] },
+      { operators: [recordedOperator], lines: [line] },
       { days: TRAIL_KEEP_DAYS },
     );
     const extraKeys = recordedKeys.filter((key) => !keys.includes(key));
@@ -8056,9 +8074,11 @@ async function startRoutePlayback({
     plannedRouteOverride &&
     tripPath.length >= 2 &&
     pathCrossesActiveRoadNotice(tripPath);
-  if (prefersRecordedDg27Route(line, operator, hasRecordedGps)) {
-    // D&G 27 is temporarily using Birch Terrace → Charles Street before
-    // rejoining the normal route. The recorder is the authority for this trip.
+  if (
+    prefersRecordedDg27Route(line, operator, hasRecordedGps) ||
+    prefersRecordedFpot11Route(line, operator, hasRecordedGps)
+  ) {
+    // The recorded GPS is the authority for the current diverted stint.
     actualRouteRequired = true;
   }
   const diversionFallbackPath = plannedPathBlocked ? activeDiversionReplacement(tripPath) : [];
