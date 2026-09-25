@@ -3856,7 +3856,7 @@ export function createFleetBrowser({
     const list = state.savedVehicles;
     return `<section class="fleet-section fleet-saved">
       <h2 class="fleet-section-title">Your vehicles${list.length ? ` · ${list.length}` : ""}</h2>
-      <p class="fleet-muted fleet-section-note">Add a registration to keep a bus here. Route numbers (27, 27A, …) come from its recorded journeys. Replay history is kept for the last 7 days.</p>
+      <p class="fleet-muted fleet-section-note">Add a registration to keep a bus here. Route numbers (27, 27A, …) come from its recorded journeys. Replay history is kept for the last 5 days.</p>
       <form id="fleet-add-vehicle-form" class="fleet-add-vehicle">
         <label class="sr-only" for="fleet-add-vehicle-query">Vehicle registration</label>
         <input id="fleet-add-vehicle-query" type="search" placeholder="Vehicle reg e.g. YX23 ABC" autocomplete="off" />
@@ -4073,7 +4073,7 @@ export function createFleetBrowser({
       </section>
       <section class="fleet-section">
         <h2 class="fleet-section-title">Ticket machine · dead runs${deadRunSegments.length ? ` · ${deadRunSegments.length}` : ""}</h2>
-        <p class="fleet-muted fleet-section-note">Recorded First Potteries and D&amp;G Ticketer dead runs from GPS trails (last 7 days). One row per continuous dead-run stint — separate from the live out-of-service lists above.</p>
+        <p class="fleet-muted fleet-section-note">Recorded First Potteries and D&amp;G Ticketer dead runs from GPS trails (last 5 days). One row per continuous dead-run stint — separate from the live out-of-service lists above.</p>
         ${
           deadRunsHistoryCache.loading && !deadRunsHistoryCache.at
             ? `<p class="fleet-muted">Loading recorded dead runs…</p>`
@@ -4800,10 +4800,10 @@ export function createFleetBrowser({
                 </li>${group.rows.map(renderReplayRow).join("")}`;
               })
               .join("")}</ul>`
-          : `<p class="fleet-muted">No GPS replay recorded for this bus in the last 7 days.</p>`;
+          : `<p class="fleet-muted">No GPS replay recorded for this bus in the last 5 days.</p>`;
     return `<section class="fleet-section fleet-vehicle-replays">
-      <h2 class="fleet-section-title">Replay · last 7 days${count ? ` · ${count}` : ""}</h2>
-      <p class="fleet-muted fleet-section-note">Grouped by route, with the newest replay for each route first. Replay uses the roads and positions actually recorded; older runs are removed after 7 days.</p>
+      <h2 class="fleet-section-title">Replay · last 5 days${count ? ` · ${count}` : ""}</h2>
+      <p class="fleet-muted fleet-section-note">Grouped by route, with the newest replay for each route first. Replay uses the roads and positions actually recorded; older runs are removed after 5 days.</p>
       ${state.replayRunsLoading && count ? `<p class="fleet-muted">Refreshing recorded replays…</p>` : ""}
       ${body}
     </section>`;
