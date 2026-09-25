@@ -15781,7 +15781,17 @@ function alignTrailToRoadsLocal(latlngs, breakOpts = {}) {
   const snapNear = staffs ? 380 : 280;
   const snapFar = staffs ? 560 : 420;
   const inputSegs = splitLatLngsByGaps(latlngs, limits.gapM, breakOpts);
-  const sourceSegs = inputSegs.length ? inputSegs : [latlngs];
+  // Snapping is O(points × roads); a whole-day trail (thousands of fixes) froze
+  // the map. Thin only very long runs — the roads themselves get drawn, so
+  // dropping intermediate pings does not change the shape of the tail.
+  const MAX_SNAP_INPUT = 900;
+  const sourceSegs = (inputSegs.length ? inputSegs : [latlngs]).map((seg) => {
+    if (seg.length <= MAX_SNAP_INPUT) return seg;
+    const step = Math.ceil(seg.length / MAX_SNAP_INPUT);
+    const thinned = seg.filter((_, index) => index % step === 0);
+    if (thinned[thinned.length - 1] !== seg[seg.length - 1]) thinned.push(seg[seg.length - 1]);
+    return thinned;
+  });
   const alignedSegs = [];
   for (const seg of sourceSegs) {
     const out = [];
@@ -16224,13 +16234,22 @@ async function matchTrailViaOsrm(latlngs, signal, breakOpts = {}) {
 async function ensureSnapRoadsForBounds(bounds, signal) {
   if (!bounds) return;
   const template = await getOfmTemplate();
+  // A long run (Alton Towers → Fenton is ~20km) needs wider coverage than a town
+  // hop, so drop a zoom level before giving up on tiles — otherwise the far half
+  // of the journey has no roads to snap to and falls back to raw chords.
+  const span = Math.max(
+    Math.abs(bounds.getNorth() - bounds.getSouth()),
+    Math.abs(bounds.getEast() - bounds.getWest()),
+  );
   let z = Math.min(Math.max(map.getZoom(), 13), 14);
+  if (span > 0.09) z = 12;
   let tiles = tilesForBounds(bounds, z);
-  if (tiles.length > 28) {
-    z = Math.max(12, z - 1);
+  const cap = z <= 12 ? 40 : 28;
+  if (tiles.length > cap) {
+    z = Math.max(11, z - 1);
     tiles = tilesForBounds(bounds, z);
   }
-  tiles = tiles.slice(0, 28);
+  tiles = tiles.slice(0, z <= 12 ? 40 : 28);
   const decoded = await Promise.all(
     tiles.map((tile) => decodeRoadTile(template, tile.z, tile.x, tile.y, signal)),
   );
@@ -16324,12 +16343,11 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
   if (trailAlignPending.has(key)) return trailAlignPending.get(key);
   const pending = (async () => {
     try {
-      // Warm the local road tiles, but do not let a slow tile fetch block the
-      // OSRM road match that keeps live tails visible.
-      await Promise.race([
-        ensureSnapRoadsForPath(latlngs, signal).catch(() => {}),
-        new Promise((resolve) => setTimeout(resolve, 900)),
-      ]);
+      // Warm the local road tiles in the background. Awaiting this froze the map
+      // on long runs (Alton Towers → Fenton is thousands of points), so the snap
+      // below runs on whatever roads are already cached and the next pass picks
+      // up the rest.
+      ensureSnapRoadsForPath(latlngs, signal).catch(() => {});
       const flat = Array.isArray(latlngs?.[0]?.[0]) ? latlngs.flat() : latlngs;
       let aligned = null;
       let segs = [];
