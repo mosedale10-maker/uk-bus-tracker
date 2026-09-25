@@ -3593,7 +3593,7 @@ export function createFleetBrowser({
       input.placeholder =
         state.tab === "private-hire"
           ? "Search private hire or reg"
-          : "Search companies, vehicles or reg";
+          : "Search fleet or reg";
     }
   }
 
