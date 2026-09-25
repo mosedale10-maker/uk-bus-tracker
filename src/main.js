@@ -5905,19 +5905,6 @@ function refreshPinnedTrailLine(key) {
     if (merged.length) trailMem.set(id, merged);
   }
   let gpsPoints = trackedPointsFor(id, filter);
-  // A `reg:` key holds a whole day; road matching cannot take that many points,
-  // so a pinned/replay tail would silently fail to align. Bound it to the window.
-  if (gpsPoints.length > LIVE_TRAIL_MAX_POINTS) {
-    const windowEnd = Number(filter.toMs) || Number(gpsPoints[gpsPoints.length - 1]?.t) || 0;
-    const windowStart = Number(filter.fromMs) || 0;
-    let bounded = gpsPoints;
-    if (windowEnd > 0) {
-      const cutoff = Math.max(windowStart, windowEnd - LIVE_TRAIL_MAX_AGE_MS);
-      bounded = gpsPoints.filter((p) => Number(p?.t) >= cutoff);
-    }
-    if (bounded.length > LIVE_TRAIL_MAX_POINTS) bounded = bounded.slice(-LIVE_TRAIL_MAX_POINTS);
-    if (bounded.length >= 2) gpsPoints = bounded;
-  }
   // BODS journey ids and the recorder's Bustimes journey ids can differ. If the
   // exact selected journey has no usable points, fall back to the same live
   // vehicle/line window rather than dropping the tail entirely.
@@ -6080,26 +6067,6 @@ async function runPinnedTrailAlign(id) {
   }
 }
 
-/**
- * Road matching has to stay matchable: OSRM accepts at most 100 coordinates and
- * the local snapper is O(points × roads). A `reg:` key accumulates a whole day
- * (3,000+ points), so an unbounded live tail could never be road-aligned and so
- * never drew at all. Keep the current run only.
- */
-const LIVE_TRAIL_MAX_POINTS = 500;
-const LIVE_TRAIL_MAX_AGE_MS = 3 * 60 * 60_000;
-
-function boundTrailPointsForMatching(points, ping) {
-  const list = Array.isArray(points) ? points : [];
-  if (list.length <= LIVE_TRAIL_MAX_POINTS) return list;
-  const end = Number(ping) || Number(list[list.length - 1]?.t) || 0;
-  const cutoff = end > 0 ? end - LIVE_TRAIL_MAX_AGE_MS : 0;
-  let start = 0;
-  while (start < list.length && cutoff > 0 && Number(list[start]?.t) < cutoff) start += 1;
-  const kept = start ? list.slice(start) : list.slice(-LIVE_TRAIL_MAX_POINTS);
-  return kept.length >= 2 ? kept.slice(-LIVE_TRAIL_MAX_POINTS) : list.slice(-2);
-}
-
 function refreshLiveTrailLine(key) {
   const filter = {
     ...(pinnedTrailFilters.get(String(key)) || {}),
@@ -6113,10 +6080,6 @@ function refreshLiveTrailLine(key) {
     if (fallback.length > gpsPoints.length) gpsPoints = fallback;
   }
   const ping = livePingForTrailFilter(filter, gpsPoints);
-  if (filter.live) {
-    const bounded = boundTrailPointsForMatching(gpsPoints, ping?.t ?? ping);
-    if (bounded.length >= 2) gpsPoints = bounded;
-  }
   gpsPoints = clipGpsPointsAtPing(gpsPoints, ping);
   const plannedGuidePath = liveFirstPotteriesGuidePath(filter, gpsPoints, ping);
   if (filter.plannedGuide) {
