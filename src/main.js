@@ -5659,7 +5659,15 @@ async function showFleetRouteTails({
     for (const marker of markers.values()) {
       const bus = marker?.bus;
       if (!bus) continue;
-      const ids = [bus.id, bus.btId, bus.vehicle?.id, marker.extra?.btVehicle?.id]
+      const ids = [
+        bus.id,
+        bus.btId,
+        bus.vehicle?.id,
+        bus._bods?.vehicleRef,
+        bus.vehicle?.name,
+        bus.vehicle?.fleet_code,
+        marker.extra?.btVehicle?.id,
+      ]
         .map((value) => String(value || ""))
         .filter(Boolean);
       const busReg = compactReg(busRegistration(bus, marker.extra || {}) || bus.vehicle?.reg || "");
@@ -5676,7 +5684,14 @@ async function showFleetRouteTails({
           const payload = await res.json();
           const rows = Array.isArray(payload) ? payload : [];
           currentBus = rows.find((bus) => {
-            const ids = [bus?.id, bus?.btId, bus?.vehicle?.id, bus?._bods?.vehicleRef]
+            const ids = [
+              bus?.id,
+              bus?.btId,
+              bus?.vehicle?.id,
+              bus?._bods?.vehicleRef,
+              bus?.vehicle?.name,
+              bus?.vehicle?.fleet_code,
+            ]
               .map((value) => String(value || ""))
               .filter(Boolean);
             const busReg = compactReg(bus?.vehicle?.reg || regFromVehicleName(bus?.vehicle?.name));
@@ -5699,6 +5714,13 @@ async function showFleetRouteTails({
       target.dest = currentBus.destination || "";
       target.coordinates = currentBus.coordinates;
       target.live = true;
+      // Keep the live feed's own id/trail identity for the tail. Bustimes vehicle
+      // ids can differ from the BODS id, and a missing reg then has no other way
+      // to reconnect the moving 2D marker to its GPS trail.
+      target.id = String(currentBus.id || target.id || "");
+      target.trailKey = String(currentBus.id || target.trailKey || "");
+      target.btId = currentBus.btId || target.btId || "";
+      target.reg = currentBus.vehicle?.reg || target.reg || reg || "";
       journeyId = target.journey_id;
       tripId = target.trip_id;
       direction = target.direction;
