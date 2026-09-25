@@ -10853,7 +10853,7 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
       <div class="popup-actions">
         ${followButtonHtml({ bus })}
         ${playRouteButtonHtml(bus, historyExtra)}
-        ${replayBusButtonHtml(bus, historyExtra)}
+        ${isCoachTrailOperator(trailOperatorForBus(bus)) ? "" : replayBusButtonHtml(bus, historyExtra)}
       </div>
       ${photoBlock(extra, { reg: photoReg, fleet, operator })}
       ${seatsBlock(bus, extra)}
