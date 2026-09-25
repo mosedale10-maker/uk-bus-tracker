@@ -333,6 +333,16 @@ export function siriItemToBus(item) {
 const BBOX_RE = /^-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?$/;
 const OPERATOR_RE = /^[A-Z0-9]{2,8}(,[A-Z0-9]{2,8})*$/i;
 const FEED_TTL_MS = 5000;
+const STALE_TICKETER_PING_MS = 5 * 60 * 1000;
+
+/** Do not publish old Ticketer passenger pings as live map vehicles. */
+function isStaleTicketerBus(bus) {
+  const op = String(bus?.operator?.noc || bus?._bods?.operator || "").trim().toUpperCase();
+  if (op !== "DAGC" && op !== "FPOT") return false;
+  const recordedMs = Date.parse(bus?.datetime || "");
+  return Number.isFinite(recordedMs) && Date.now() - recordedMs > STALE_TICKETER_PING_MS;
+}
+
 /** Cap the upstream wait — wide Staffs boxes can take 6–15s, which stalls the map. */
 const BODS_FEED_TIMEOUT_MS = 8000;
 const feedCache = new Map();
@@ -536,7 +546,7 @@ export async function fetchBodsVehiclesJson(cacheKey, apiKey) {
   let buses = [];
   for (const item of result.items) {
     const bus = siriItemToBus(item);
-    if (bus) buses.push(bus);
+    if (bus && !isStaleTicketerBus(bus)) buses.push(bus);
   }
   if (parsed.id) buses = buses.filter((b) => matchesVehicleId(b, parsed.id));
   if (parsed.service) buses = buses.filter((b) => matchesServiceLine(b, parsed.service));
@@ -606,7 +616,7 @@ export async function handleBodsVehicles(req, res, apiKey) {
     const vehicles = [];
     for (const item of result.items) {
       const bus = siriItemToBus(item);
-      if (bus) vehicles.push(bus);
+      if (bus && !isStaleTicketerBus(bus)) vehicles.push(bus);
     }
     json(res, 200, {
       vehicles,
