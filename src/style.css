@@ -1826,7 +1826,7 @@ html.map-night .leaflet-control-container {
   }
 
   .journey-panel-detail {
-    flex: 0 1 auto;
+    flex: 0 0 auto;
     max-height: min(34dvh, 260px);
   }
 
