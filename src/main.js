@@ -5147,6 +5147,26 @@ function refreshPinnedTrailLine(key) {
       String(id).startsWith("staff-") ||
       String(id).startsWith("at:"),
   };
+  if (filter.live) {
+    let merged = trailMem.get(id) || [];
+    const aliases = new Set(
+      [
+        id,
+        filter.liveBusId,
+        filter.liveTrailKey,
+        filter.liveVehicleId,
+        filter.liveReg ? regTrailKey(filter.liveReg) : "",
+      ]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    );
+    aliases.delete(id);
+    for (const alias of aliases) {
+      const points = trailMem.get(alias);
+      if (points?.length) merged = mergeTrailPoints(merged, points);
+    }
+    if (merged.length) trailMem.set(id, merged);
+  }
   let gpsPoints = trackedPointsFor(id, filter);
   // Alias feeds can contribute points with no journey ID. Once a live
   // selection has a real journey/trip identity, do not let those unrelated
