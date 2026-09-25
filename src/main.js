@@ -3888,6 +3888,41 @@ function isStaffsTrailOperator(operator) {
   return STAFFS_TRAIL_NOCS.has(String(operator || "").trim().toUpperCase());
 }
 
+/** Canonical NOC for a Staffordshire live bus, including BODS rows with no operator field. */
+function staffsOperatorCode(bus, extra = {}) {
+  const candidates = [
+    trailOperatorForBus(bus),
+    extra.operatorNoc,
+    extra.noc,
+    bus?.operator?.noc,
+    bus?.operator?.id,
+    bus?._bods?.operator,
+  ];
+  for (const value of candidates) {
+    const code = String(value || "").trim().toUpperCase();
+    if (isStaffsTrailOperator(code)) return code;
+  }
+  const idCode = String(bus?.id || "").match(/^bods-([A-Z]+)-/i)?.[1]?.toUpperCase() || "";
+  if (isStaffsTrailOperator(idCode)) return idCode;
+  const text = operatorHaystack(bus, extra);
+  if (/FPOT|First\s*Potteries/i.test(text)) return "FPOT";
+  if (/DAGC|D\s*&\s*G|D\s+and\s+G/i.test(text)) return "DAGC";
+  if (/SOST|Stanton'?s/i.test(text)) return "SOST";
+  if (/CRDR|Chaserider/i.test(text)) return "CRDR";
+  if (/SLBS/i.test(text)) return "SLBS";
+  if (/BANG(?:A)?\b|Banga/i.test(text)) return "BANG";
+  if (/HIPK/i.test(text)) return "HIPK";
+  if (/TBTN|Trent/i.test(text)) return "TBTN";
+  if (/DIAM|Diamond/i.test(text)) return "DIAM";
+  if (/MDCL|Midland/i.test(text)) return "MDCL";
+  return "";
+}
+
+function isStaffsLiveBus(bus, extra = {}) {
+  return Boolean(staffsOperatorCode(bus, extra)) ||
+    isAltonLine(extra.line || bus?.service?.line_name || "");
+}
+
 /** Staffordshire services with a Bustimes trip can use its published track. */
 function usesPlannedRouteOverride(line, operator) {
   // AT1–AT3 are staff/NextStop services and have no Bustimes trip track.
@@ -7872,6 +7907,7 @@ function playRouteButtonHtml(bus, extra = {}) {
   if (!tripId && !vehicleId && !trailKey && !compactReg(reg) && !bus?.journey_id) return "";
   const playKey = tripId || trailKey || vehicleId || regTrailKey(reg) || bus?.journey_id || "";
   const on = routeOverlayActive(playKey, { vehicleId, trailKey });
+  const operatorCode = trailOperatorForBus(bus) || staffsOperatorCode(bus, extra);
   const direction = normalizeTrailDirection(
     extra.direction ||
       bus?.direction ||
@@ -7880,7 +7916,7 @@ function playRouteButtonHtml(bus, extra = {}) {
       "",
   );
   const diverted = isDivertedText(extra.to, bus?.destination, extra.notes, bus?.origin);
-  return `<button type="button" class="play-route-btn${on ? " is-on" : ""}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(bus?.journey_id || "")}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(bus?.service?.line_name || extra.line || "")}" data-operator="${esc(trailOperatorForBus(bus) || extra.operator || "")}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || bus?.destination || "")}" data-datetime="${esc(bus?.datetime || "")}" data-diverted="${diverted ? "1" : "0"}">${on ? "Hide route" : "Show route"}</button>`;
+  return `<button type="button" class="play-route-btn${on ? " is-on" : ""}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(bus?.journey_id || "")}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(bus?.service?.line_name || extra.line || "")}" data-operator="${esc(operatorCode || extra.operator || "")}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || bus?.destination || "")}" data-datetime="${esc(bus?.datetime || "")}" data-diverted="${diverted ? "1" : "0"}">${on ? "Hide route" : "Show route"}</button>`;
 }
 
 /**
@@ -7902,11 +7938,12 @@ function replayBusButtonHtml(bus, extra = {}) {
   if (!tripId && !vehicleId && !trailKey && !compactReg(reg) && !bus?.journey_id) return "";
   const playKey = tripId || trailKey || vehicleId || regTrailKey(reg) || bus?.journey_id || "";
   const on = routeOverlayActive(playKey, { vehicleId, trailKey });
+  const operatorCode = trailOperatorForBus(bus) || staffsOperatorCode(bus, extra);
   const direction = normalizeTrailDirection(
     extra.direction || bus?.direction || bus?.directionRef || bus?.currentJourney?.directionRef || "",
   );
   const diverted = isDivertedText(extra.to, bus?.destination, extra.notes, bus?.origin);
-  return `<button type="button" class="play-route-btn replay-bus-btn${on ? " is-on" : ""}" data-replay="1" data-trip-id="${esc(tripId)}" data-journey-id="${esc(bus?.journey_id || "")}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(bus?.service?.line_name || extra.line || "")}" data-operator="${esc(trailOperatorForBus(bus) || extra.operator || "")}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || bus?.destination || "")}" data-datetime="${esc(bus?.datetime || "")}" data-diverted="${diverted ? "1" : "0"}" title="Replay the roads this bus has actually driven">⏵ Replay</button>`;
+  return `<button type="button" class="play-route-btn replay-bus-btn${on ? " is-on" : ""}" data-replay="1" data-trip-id="${esc(tripId)}" data-journey-id="${esc(bus?.journey_id || "")}" data-vehicle-id="${esc(vehicleId)}" data-trail-key="${esc(trailKey)}" data-reg="${esc(reg)}" data-line="${esc(bus?.service?.line_name || extra.line || "")}" data-operator="${esc(operatorCode || extra.operator || "")}" data-direction="${esc(direction)}" data-dest="${esc(extra.to || bus?.destination || "")}" data-datetime="${esc(bus?.datetime || "")}" data-diverted="${diverted ? "1" : "0"}" title="Replay the roads this bus has actually driven">⏵ Replay</button>`;
 }
 
 function playStaffRouteButtonHtml(item, extra = {}) {
@@ -10927,7 +10964,10 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
   const livery = detail.livery?.name || "";
   const fleetVehicleId = bustimesVehicleIdForFleet(bus, extra);
   const opSlug = fleetOperatorSlugForBus(bus, extra);
-  const opNoc = trailOperatorForBus(bus) || (isFlixBus(bus) ? "FLIX" : isNationalExpress(bus) ? "NATX" : "");
+  const opNoc =
+    trailOperatorForBus(bus) ||
+    staffsOperatorCode(bus, extra) ||
+    (isFlixBus(bus) ? "FLIX" : isNationalExpress(bus) ? "NATX" : "");
   const regLink = fleetRegButtonHtml(reg, {
     fleet,
     vehicleId: fleetVehicleId,
@@ -10964,6 +11004,8 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
     historyLineFilter:
       extra.historyLineFilter || (scfc ? normalizeStokeFcLine(line) : extra.line || line || ""),
   };
+  const hideLiveReplay =
+    isCoachTrailOperator(trailOperatorForBus(bus)) || isStaffsLiveBus(bus, historyExtra);
 
   return `
     <div class="popup-card${sidePanel ? " is-side-panel" : ""}">
@@ -10994,7 +11036,7 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
       <div class="popup-actions">
         ${followButtonHtml({ bus })}
         ${playRouteButtonHtml(bus, historyExtra)}
-        ${isCoachTrailOperator(trailOperatorForBus(bus)) ? "" : replayBusButtonHtml(bus, historyExtra)}
+        ${hideLiveReplay ? "" : replayBusButtonHtml(bus, historyExtra)}
       </div>
       ${photoBlock(extra, { reg: photoReg, fleet, operator })}
       ${seatsBlock(bus, extra)}
@@ -11232,8 +11274,7 @@ async function loadHistoryIntoMarker(marker, { force = false } = {}) {
   const isStaffsBusTrail =
     !wantAtTrails &&
     !wantCoachTrails &&
-    (isStaffsTrailOperator(String(marker.bus?.operator?.noc || marker.bus?.operator?.id || "")) ||
-      /^bods-(FPOT|DAGC|SOST|CRDR|SLBS)-/i.test(String(marker.bus?.id || "")));
+    Boolean(staffsOperatorCode(marker.bus, marker.extra));
   if (!vehicleId && !wantAtTrails && !wantCoachTrails && !isStaffsBusTrail) {
     marker.extra.history = [];
     marker.extra.historyStatus = "unavailable";
@@ -11242,12 +11283,7 @@ async function loadHistoryIntoMarker(marker, { force = false } = {}) {
   }
   const coachNoc = isNationalExpress(marker.bus) ? "NATX" : isFlixBus(marker.bus) ? "FLIX" : "";
   const busTrailNoc = isStaffsBusTrail
-    ? String(
-        marker.bus?.operator?.noc ||
-          marker.bus?.operator?.id ||
-          String(marker.bus?.id || "").match(/^bods-([A-Z]+)-/i)?.[1] ||
-          "FPOT",
-      ).toUpperCase()
+    ? staffsOperatorCode(marker.bus, marker.extra) || "FPOT"
     : "";
   const cacheKey = `${vehicleId || trailKey || "at"}:${atLine || ""}:${coachNoc || busTrailNoc}:${days}`;
   if (force) historyCache.delete(cacheKey);
