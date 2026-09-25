@@ -4165,6 +4165,25 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
 }
 
 /**
+ * Sparse Bustimes stop lists are timetable geometry, not a road track. For a
+ * coach, keep them hidden until the OSRM/road matcher validates the geometry;
+ * otherwise the first paint can briefly draw a straight line between stops.
+ */
+function plannedPathNeedsRoadMatch(path, breakOpts = {}) {
+  if (!breakOpts.plannedRoute || !isCoachTrailOperator(breakOpts.operator)) return false;
+  const flat = Array.isArray(path?.[0]?.[0]) ? path.flat() : path;
+  if (!Array.isArray(flat) || flat.length < 2) return false;
+  const gaps = [];
+  for (let i = 1; i < flat.length; i += 1) {
+    const a = flat[i - 1];
+    const b = flat[i];
+    if (Array.isArray(a) && Array.isArray(b)) gaps.push(haversineMeters(a[0], a[1], b[0], b[1]));
+  }
+  const averageGap = gaps.length ? gaps.reduce((sum, value) => sum + value, 0) / gaps.length : 0;
+  return flat.length <= 24 || averageGap > 800;
+}
+
+/**
  * Prefer road-matched geometry. Never draw raw GPS chords while road matching
  * is pending: a sparse GPS sample can cut across fields and look like a false
  * route. The async aligner will paint the on-road version when it is ready.
@@ -4172,7 +4191,9 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
 function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
   const roadFlat = flattenTrailLatLngs(roadPath);
   if (roadFlat.length >= 2) return roadPath;
-  if (breakOpts.plannedRoute) return gpsPath;
+  if (breakOpts.plannedRoute) {
+    return plannedPathNeedsRoadMatch(gpsPath, breakOpts) ? [] : gpsPath;
+  }
   // A local nearest-road stitch can choose the opposite carriageway at a
   // motorway junction and draw a convincing-looking loop. Coaches therefore
   // wait for the validated OSRM geometry instead of showing that fallback.
@@ -6901,16 +6922,25 @@ async function startRoutePlayback({
   // Bustimes-style instant tail: locally road-snapped path, clipped at the bus's current
   // position — no OSRM wait, so the route paints immediately.
   const fastBase = preferRoadMatchedTrail(path, [], alignBreak);
+  const plannedNeedsRoadMatch =
+    coachPlayback &&
+    plannedPath.length >= 2 &&
+    plannedPathNeedsRoadMatch(fastBase, alignBreak);
   const fastPath =
-    flattenTrailLatLngs(fastBase).length >= 2
+    flattenTrailLatLngs(fastBase).length >= 2 && !plannedNeedsRoadMatch
       ? isHistorical
         ? fastBase
         : clipTrailPathAtPing(fastBase, clipPing, { failClosed: true })
       : [];
   // Bustimes shows the scheduled road ahead in white and the travelled portion
   // in the operator colour. Keep that visual distinction for live coach routes.
+  // A sparse stop list stays hidden until the road matcher returns.
   const plannedAheadPath =
-    coachPlayback && !isHistorical && !replayOnly && plannedPath.length >= 2
+    coachPlayback &&
+    !isHistorical &&
+    !replayOnly &&
+    plannedPath.length >= 2 &&
+    !plannedNeedsRoadMatch
       ? fastBase
       : null;
   const scene = {
@@ -7021,7 +7051,11 @@ async function startRoutePlayback({
       .then((aligned) => {
         if (!playback || playback.requestId !== requestId || playback.playKey !== playKey) return;
         let upgraded = aligned;
-        if (flattenTrailLatLngs(upgraded).length < 2 && tripStops.length >= 2) {
+        if (
+          flattenTrailLatLngs(upgraded).length < 2 &&
+          tripStops.length >= 2 &&
+          !coachPlayback
+        ) {
           const stopPath = tripStops
             .filter((stop) => Number.isFinite(stop.lat) && Number.isFinite(stop.lng))
             .map((stop) => [stop.lat, stop.lng]);
