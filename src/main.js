@@ -6344,7 +6344,7 @@ async function showFleetRouteTails({
   }
 
   const keepRecordedDg27 = prefersRecordedDg27Route(code, opCode, drawn.length > 0);
-  const keepRecordedFpot11 = prefersRecordedFpot11Route(code, opCode, drawn.length > 0);
+  const keepRecordedFpot11 = prefersRecordedFpot11Route(code, opCode, true);
   if (plannedPathUsable && !isCoachTrailOperator(opCode) && !hasExplicitSelection && !keepRecordedDg27 && !keepRecordedFpot11) {
     clearPinnedTrails();
     const plannedFlatPath = flattenTrailLatLngs(plannedRoutePath);
@@ -8074,9 +8074,10 @@ async function startRoutePlayback({
     plannedRouteOverride &&
     tripPath.length >= 2 &&
     pathCrossesActiveRoadNotice(tripPath);
+  const fpot11Diversion = prefersRecordedFpot11Route(line, operator, true);
   if (
     prefersRecordedDg27Route(line, operator, hasRecordedGps) ||
-    prefersRecordedFpot11Route(line, operator, hasRecordedGps)
+    (fpot11Diversion && (hasRecordedGps || live || autoReplay || requestedRecordedReplay || historicalPlayback))
   ) {
     // The recorded GPS is the authority for the current diverted stint.
     actualRouteRequired = true;
