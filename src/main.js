@@ -779,14 +779,12 @@ async function loadServiceNotices() {
   }
 }
 
-/* ── Bus on diversion: live announcements + audio ────────────────────────────
+/* ── Bus on diversion: announcements + audio ─────────────────────────────────
  * Two signals feed the same alert:
  *   1. an active road notice whose operator/geometry the bus is inside
  *   2. the bus sitting well off its published trip alignment
- * Alerts are spoken once per bus, repeated only after a long cool-off, and are
- * dropped as soon as the bus is back on route. */
-const DIVERSION_AUDIO_KEY = "uk-bus-diversion-audio";
-let diversionAudioOn = localStorage.getItem(DIVERSION_AUDIO_KEY) !== "0";
+ * Alerts are announced once per bus (only while Announcements is on), repeated
+ * only after a long cool-off, and dropped as soon as the bus is back on route. */
 const diversionAlerts = new Map();
 const DIVERSION_SCAN_MS = 20_000;
 const DIVERSION_REPEAT_MS = 12 * 60_000;
@@ -945,10 +943,9 @@ function flagDiversion(bus, info) {
   const repeat = alert.announcedAt && now - alert.announcedAt < DIVERSION_REPEAT_MS;
   if (!repeat) {
     alert.announcedAt = now;
-    if (diversionAudioOn) {
-      // `unannounced` so this speaks without needing the Plus announcements toggle.
-      speak(alert.body, { force: true, unannounced: true });
-    }
+    // Only speaks when the user has Announcements switched on (the same toggle
+    // as follow mode). Queued so it never cuts off the current stop call.
+    if (announceOn) speak(alert.body, { force: true, append: true });
   }
   updateAlertsBadge();
   renderAlertsPanel();
@@ -1062,15 +1059,6 @@ function setupServiceAlerts() {
     setAlertsPanelOpen(true);
     renderAlertsPanel();
   });
-  const diversionAudioEl = document.getElementById("diversion-audio-toggle");
-  if (diversionAudioEl) {
-    diversionAudioEl.checked = diversionAudioOn;
-    diversionAudioEl.addEventListener("change", () => {
-      diversionAudioOn = diversionAudioEl.checked;
-      localStorage.setItem(DIVERSION_AUDIO_KEY, diversionAudioOn ? "1" : "0");
-      if (!diversionAudioOn) clearSpeech();
-    });
-  }
   loadServiceNotices();
   setInterval(loadServiceNotices, 5 * 60_000);
   setInterval(() => {
@@ -2214,13 +2202,10 @@ function clearSpeech() {
 }
 
 function pumpSpeech() {
-  if (speakBusy || !window.speechSynthesis) return;
+  if (speakBusy || !announceOn || !window.speechSynthesis) return;
   const next = speakQueue.shift();
   if (!next) return;
-  const { text, unannounced = false } = next;
-  // Alert audio (diversions) speaks without the Plus announcement toggle;
-  // follow-mode speech still needs announceOn.
-  if (!announceOn && !unannounced) return;
+  const text = typeof next === "string" ? next : next.text;
   speakBusy = true;
   lastSpokenText = text;
   lastSpokenAt = Date.now();
@@ -2238,16 +2223,15 @@ function pumpSpeech() {
   window.speechSynthesis.speak(utter);
 }
 
-function speak(text, { force = false, append = false, unannounced = false } = {}) {
-  if (!text || !window.speechSynthesis) return;
-  if (!announceOn && !unannounced) return;
+function speak(text, { force = false, append = false } = {}) {
+  if (!announceOn || !text || !window.speechSynthesis) return;
   if (!force && text === lastSpokenText) return;
   if (!force && !append && Date.now() - lastSpokenAt < 8000) return;
   if (append) {
-    speakQueue.push({ text, unannounced });
+    speakQueue.push(text);
   } else {
     clearSpeech();
-    speakQueue = [{ text, unannounced }];
+    speakQueue = [text];
   }
   pumpSpeech();
 }
@@ -2328,7 +2312,7 @@ function announceJourney(marker, { intro = false } = {}) {
   lastStopIndex = index;
   lastStopKey = stop;
   clearSpeech();
-  speakQueue = lines.map((text) => ({ text, unannounced: false }));
+  speakQueue = [...lines];
   pumpSpeech();
 }
 
