@@ -10750,6 +10750,39 @@ function mergeBodsWithBustimes(bodsBuses, btBuses, { bodsOk = false } = {}) {
   return dedupeLiveBuses(out);
 }
 
+/** Match only stable physical-vehicle identities; never merge two anonymous nearby buses. */
+function busesShareStableIdentity(a, b) {
+  if (!a || !b || a === b) return false;
+  if (a.id != null && b.id != null && String(a.id) === String(b.id)) return true;
+  const regA = compactReg(a.vehicle?.reg || regFromVehicleName(a.vehicle?.name));
+  const regB = compactReg(b.vehicle?.reg || regFromVehicleName(b.vehicle?.name));
+  if (regA && regB) return regA === regB;
+  const opA = String(a.operator?.noc || a.operator?.id || a._bods?.operator || "").trim().toUpperCase();
+  const opB = String(b.operator?.noc || b.operator?.id || b._bods?.operator || "").trim().toUpperCase();
+  const fleetA = String(a.vehicle?.fleet_code || a.vehicle?.fleet_number || "").trim();
+  const fleetB = String(b.vehicle?.fleet_code || b.vehicle?.fleet_number || "").trim();
+  if (fleetA && fleetB && (!opA || !opB || opA === opB)) return fleetA === fleetB;
+  const tokensA = busIdentityTokens(a);
+  const tokensB = busIdentityTokens(b);
+  for (const token of tokensA) {
+    if (token.length >= 4 && tokensB.has(token)) return true;
+  }
+  return false;
+}
+
+function dedupeStableLiveBuses(buses) {
+  const ranked = [...(buses || [])].sort((a, b) => {
+    const rank = (bus) => (bus?.trackSource === "bods" || bus?.source === "bods" ? 0 : 1);
+    return rank(a) - rank(b) || Number(b?.datetime ? Date.parse(b.datetime) : 0) - Number(a?.datetime ? Date.parse(a.datetime) : 0);
+  });
+  const kept = [];
+  for (const bus of ranked) {
+    if (kept.some((other) => busesShareStableIdentity(other, bus))) continue;
+    kept.push(bus);
+  }
+  return kept;
+}
+
 /** Drop near-duplicate markers; always keep BODS-tracked copy first. */
 function dedupeLiveBuses(buses) {
   const ranked = [...(buses || [])].sort((a, b) => {
@@ -13139,6 +13172,10 @@ async function loadBuses({ replace = false } = {}) {
       for (const bus of paintedLocals) byId.set(bus.id, bus);
       for (const bus of paintedCoaches) byId.set(bus.id, bus);
     }
+
+    const stableLive = dedupeStableLiveBuses([...byId.values()]);
+    byId.clear();
+    for (const bus of stableLive) byId.set(bus.id, bus);
 
     const live = [];
     const seenService = new Set();
