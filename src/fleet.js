@@ -3175,6 +3175,11 @@ function serviceOperatorNoc(service) {
     .toUpperCase();
 }
 
+function isDagcOperatorValue(value) {
+  const text = String(value || "").trim();
+  return /\bDAGC\b/i.test(text) || /\bD\s*(?:&|AND)\s*G\b/i.test(text) || /D-G\s*COACH/i.test(text);
+}
+
 function plateFromLiveVehicleName(name) {
   const text = String(name || "").toUpperCase();
   const match =
@@ -4450,10 +4455,31 @@ export function createFleetBrowser({
       state._routePreferNoc ||
       state.operator?.noc ||
       serviceOperatorNoc(state.routeServices?.[0]);
+    const routeOperatorValues = [
+      routeOverviewOperator,
+      state._routePreferNoc,
+      state.operator?.noc,
+      state.operator?.name,
+      serviceOperatorNoc(service),
+      ...(state.routeServices || []).flatMap((row) => [
+        row?.noc,
+        row?.operator?.noc,
+        row?.operator?.id,
+        row?.operator?.name,
+        serviceOperatorNoc(row),
+      ]),
+      ...(state.routeVehicles || []).flatMap((row) => [
+        row?.operator?.noc,
+        row?.operator?.id,
+        row?.operator?.name,
+        row?.service?.operator?.noc,
+        row?.service?.operator?.name,
+        row?._bods?.operator,
+      ]),
+    ];
     const isDgRoute27 =
       String(line).trim().toUpperCase() === "27" &&
-      (String(routeOverviewOperator || "").toUpperCase() === "DAGC" ||
-        String(state.operator?.noc || "").toUpperCase() === "DAGC");
+      routeOperatorValues.some((value) => isDagcOperatorValue(value));
     const simonNote = isDgRoute27
       ? `<p class="fleet-route-personal-note">Behind the wheel today is the one and only Simon!!</p>`
       : "";
