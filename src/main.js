@@ -5613,6 +5613,44 @@ async function showFleetRouteTails({
         ]
       : [];
 
+  // Fleet's vehicle page can retain the previous Bustimes journey after the bus
+  // has already turned around. For Map · this bus, use the current live marker
+  // as the authority so the tail cannot remain attached to an old trip/direction.
+  if (live && single.length) {
+    const wantedIds = new Set(
+      [vehicleId, trailKey, String(vehicleId || ""), String(trailKey || "")]
+        .map((value) => String(value || ""))
+        .filter(Boolean),
+    );
+    const wantedReg = compactReg(reg);
+    let currentBus = null;
+    for (const marker of markers.values()) {
+      const bus = marker?.bus;
+      if (!bus) continue;
+      const ids = [bus.id, bus.btId, bus.vehicle?.id, marker.extra?.btVehicle?.id]
+        .map((value) => String(value || ""))
+        .filter(Boolean);
+      const busReg = compactReg(busRegistration(bus, marker.extra || {}) || bus.vehicle?.reg || "");
+      if (ids.some((id) => wantedIds.has(id)) || (wantedReg && busReg === wantedReg)) {
+        currentBus = bus;
+        break;
+      }
+    }
+    if (currentBus) {
+      const target = single[0];
+      target.journey_id = String(currentBus.journey_id || "").trim();
+      target.trip_id = String(currentBus.trip_id || "").trim();
+      target.datetime = currentBus.datetime || new Date().toISOString();
+      target.line = currentBus.service?.line_name || target.line || code;
+      target.direction = currentBus.direction || currentBus.directionRef || "";
+      target.dest = currentBus.destination || "";
+      target.coordinates = currentBus.coordinates;
+      target.live = true;
+      plannedTripId = target.trip_id;
+      plannedDate = String(target.datetime || plannedDate || "").slice(0, 10);
+    }
+  }
+
   // FlixBus / National Express / D&G / First Potteries / Stanton's: one vehicle + one route only.
   let targets = list.length ? list : single;
   // Route-wide coach requests can contain hundreds of anonymous live rows. The
