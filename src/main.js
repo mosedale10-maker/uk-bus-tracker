@@ -892,12 +892,19 @@ function diversionAlertLine(bus, { reason, notice, distanceM, place }) {
   const line = String(bus?.service?.line_name || "").trim();
   const reg = busRegLabel(bus);
   const opName = String(bus?.operator?.name || busOperatorCode(bus) || "").trim();
-  const who = [line ? `route ${line}` : "", reg || opName].filter(Boolean).join(" · ");
+  const who = [line ? `route ${line}` : "", reg || opName].filter(Boolean).join(", ");
   if (reason === "notice" && notice) {
-    return `${who} is on the ${notice.title.replace(/^Road closed\s*·\s*/i, "")} diversion near ${place || "the closure"}.`;
+    const subject =
+      String(notice.title || "")
+        .replace(/^road\s+closed\s*[.:,\u00b7\-–—]?\s*/i, "")
+        .replace(/[.:,\u00b7\-–—]\s*$/, "")
+        .trim() || "the closure";
+    return `${who ? `${who}, is` : "A bus is"} on the ${subject} diversion.`;
   }
-  const metres = Number.isFinite(distanceM) ? ` about ${Math.round(distanceM / 10) * 10} metres` : "";
-  return `${who} is off its normal route${metres}${place ? ` near ${place}` : ""}.`;
+  const metres = Number.isFinite(distanceM)
+    ? `about ${Math.round(distanceM / 10) * 10} metres off route`
+    : "off its normal route";
+  return `${who ? `${who}, is` : "A bus is"} ${metres}${place ? ` near ${place}` : ""}.`;
 }
 
 function flagDiversion(bus, info) {
@@ -924,7 +931,9 @@ function flagDiversion(bus, info) {
       place: info.place || "",
       distanceM: info.distanceM,
       noticeId: info.notice?.id || "",
-      title: info.reason === "notice" ? "Bus on diversion" : "Bus off its normal route",
+      title: [String(bus?.service?.line_name || "").trim() ? `Route ${String(bus.service.line_name).trim()}` : "Bus", busRegLabel(bus)]
+        .filter(Boolean)
+        .join(" · "),
       body: diversionAlertLine(bus, info),
     });
   }
