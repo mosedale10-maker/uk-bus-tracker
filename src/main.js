@@ -5573,6 +5573,12 @@ async function showFleetRouteTails({
   }
   setAppTab("map");
   stopRoutePlayback("", { clearTail: true });
+  // A previous route/replay can leave a raw playback-layer stroke behind even
+  // when no active playback object owns it. Clear that layer before pinning the
+  // selected live journey.
+  gpsReplayTeardown();
+  playbackLayer.clearLayers();
+  clearTrailArtifacts(playbackLayer);
 
   const list = Array.isArray(vehicles) ? vehicles.filter(Boolean) : [];
   const single =
