@@ -3953,9 +3953,8 @@ function prefersRecordedStaffsRoute(operator, hasRecordedPoints = false, line = 
  * -> Charles Street -> the onward main route.
  *
  * These are OSM road vertices (not straight-line guesses), so the fallback is
- * still road-shaped when OSRM is unavailable.  The function is deliberately
- * limited to Staffordshire operators and the Hanley corridor; other routes and
- * genuinely different buses are untouched.
+ * still road-shaped when OSRM is unavailable.  The corridor check is local:
+ * routes that do not pass through the affected junction are untouched.
  */
 const STAFFS_HANLEY_BIRCH_CHARLES_PATH = Object.freeze([
   [53.022336, -2.174618], // Hanley bus station approach
@@ -3980,24 +3979,6 @@ const STAFFS_HANLEY_BIRCH_CHARLES_PATH = Object.freeze([
   [53.0249142, -2.1734388],
   [53.0249411, -2.173478],
 ]);
-
-function staffsHanleyDiversionEnabled(operatorOrOpts) {
-  const opts =
-    typeof operatorOrOpts === "string"
-      ? { operator: operatorOrOpts }
-      : operatorOrOpts && typeof operatorOrOpts === "object"
-        ? operatorOrOpts
-        : {};
-  const operator = String(opts.operator || "").trim().toUpperCase();
-  const key = String(opts.key || opts.trailKey || "").trim();
-  return Boolean(
-    opts.staffs ||
-      isStaffsTrailOperator(operator) ||
-      isAltonLine(opts.line) ||
-      /^staff-/i.test(key) ||
-      /^at:/i.test(key),
-  );
-}
 
 function staffsPointIsPotteriesWay(point) {
   const lat = Number(point?.[0]);
@@ -4029,11 +4010,9 @@ function staffsDiversionBridgePoints(entry, exit, reverse = false) {
   });
 }
 
-/** Replace only the Potteries Way loop in a Staffordshire Hanley tail. */
+/** Replace the Potteries Way loop for any bus tail passing through Hanley. */
 function applyStaffsHanleyDiversionOnly(path, operatorOrOpts = {}) {
-  if (!Array.isArray(path) || path.length < 2 || !staffsHanleyDiversionEnabled(operatorOrOpts)) {
-    return path;
-  }
+  if (!Array.isArray(path) || path.length < 2) return path;
   const multi = Array.isArray(path[0]) && Array.isArray(path[0][0]);
   const segments = multi ? path : [path];
   let changed = false;
@@ -4118,9 +4097,7 @@ function staffsMergeDiversionPoints(points) {
 
 /** Keep buses on the signed bus gate rather than sending them around the roundabout. */
 function applyStaffsLongtonBusGate(path, operatorOrOpts = {}) {
-  if (!Array.isArray(path) || path.length < 2 || !staffsHanleyDiversionEnabled(operatorOrOpts)) {
-    return path;
-  }
+  if (!Array.isArray(path) || path.length < 2) return path;
   const multi = Array.isArray(path[0]) && Array.isArray(path[0][0]);
   const segments = multi ? path : [path];
   let changed = false;
