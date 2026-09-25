@@ -5867,3 +5867,16 @@ button.fleet-route:hover {
     padding: 8px 12px;
   }
 }
+
+/* Tablet browsers spend most of their time moving Leaflet markers. Keep their
+   layout work isolated and let off-screen Fleet rows skip painting until needed. */
+@media (pointer: coarse) {
+  .bus-marker {
+    contain: layout style;
+  }
+
+  .fleet-list > li {
+    content-visibility: auto;
+    contain-intrinsic-size: 64px;
+  }
+}

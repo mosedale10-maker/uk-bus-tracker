@@ -797,6 +797,19 @@ const PAINT_REFRESH_MS = 60_000;
 const PAINT_MOVE_REFRESH_MS = 15_000;
 const PAINT_STAFF_RETRY_MS = 30_000;
 const BUS_POLL_MS = 6000;
+const TABLET_LIVE_POLL_MS = 10000;
+const LIVE_MARKER_BATCH_SIZE = 48;
+
+function livePollMs() {
+  try {
+    const coarse = window.matchMedia?.("(pointer: coarse)").matches;
+    const shortSide = Math.min(window.screen?.width || 0, window.screen?.height || 0);
+    const longSide = Math.max(window.screen?.width || 0, window.screen?.height || 0);
+    return coarse && shortSide >= 600 && longSide >= 900 ? TABLET_LIVE_POLL_MS : BUS_POLL_MS;
+  } catch {
+    return BUS_POLL_MS;
+  }
+}
 const STALE_PING_MS = 5 * 60 * 1000;
 /** Staffs Ticketer buses often sit quietly at termini on overnight routes — keep them a bit longer. */
 const STAFFS_STALE_PING_MS = 20 * 60 * 1000;
@@ -9769,9 +9782,21 @@ function isFlixBus(bus) {
   );
 }
 
-async function fetchFlixBuses(signal) {
+function vehicleBboxQuery(bounds) {
+  const params = new URLSearchParams();
+  if (!bounds) return params;
+  params.set("xmin", bounds.getWest().toFixed(5));
+  params.set("ymin", bounds.getSouth().toFixed(5));
+  params.set("xmax", bounds.getEast().toFixed(5));
+  params.set("ymax", bounds.getNorth().toFixed(5));
+  return params;
+}
+
+async function fetchFlixBuses(signal, bounds) {
   try {
-    const res = await fetch("/api/vehicles?operator=FLIX", { signal });
+    const query = vehicleBboxQuery(bounds);
+    query.set("operator", "FLIX");
+    const res = await fetch(`/api/vehicles?${query}`, { signal });
     if (!res.ok) return [];
     const data = await res.json();
     const rows = Array.isArray(data) ? data : [];
@@ -9838,9 +9863,11 @@ function isInternationalFlix(bus) {
   );
 }
 
-async function fetchNatxBuses(signal) {
+async function fetchNatxBuses(signal, bounds) {
   try {
-    const res = await fetch("/api/vehicles?operator=NATX", { signal });
+    const query = vehicleBboxQuery(bounds);
+    query.set("operator", "NATX");
+    const res = await fetch(`/api/vehicles?${query}`, { signal });
     if (!res.ok) return [];
     const data = await res.json();
     return Array.isArray(data) ? data.filter(isNationalExpress) : [];
@@ -12779,7 +12806,9 @@ function upsertLiveBus(bus, snapped) {
         ensureMarkerSpeedLimit(existing);
       }
     }
-    refreshPopup(existing);
+    if (selectedMapMarker === existing || existing.isPopupOpen?.() || isFollowingMarker(existing)) {
+      refreshPopup(existing);
+    }
     if (isFollowingMarker(existing)) updateFollowChip();
     if (existing === announceFollow) announceJourney(existing);
     keepFollowedInView(existing);
@@ -12912,8 +12941,8 @@ async function loadBuses({ replace = false } = {}) {
     const [localRes, flixBuses, natxBuses, staffsOpFeeds, paintRes, ...extraPaintRes] =
       await Promise.all([
         showLocal ? safeFetch(`/api/vehicles?${params}`) : Promise.resolve(null),
-        showCoach ? fetchFlixBuses(signal) : Promise.resolve([]),
-        showCoach ? fetchNatxBuses(signal) : Promise.resolve([]),
+        showCoach ? fetchFlixBuses(signal, bounds) : Promise.resolve([]),
+        showCoach ? fetchNatxBuses(signal, bounds) : Promise.resolve([]),
         staffsOpList.length
           ? Promise.all(
               staffsOpList.map((op) =>
@@ -13050,7 +13079,7 @@ async function loadBuses({ replace = false } = {}) {
       if (!showLocal && !coach) continue;
       if (!showCoach && coach) continue;
       // Operator-wide feeds include whole fleets — keep pins near the viewport.
-      if (!coach && !viewPad.contains([lat, lng])) continue;
+      if (!viewPad.contains([lat, lng])) continue;
       if (histFocus?.journeyOnly && !busMatchesHistoryFocus(bus, {}, histFocus)) continue;
       if (histFocus?.hideAll) continue;
       if (isNotInService(bus)) {
@@ -13119,9 +13148,19 @@ async function loadBuses({ replace = false } = {}) {
       }
     });
 
-    for (const { bus, snapped } of live) {
-      seenService.add(bus.id);
-      upsertLiveBus(bus, snapped);
+    for (let start = 0; start < live.length; start += LIVE_MARKER_BATCH_SIZE) {
+      if (signal.aborted || gen !== busesGen) return;
+      const batch = live.slice(start, start + LIVE_MARKER_BATCH_SIZE);
+      for (const { bus, snapped } of batch) {
+        seenService.add(bus.id);
+        upsertLiveBus(bus, snapped);
+      }
+      if (start + LIVE_MARKER_BATCH_SIZE < live.length) {
+        await new Promise((resolve) => {
+          if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => resolve());
+          else setTimeout(resolve, 0);
+        });
+      }
     }
     for (const [id, marker] of markers) {
       const coach = isFlixBus(marker.bus) || isNationalExpress(marker.bus);
@@ -13148,8 +13187,8 @@ async function loadBuses({ replace = false } = {}) {
     }
 
     ensureSnapRoads(signal)
-      .then(() => {
-        if (signal.aborted) return;
+      .then((roadsLoaded) => {
+        if (!roadsLoaded || signal.aborted) return;
         for (const marker of markers.values()) {
           const bus = marker.bus;
           if (!bus?.coordinates) continue;
@@ -13234,7 +13273,7 @@ function schedule() {
     pruneStaleMarkers();
     loadBuses().catch(() => {});
     refreshAltonIfRelevant();
-  }, BUS_POLL_MS);
+  }, livePollMs());
   // Coasting is currently disabled because replacing feed objects discarded its
   // state and caused marker snap-back. Do not pay for a no-op 1 Hz loop.
   if (COAST_MAX_M > 0) coastTimer = setInterval(advanceLiveMarkers, 1000);
@@ -14106,6 +14145,7 @@ const SNAP_CLASSES = new Set([
 const MAX_SNAP_M = 110;
 const JUNCTION_M = 18;
 let ofmTileTemplate = null;
+let ofmUnavailableUntil = 0;
 const decodedTileCache = new Map();
 let snapRoads = [];
 let snapRoadsKey = "";
@@ -15374,8 +15414,9 @@ async function ensureSnapRoads(signal) {
     snapRoads = [];
     snapRoadsKey = "";
     snapRoadsAt = 0;
-    return;
+    return false;
   }
+  if (!ofmTileTemplate && ofmUnavailableUntil > Date.now()) return false;
   const bounds = map.getBounds().pad(0.06);
   const key = `${map.getZoom()}|${bounds.getNorth().toFixed(3)}|${bounds.getSouth().toFixed(3)}|${bounds.getEast().toFixed(3)}|${bounds.getWest().toFixed(3)}`;
   if (snapRoadsKey === key && snapRoadsAt && Date.now() - snapRoadsAt < 30_000) return;
@@ -15394,6 +15435,7 @@ async function ensureSnapRoads(signal) {
   snapRoads = decoded.flat();
   snapRoadsKey = key;
   snapRoadsAt = Date.now();
+  return true;
 }
 
 function minDistToRoad(p, latlngs) {
@@ -15407,15 +15449,24 @@ function minDistToRoad(p, latlngs) {
 
 async function getOfmTemplate() {
   if (ofmTileTemplate) return ofmTileTemplate;
-  const res = await fetch("/api/ofm/planet");
-  if (!res.ok) throw new Error("Could not load road tiles");
-  const json = await res.json();
-  ofmTileTemplate = String(json.tiles?.[0] || "").replace(
-    "https://tiles.openfreemap.org",
-    "/api/ofm",
-  );
-  if (!ofmTileTemplate) throw new Error("Could not load road tiles");
-  return ofmTileTemplate;
+  if (ofmUnavailableUntil > Date.now()) throw new Error("Road tiles unavailable");
+  try {
+    const res = await fetch("/api/ofm/planet");
+    if (!res.ok) throw new Error("Could not load road tiles");
+    const json = await res.json();
+    ofmTileTemplate = String(json.tiles?.[0] || "").replace(
+      "https://tiles.openfreemap.org",
+      "/api/ofm",
+    );
+    if (!ofmTileTemplate) throw new Error("Could not load road tiles");
+    ofmUnavailableUntil = 0;
+    return ofmTileTemplate;
+  } catch (error) {
+    // The current tile proxy can be unavailable for a while. Do not retry this
+    // failed request on every six-second live poll.
+    ofmUnavailableUntil = Date.now() + 10 * 60_000;
+    throw error;
+  }
 }
 
 async function decodeRoadTile(template, z, x, y, signal) {
