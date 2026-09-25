@@ -4445,6 +4445,13 @@ export function createFleetBrowser({
       state._routePreferNoc ||
       state.operator?.noc ||
       serviceOperatorNoc(state.routeServices?.[0]);
+    const isDgRoute27 =
+      String(line).trim().toUpperCase() === "27" &&
+      (String(routeOverviewOperator || "").toUpperCase() === "DAGC" ||
+        String(state.operator?.noc || "").toUpperCase() === "DAGC");
+    const simonNote = isDgRoute27
+      ? `<p class="fleet-route-personal-note">Behind the wheel today is the one and only Simon!!</p>`
+      : "";
     const dates = [];
     for (let i = 0; i < 7; i += 1) {
       const d = new Date();
@@ -4521,6 +4528,7 @@ export function createFleetBrowser({
         ])}
         <h1 class="fleet-title">Route ${routeNumberBtn(line)}</h1>
         <p class="fleet-lead">Staffordshire buses that have run route <strong>${esc(line)}</strong> — each trip listed separately</p>
+        ${simonNote}
         <p class="fleet-actions">
           <button type="button" class="fleet-link-btn" data-action="show-route-tails" data-line="${esc(line)}" data-operator="${esc(routeOverviewOperator)}">Map · tails</button>
         </p>
@@ -4595,6 +4603,7 @@ export function createFleetBrowser({
           ? "live coaches on this route, plus today’s trips"
           : "each trip listed separately (Vehicle · Trip · To · Map)"
       }</p>
+      ${simonNote}
       <p class="fleet-actions">
         <button type="button" class="fleet-link-btn" data-action="show-route-tails" data-line="${esc(service.line_name || line)}" data-operator="${esc((Array.isArray(service?.operator) && service.operator[0]) || state._routePreferNoc || "")}">Map · tails</button>
       </p>
