@@ -10759,6 +10759,9 @@ function busesShareStableIdentity(a, b) {
   if (regA && regB) return regA === regB;
   const opA = String(a.operator?.noc || a.operator?.id || a._bods?.operator || "").trim().toUpperCase();
   const opB = String(b.operator?.noc || b.operator?.id || b._bods?.operator || "").trim().toUpperCase();
+  const refA = compactQuery(a._bods?.vehicleRef || a.vehicle?.name);
+  const refB = compactQuery(b._bods?.vehicleRef || b.vehicle?.name);
+  if (refA && refB && refA === refB && (!opA || !opB || opA === opB)) return true;
   const fleetA = String(a.vehicle?.fleet_code || a.vehicle?.fleet_number || "").trim();
   const fleetB = String(b.vehicle?.fleet_code || b.vehicle?.fleet_number || "").trim();
   if (fleetA && fleetB && (!opA || !opB || opA === opB)) return fleetA === fleetB;
