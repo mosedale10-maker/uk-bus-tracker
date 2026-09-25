@@ -13682,9 +13682,12 @@ async function loadBuses({ replace = false } = {}) {
             lastPaintBuses = mergePaintRows(lastPaintBuses, rows);
             lastPaintAt = Date.now();
             schedulePaintCachePersist();
+            // Paint first, then CSS: the CSS repaint is keyed on the marker
+            // already carrying the numeric livery id, otherwise it finds nothing.
+            refreshMarkersFromPaintSnapshot();
             ensureLiveries(rows).catch(() => {});
           }
-          refreshMarkersFromPaintSnapshot();
+          if (target === "coach") refreshMarkersFromPaintSnapshot();
         })
         .catch(() => {});
     }
