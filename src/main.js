@@ -5790,18 +5790,21 @@ async function showFleetRouteTails({
       (Number.isFinite(targetWhenMs) && Date.now() - targetWhenMs <= 90_000);
     let targetLat = Number(v.coordinates?.[1] ?? v.lat);
     let targetLng = Number(v.coordinates?.[0] ?? v.lng);
+    const hasTargetCoordinates = Number.isFinite(targetLat) && Number.isFinite(targetLng);
     let targetPing = null;
     if (targetIsLive) {
-      if (!Number.isFinite(targetLat) || !Number.isFinite(targetLng)) {
+      let targetT = Number.isFinite(targetWhenMs) ? targetWhenMs : NaN;
+      if (!hasTargetCoordinates) {
         const latest = gps[gps.length - 1];
         targetLat = Number(latest?.lat);
         targetLng = Number(latest?.lng);
+        targetT = Number(latest?.t) || Date.now();
       }
       if (Number.isFinite(targetLat) && Number.isFinite(targetLng)) {
         targetPing = {
           lat: targetLat,
           lng: targetLng,
-          t: Number.isFinite(targetWhenMs) ? targetWhenMs : Number(gps[gps.length - 1]?.t) || Date.now(),
+          t: targetT || Date.now(),
           source: "fleet-target",
         };
         gps = clipGpsPointsAtPing(gps, targetPing);
