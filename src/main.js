@@ -5124,9 +5124,9 @@ function refreshPinnedTrailLine(key) {
     livePing = livePingForTrailFilter(filter, gpsPoints);
     gpsPoints = clipGpsPointsAtPing(gpsPoints, livePing);
   }
-  // Overview coach previews are stored as pinned trails rather than the focused
-  // live trail. Check those pings too, so a diversion detected after Show route
-  // was opened still replaces the scheduled path with the recorded GPS route.
+  // Overview previews are stored as pinned trails rather than the focused live
+  // trail. Check those pings too, so a diversion detected after Show route was
+  // opened still replaces the scheduled path with the recorded GPS route.
   const playbackArgs = playback?.requestArgs || {};
   const playbackMatchesFilter =
     !playbackArgs.trailKey ||
@@ -5140,7 +5140,7 @@ function refreshPinnedTrailLine(key) {
     playbackMatchesFilter &&
     Array.isArray(playback.plannedPath) &&
     playback.plannedPath.length >= 2 &&
-    isCoachTrailOperator(breakOpts.operator)
+    usesPlannedRouteOverride(breakOpts.line, breakOpts.operator)
       ? routeDeviationEvidence({
           plannedPath: playback.plannedPath,
           gpsPoints,
@@ -5257,7 +5257,7 @@ function refreshLiveTrailLine(key) {
     !playback.diverted &&
     Array.isArray(playback.plannedPath) &&
     playback.plannedPath.length >= 2 &&
-    isCoachTrailOperator(breakOpts.operator)
+    usesPlannedRouteOverride(breakOpts.line, breakOpts.operator)
       ? routeDeviationEvidence({
           plannedPath: playback.plannedPath,
           gpsPoints,
@@ -7581,7 +7581,7 @@ async function startRoutePlayback({
         if (
           !actualRouteRequired &&
           !route36AOverride &&
-          coachPlayback &&
+          plannedRouteOverride &&
           deviationEvidence.detected &&
           !deviationEvidence.sparse
         ) {
