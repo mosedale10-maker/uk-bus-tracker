@@ -13533,8 +13533,7 @@ async function loadBuses({ replace = false } = {}) {
     const paintDue =
       !lastPaintBuses.length ||
       paintAgeMs >= PAINT_REFRESH_MS ||
-      paintViewUncovered ||
-      (paintViewChanged && paintAgeMs >= PAINT_MOVE_REFRESH_MS);
+      paintViewChanged;
     const paintRetryAllowed =
       !Number.isFinite(paintRequestAgeMs) ||
       paintRequestAgeMs >= (paintViewUncovered ? 1_500 : paintViewChanged ? 2_500 : 30_000);
@@ -13640,8 +13639,9 @@ async function loadBuses({ replace = false } = {}) {
         lastPaintBuses = paintBuses;
         lastPaintAt = Date.now();
         schedulePaintCachePersist();
-        // Start CSS fetches as soon as the paint rows arrive; do not make the
-        // marker batch wait for the slower position/notice fan-out.
+        // Give buses already on the map their real livery id first, then fetch
+        // the CSS: each row that lands repaints its own bus immediately.
+        refreshMarkersFromPaintSnapshot();
         ensureLiveries(paintBuses).catch(() => {});
       }
 
