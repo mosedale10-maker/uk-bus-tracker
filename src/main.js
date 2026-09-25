@@ -691,7 +691,8 @@ function renderAlertsPanel() {
   }
   const diversionHtml = diversions
     .map((n) => {
-      const meta = [n.line ? `route ${n.line}` : "", n.reg, n.operator, n.place]
+      // No registration here either — keep the alert anonymous and short.
+      const meta = [n.line ? `route ${n.line}` : "", n.operator, n.place]
         .filter(Boolean)
         .join(" · ");
       const ago = timeAgo(new Date(n.lastAt || Date.now()).toISOString());
@@ -823,10 +824,6 @@ function busOperatorCode(bus) {
     .toUpperCase();
 }
 
-function busRegLabel(bus) {
-  return String(bus?.vehicle?.reg || bus?.vehicle?.name || "").trim();
-}
-
 function placeNameFor(lng, lat) {
   let best = null;
   let bestD = Infinity;
@@ -887,22 +884,12 @@ async function plannedPathForBus(bus) {
 }
 
 function diversionAlertLine(bus, { reason, notice, distanceM, place }) {
-  const line = String(bus?.service?.line_name || "").trim();
-  const reg = busRegLabel(bus);
-  const opName = String(bus?.operator?.name || busOperatorCode(bus) || "").trim();
-  const who = [line ? `route ${line}` : "", reg || opName].filter(Boolean).join(", ");
-  if (reason === "notice" && notice) {
-    const subject =
-      String(notice.title || "")
-        .replace(/^road\s+closed\s*[.:,\u00b7\-–—]?\s*/i, "")
-        .replace(/[.:,\u00b7\-–—]\s*$/, "")
-        .trim() || "the closure";
-    return `${who ? `${who}, is` : "A bus is"} on the ${subject} diversion.`;
-  }
-  const metres = Number.isFinite(distanceM)
-    ? `about ${Math.round(distanceM / 10) * 10} metres off route`
-    : "off its normal route";
-  return `${who ? `${who}, is` : "A bus is"} ${metres}${place ? ` near ${place}` : ""}.`;
+  // Kept deliberately plain: no route number, no registration.
+  void bus;
+  void distanceM;
+  void place;
+  if (reason === "notice" && notice) return "This bus is now on diversion.";
+  return "This bus is now off its normal route.";
 }
 
 function flagDiversion(bus, info) {
@@ -923,15 +910,14 @@ function flagDiversion(bus, info) {
       lastAt: now,
       announcedAt: existing?.announcedAt || 0,
       line: String(bus?.service?.line_name || ""),
-      reg: busRegLabel(bus),
       operator: busOperatorCode(bus),
       reason: info.reason,
       place: info.place || "",
       distanceM: info.distanceM,
       noticeId: info.notice?.id || "",
-      title: [String(bus?.service?.line_name || "").trim() ? `Route ${String(bus.service.line_name).trim()}` : "Bus", busRegLabel(bus)]
-        .filter(Boolean)
-        .join(" · "),
+      title: String(bus?.service?.line_name || "").trim()
+        ? `Route ${String(bus.service.line_name).trim()}`
+        : "Bus on diversion",
       body: diversionAlertLine(bus, info),
     });
   }
