@@ -2758,6 +2758,43 @@ function previewSelectedCoachRoute(marker) {
     });
 }
 
+function playbackMatchesMarker(marker) {
+  if (!playback) return true;
+  if (!marker?.bus) return false;
+  const playbackIds = new Set(
+    [
+      playback.playKey,
+      playback.tripId,
+      playback.journeyId,
+      playback.vehicleId,
+      playback.trailKey,
+      playback.requestArgs?.tripId,
+      playback.requestArgs?.journeyId,
+      playback.requestArgs?.vehicleId,
+      playback.requestArgs?.trailKey,
+    ]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+  );
+  if (!playbackIds.size) return true;
+  const bus = marker.bus;
+  const extra = marker.extra || {};
+  const markerIds = new Set(
+    [
+      bus.id,
+      bus.journey_id,
+      bus.trip_id,
+      extra.trailKey,
+      extra.tripId,
+      extra.journeyId,
+      historyVehicleId(bus, extra),
+    ]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+  );
+  return [...playbackIds].some((id) => markerIds.has(id));
+}
+
 function selectMapMarker(marker) {
   if (!marker) return;
   try {
@@ -2766,9 +2803,16 @@ function selectMapMarker(marker) {
     /* ignore */
   }
   selectedMapMarker = marker;
-  // At overview zoom, selecting a coach opens the same full planned route view
-  // as Bustimes: white route ahead, coloured travelled tail behind. At close
-  // zoom keep the lightweight live GPS tail; Follow still controls the camera.
+  // A route overlay belongs to the selected bus. Do not leave a previous
+  // coach's planned line under a newly selected Flix/National Express marker.
+  if (playback && !playbackMatchesMarker(marker)) {
+    stopRoutePlayback("", { clearTail: true, reload: false });
+  } else if (!playback && multiTailActiveGroup?.focus?.hideAll && pinnedTrailKeys.size) {
+    clearPinnedTrails();
+  }
+  // At overview zoom, selecting a coach opens the planned route view where
+  // applicable. FlixBus live view is GPS-only and never paints the planned
+  // route ahead of the bus; close zoom keeps the lightweight live tail.
   if (marker.bus && isCoachTrailOperator(trailOperatorForBus(marker.bus))) {
     if (!playback && map.getZoom() <= 10) {
       previewSelectedCoachRoute(marker);
@@ -6213,7 +6257,7 @@ function updatePlaybackChrome() {
   playbackLabelEl.textContent = "";
 }
 
-function stopRoutePlayback(message = "", { clearTail = false, invalidatePending = true } = {}) {
+function stopRoutePlayback(message = "", { clearTail = false, invalidatePending = true, reload = true } = {}) {
   if (invalidatePending) playbackRequestSeq += 1;
   clearPlaybackLayers();
   gpsReplayTeardown();
@@ -6227,8 +6271,9 @@ function stopRoutePlayback(message = "", { clearTail = false, invalidatePending 
   if (message) showMessage(message);
   const open = openJourneyMarker();
   if (open) refreshPopup(open, { force: true });
-  // Restore normal live map after leaving history Map mode.
-  loadBuses({ replace: true }).catch(() => {});
+  // Restore normal live map after leaving history Map mode. A marker switch
+  // can suppress this reload because it immediately opens the next bus card.
+  if (reload) loadBuses({ replace: true }).catch(() => {});
 }
 
 /** While History · Map is open, prefer that bus — but never freeze the whole live map forever. */
@@ -6537,20 +6582,27 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
     tripStops = [],
     plannedAheadPath = null,
   } = opts;
-  playbackLayer.clearLayers();
-  restoreGpsReplayLayers();
-  if (plannedAheadPath) drawPlannedRouteAhead(plannedAheadPath, playbackLayer, alignBreak);
-  const flat = flattenTrailLatLngs(drawPath);
-  if (flat.length < 2 && !plannedAheadPath) return;
-  // For a live coach, the green line is the recorded GPS tail rendered in
-  // liveTrailLayer. Never paint the planned Bustimes path a second time as a
-  // green "tail" — that made a diverted coach appear to stick to the schedule.
   const plannedLiveCoachTail = Boolean(
     plannedAheadPath &&
     isCoachTrailOperator(alignBreak.operator) &&
     !isHistorical &&
     !replayOnly,
   );
+  // FlixBus live view is GPS-only: never draw the full scheduled path ahead of
+  // the current bus. Historical/Fleet replay still gets its complete route.
+  const suppressFlixPlannedAhead = Boolean(
+    plannedLiveCoachTail &&
+    String(alignBreak.operator || "").trim().toUpperCase() === "FLIX",
+  );
+  const visiblePlannedAheadPath = suppressFlixPlannedAhead ? null : plannedAheadPath;
+  playbackLayer.clearLayers();
+  restoreGpsReplayLayers();
+  if (visiblePlannedAheadPath) drawPlannedRouteAhead(visiblePlannedAheadPath, playbackLayer, alignBreak);
+  const flat = flattenTrailLatLngs(drawPath);
+  if (flat.length < 2 && !visiblePlannedAheadPath) return;
+  // For a live coach, the green line is the recorded GPS tail rendered in
+  // liveTrailLayer. Never paint the planned Bustimes path a second time as a
+  // green "tail" — that made a diverted coach appear to stick to the schedule.
   if (!plannedLiveCoachTail && !usingTracked && !replayOnly && flat.length >= 2) {
     const arrowGps =
       trackedGps.length >= 2
@@ -7309,6 +7361,7 @@ async function startRoutePlayback({
   // A sparse stop list stays hidden until the road matcher returns.
   const plannedAheadPath =
     coachPlayback &&
+    String(operator || "").trim().toUpperCase() !== "FLIX" &&
     !isHistorical &&
     !replayOnly &&
     plannedPath.length >= 2 &&
@@ -7519,7 +7572,11 @@ async function startRoutePlayback({
          }
          const upPath = clipTrailPathAtPing(upgraded, clipPing, { failClosed: true });
         const alignedAhead =
-          coachPlayback && !isHistorical && !replayOnly && flattenTrailLatLngs(upgraded).length >= 2
+          coachPlayback &&
+          String(operator || "").trim().toUpperCase() !== "FLIX" &&
+          !isHistorical &&
+          !replayOnly &&
+          flattenTrailLatLngs(upgraded).length >= 2
             ? upgraded
             : plannedAheadPath;
         if (flattenTrailLatLngs(upPath).length >= 2 || alignedAhead) {
