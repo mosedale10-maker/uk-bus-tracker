@@ -14526,6 +14526,44 @@ async function osrmRoadBridge(a, b, signal, breakOpts = {}) {
   return null;
 }
 
+/**
+ * Keep the recorded vehicle shape for an actual diversion. OSRM does not know
+ * bus-only gates and can otherwise route a bus around the station in a large
+ * public-road loop. Only genuinely sparse gaps are bridged with OSRM.
+ */
+async function preserveRecordedGpsShape(latlngs, signal, breakOpts = {}) {
+  const flat = Array.isArray(latlngs?.[0]?.[0]) ? latlngs.flat() : latlngs;
+  if (!Array.isArray(flat) || flat.length < 2) return [];
+  const nearNotice = Boolean(breakOpts.actualRoute && pathCrossesActiveRoadNotice(flat));
+  const directGapM = nearNotice ? 600 : breakOpts.actualRoute ? 220 : 120;
+  const inputSegs = trailSegmentsOf(flat, breakOpts);
+  const output = [];
+  for (const source of inputSegs) {
+    if (!Array.isArray(source) || source.length < 2) continue;
+    let current = [source[0]];
+    for (let i = 1; i < source.length; i += 1) {
+      const previous = current[current.length - 1];
+      const next = source[i];
+      const gapM = haversineMeters(previous[0], previous[1], next[0], next[1]);
+      const jump = isTrailGapJump(previous, next, trailBreakLimits(breakOpts).gapM, breakOpts);
+      if (gapM <= directGapM && !jump) {
+        current.push(next);
+        continue;
+      }
+      const bridge = await osrmRoadBridge(previous, next, signal, breakOpts);
+      if (bridge?.length >= 2) {
+        for (const point of bridge.slice(1)) current.push(point);
+      } else {
+        if (current.length >= 2) output.push(dedupeNearTrailPoints(current, 2.5));
+        current = [next];
+      }
+    }
+    if (current.length >= 2) output.push(dedupeNearTrailPoints(current, 2.5));
+  }
+  if (!output.length) return [];
+  return output.length === 1 ? output[0] : output;
+}
+
 /** When map-matching fails, stitch consecutive GPS points via OSRM driving routes (always on roads). */
 async function stitchTrailViaOsrmRoutes(latlngs, signal, breakOpts = {}) {
   const limits = trailBreakLimits(breakOpts);
@@ -14853,14 +14891,19 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
       const alignOpts = { ...breakOpts, coach, staffs };
       try {
         if (actualRoute) {
-          // Diverted services: match the recorded GPS sequence in small chunks
-          // first; this is faster and more reliable than one long trace.
+          // Preserve the recorded GPS shape first. Public OSRM can route around
+          // bus-only gates; only sparse gaps should be replaced by a road bridge.
           const thinned = thinTrailPoints(flat, 55);
-          aligned = await matchTrailViaOsrm(thinned.length >= 2 ? thinned : flat, signal, alignOpts);
+          const source = thinned.length >= 2 ? thinned : flat;
+          aligned = await preserveRecordedGpsShape(source, signal, alignOpts);
           segs = trailSegmentsOf(aligned, alignOpts);
           if (!segs.length) {
+            aligned = await matchTrailViaOsrm(source, signal, alignOpts);
+            segs = trailSegmentsOf(aligned, alignOpts);
+          }
+          if (!segs.length) {
             aligned = await stitchTrailViaOsrmRoutes(
-              thinned.length >= 2 ? thinned : flat,
+              source,
               signal,
               { ...alignOpts, actualRoute: true },
             );
