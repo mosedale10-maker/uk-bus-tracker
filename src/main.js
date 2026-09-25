@@ -5255,6 +5255,13 @@ function refreshPinnedTrailLine(key) {
     if (merged.length) trailMem.set(id, merged);
   }
   let gpsPoints = trackedPointsFor(id, filter);
+  // BODS journey ids and the recorder's Bustimes journey ids can differ. If the
+  // exact selected journey has no usable points, fall back to the same live
+  // vehicle/line window rather than dropping the tail entirely.
+  if ((filter.live || filter.follow) && gpsPoints.length < 2) {
+    const fallback = trackedPointsFor(id, { ...filter, journeyId: "", tripId: "" });
+    if (fallback.length > gpsPoints.length) gpsPoints = fallback;
+  }
   // Alias feeds can contribute points with no journey ID. Once a live
   // selection has a real journey/trip identity, do not let those unrelated
   // points extend a NatEx/Flix tail beyond the selected coach.
@@ -5401,6 +5408,10 @@ function refreshLiveTrailLine(key) {
   };
   const breakOpts = trailBreakOptsFromFilter(filter, key);
   let gpsPoints = trackedPointsFor(key, filter);
+  if (filter.live && gpsPoints.length < 2) {
+    const fallback = trackedPointsFor(key, { ...filter, journeyId: "", tripId: "" });
+    if (fallback.length > gpsPoints.length) gpsPoints = fallback;
+  }
   const ping = livePingForTrailFilter(filter, gpsPoints);
   gpsPoints = clipGpsPointsAtPing(gpsPoints, ping);
   const playbackDeviation =
@@ -5709,7 +5720,7 @@ async function showFleetRouteTails({
             const busReg = compactReg(bus?.vehicle?.reg || regFromVehicleName(bus?.vehicle?.name));
             const age = Date.now() - new Date(bus?.datetime || "").getTime();
             return (ids.some((id) => wantedIds.has(id)) || (wantedReg && busReg === wantedReg)) &&
-              (!Number.isFinite(age) || age <= 120_000);
+              (!Number.isFinite(age) || age <= 5 * 60_000);
           }) || null;
         }
       } catch {
