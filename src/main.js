@@ -5837,12 +5837,10 @@ async function showFleetRouteTails({
       Number.isFinite(Number(point[1])),
   );
   if (validBoundsPath.length >= 2) {
-    try {
-      map.invalidateSize({ animate: false });
-      map.fitBounds(L.latLngBounds(validBoundsPath).pad(0.12), { maxZoom: 15, animate: true });
-    } catch {
-      /* A stale/partial road match must not abort the live tail action. */
-    }
+    const fitRouteTails = () => fitPlaybackBounds(validBoundsPath, 15);
+    fitRouteTails();
+    requestAnimationFrame(fitRouteTails);
+    setTimeout(fitRouteTails, 180);
   }
 
   if (!drawn.length) {
@@ -6655,6 +6653,23 @@ function clipTrailPathAtPing(path, ping, { failClosed = false } = {}) {
  * For GPS-tail playbacks the pinned strokes carry the line + arrows; the scene adds
  * ping/stop markers only, so nothing is drawn twice.
  */
+function fitPlaybackBounds(path, maxZoom = 15) {
+  const flat = flattenTrailLatLngs(path);
+  if (flat.length < 2) return false;
+  try {
+    // Fleet opens the map after Leaflet may have measured a hidden 0×0
+    // container. Refuse to fit against that stale size; the delayed retry in
+    // startRoutePlayback will fit once the map has a real viewport.
+    map.invalidateSize({ animate: false });
+    const size = map.getSize();
+    if (!size || size.x < 2 || size.y < 2) return false;
+    map.fitBounds(L.latLngBounds(flat).pad(0.1), { maxZoom, animate: false });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
   const {
     trackedGps = [],
@@ -6775,15 +6790,7 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
       .bindTooltip(stop.name || "Stop", { direction: "top", opacity: 0.9 });
   }
   if (fit) {
-    try {
-      // Fleet can open the map after Leaflet was initialised while its
-      // container was hidden. Invalidate the stale 0×0 size before fitting
-      // the selected route, otherwise the route is centred at [0, 0].
-      map.invalidateSize({ animate: false });
-    } catch {
-      /* ignore */
-    }
-    map.fitBounds(L.latLngBounds(flat).pad(0.1), { maxZoom: 13, animate: true });
+    fitPlaybackBounds(flat, 13);
   }
   // A late scene/road redraw must not detach the replay cursor or its tail.
   restoreGpsReplayLayers();
@@ -7607,14 +7614,7 @@ async function startRoutePlayback({
     if (playback) playback.path = roadPath.length >= 2 ? roadPath : roadSource;
     const roadFlat = flattenTrailLatLngs(roadPath.length >= 2 ? roadPath : roadSource);
     if (roadFlat.length >= 2) {
-      try {
-        // The map may have been shown from Fleet after the initial 0×0
-        // Leaflet layout pass. Refresh it before fitting the recorded route.
-        map.invalidateSize({ animate: false });
-      } catch {
-        /* ignore */
-      }
-      map.fitBounds(L.latLngBounds(roadFlat).pad(0.1), { maxZoom: 15, animate: true });
+      fitPlaybackBounds(roadFlat, 15);
     }
   }
   if (replayOnly && plannedPath.length >= 2) {
@@ -7633,6 +7633,16 @@ async function startRoutePlayback({
     replayPoints = replayPoints.filter((_, index) => index % step === 0 || index === replayPoints.length - 1);
   }
   gpsReplaySetup(replayPoints);
+  // The Fleet panel can finish its layout after the route fetch. Retry the
+  // viewport fit so a valid recorded path is not left centred at [0, 0].
+  const fitReplayRoute = () => {
+    if (playback?.requestId !== requestId) return;
+    fitPlaybackBounds(pathFromGpsPoints(replayPoints), 15);
+  };
+  fitReplayRoute();
+  requestAnimationFrame(fitReplayRoute);
+  setTimeout(fitReplayRoute, 180);
+  setTimeout(fitReplayRoute, 500);
   showJourneyPanel({
     operator: opName,
     line: lineName,
