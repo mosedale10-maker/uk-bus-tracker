@@ -6009,10 +6009,12 @@ async function showFleetRouteTails({
   // route with a Bustimes service/trip already has a planned path, so do not
   // wait on a broad recorder lookup before drawing it.
   const hasPlannedService = Boolean(plannedTripId || plannedServiceId);
+  const needsDg27RecordedKeys = prefersRecordedDg27Route(code, opCode, true);
   if (
-    !keys.size &&
     code &&
-    !forceSingle &&
+    !hasExplicitSelection &&
+    (!keys.size || needsDg27RecordedKeys) &&
+    (!forceSingle || needsDg27RecordedKeys) &&
     !(isCoachTrailOperator(opCode) && hasPlannedService)
   ) {
     const serverKeys = await fetchTrailKeysForGroup({
@@ -6168,6 +6170,14 @@ async function showFleetRouteTails({
       fromMs: window.fromMs,
       toMs: window.toMs,
     });
+    if (gps.length < 2 && vKeys.length && keys.size) {
+      const fallbackGps = collectTrailGpsForKeys([...keys], {
+        line: vLine || code,
+        fromMs: window.fromMs,
+        toMs: window.toMs,
+      });
+      if (fallbackGps.length > gps.length) gps = fallbackGps;
+    }
     // A single-vehicle Map·tails action may carry the selected journey ID.
     // Do not fall back to every recent run for that vehicle: that creates
     // several extra tails on the map. Route-wide tails without an ID still
@@ -6474,16 +6484,27 @@ async function fetchTrailKeysForGroup(group, { days = TRAIL_KEEP_DAYS } = {}) {
   try {
     const params = new URLSearchParams({
       days: String(days),
-      limit: "40",
+      limit: "80",
     });
-    if (group.operators?.length) params.set("operators", group.operators.join(","));
+    // When both filters are present, query the line first. The server's
+    // operator list is intentionally broad and can otherwise fill the limit
+    // with other D&G routes before the selected line is reached.
     if (group.lines?.length) params.set("lines", group.lines.join(","));
+    else if (group.operators?.length) params.set("operators", group.operators.join(","));
     const res = await fetch(`/api/trails/keys?${params}`);
     if (!res.ok) return cached || [];
     const data = await res.json();
-    const keys = Array.isArray(data?.keys)
-      ? data.keys.map((row) => String(row?.key || "").trim()).filter(Boolean)
-      : [];
+    const rows = Array.isArray(data?.keys) ? data.keys : [];
+    const keys = rows
+      .filter((row) => {
+        const line = String(row?.line || "").trim().toUpperCase();
+        const op = String(row?.operator || "").trim().toUpperCase();
+        const lineOk = !group.lines?.length || group.lines.some((value) => sameServiceLine(value, line));
+        const opOk = !group.operators?.length || group.operators.some((value) => String(value).trim().toUpperCase() === op);
+        return lineOk && opOk;
+      })
+      .map((row) => String(row?.key || "").trim())
+      .filter(Boolean);
     trailKeysForGroupCache.set(cacheKey, keys);
     trailKeysForGroupCache.set(cacheKey + ":at", Date.now());
     return keys;
