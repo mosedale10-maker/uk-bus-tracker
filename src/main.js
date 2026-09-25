@@ -4943,7 +4943,20 @@ function clipGpsPointsAtPing(gpsPoints, ping) {
     return points;
   }
   const pingT = Number(ping.t);
-  if (!Number.isFinite(pingT)) return points;
+  if (!Number.isFinite(pingT)) {
+    // A marker without a usable timestamp cannot safely authorize the whole
+    // recorded run. Keep only the nearest spatial prefix, never future points.
+    let nearest = -1;
+    let nearestDistance = Infinity;
+    points.forEach((point, index) => {
+      const distance = haversineMeters(point.lat, point.lng, Number(ping.lat), Number(ping.lng));
+      if (distance < nearestDistance) {
+        nearest = index;
+        nearestDistance = distance;
+      }
+    });
+    return nearest >= 0 && nearestDistance <= 350 ? points.slice(0, nearest + 1) : [];
+  }
   let out = [];
   for (const point of points) {
     if (point.t <= pingT) {
@@ -4977,7 +4990,7 @@ function clipGpsPointsAtPing(gpsPoints, ping) {
     // The live marker is on another journey or the GPS is too sparse to prove
     // it belongs to this tail. Never append that remote coach/bus position:
     // an OSRM road route can otherwise stretch the tail past the vehicle.
-    return out;
+    return [];
   }
   out = out.slice(0, nearestIndex + 1);
 
@@ -5027,9 +5040,10 @@ function refreshPinnedTrailLine(key) {
     const exact = gpsPoints.filter((point) => String(point.tripId || "") === String(filter.tripId));
     if (exact.length >= 2) gpsPoints = exact;
   }
+  let livePing = null;
   if (filter.live || filter.follow) {
-    const ping = livePingForTrailFilter(filter, gpsPoints);
-    gpsPoints = clipGpsPointsAtPing(gpsPoints, ping);
+    livePing = livePingForTrailFilter(filter, gpsPoints);
+    gpsPoints = clipGpsPointsAtPing(gpsPoints, livePing);
   }
   // Split there-and-back / multi-route GPS into separate strokes (never one continuous line).
   // tripseg: keys are already one trip from pinSeparateTripTails.
@@ -5057,6 +5071,7 @@ function refreshPinnedTrailLine(key) {
       removeTrailPair(existing, liveTrailLayer);
       pinnedTrailLines.delete(id);
     }
+    pinnedTrailAlignGen.set(id, (pinnedTrailAlignGen.get(id) || 0) + 1);
     pinnedTrailAlignWanted.delete(id);
     return;
   }
@@ -5079,7 +5094,9 @@ function refreshPinnedTrailLine(key) {
       setTrailPairPath(existing, immediate, { gpsPoints, ...breakOpts });
     }
   }
-  pinnedTrailAlignWanted.set(id, { path, gpsPoints, breakOpts });
+  const generation = (pinnedTrailAlignGen.get(id) || 0) + 1;
+  pinnedTrailAlignGen.set(id, generation);
+  pinnedTrailAlignWanted.set(id, { path, gpsPoints, breakOpts, ping: livePing, generation });
   runPinnedTrailAlign(id);
 }
 
@@ -5091,10 +5108,17 @@ async function runPinnedTrailAlign(id) {
     while (pinnedTrailKeys.has(key) && pinnedTrailAlignWanted.has(key)) {
       const job = pinnedTrailAlignWanted.get(key);
       pinnedTrailAlignWanted.delete(key);
-      const gen = (pinnedTrailAlignGen.set(key, (pinnedTrailAlignGen.get(key) || 0) + 1), pinnedTrailAlignGen.get(key));
+      const gen = Number.isFinite(Number(job.generation))
+        ? Number(job.generation)
+        : (pinnedTrailAlignGen.set(key, (pinnedTrailAlignGen.get(key) || 0) + 1), pinnedTrailAlignGen.get(key));
+      const safeGps = job.ping ? clipGpsPointsAtPing(job.gpsPoints, job.ping) : job.gpsPoints;
+      const safePath = job.ping
+        ? clipTrailPathAtPing(job.path, job.ping, { failClosed: true })
+        : job.path;
+      if (flattenTrailLatLngs(safePath).length < 2) continue;
       let aligned = [];
       try {
-        aligned = await prepareRoadTrail(job.path, undefined, job.breakOpts);
+        aligned = await prepareRoadTrail(safePath, undefined, job.breakOpts);
       } catch {
         aligned = [];
       }
@@ -5102,9 +5126,9 @@ async function runPinnedTrailAlign(id) {
       if (pinnedTrailAlignGen.get(key) !== gen) continue;
       const pair = pinnedTrailLines.get(key);
       if (!pair) continue;
-      const drawn = preferRoadMatchedTrail(job.path, aligned, job.breakOpts || {});
+      const drawn = preferRoadMatchedTrail(safePath, aligned, job.breakOpts || {});
       if (flattenTrailLatLngs(drawn).length < 2) continue;
-      setTrailPairPath(pair, drawn, { gpsPoints: job.gpsPoints, ...job.breakOpts });
+      setTrailPairPath(pair, drawn, { gpsPoints: safeGps, ...job.breakOpts });
     }
   } finally {
     pinnedTrailAlignBusy.set(key, false);
@@ -5143,6 +5167,7 @@ function refreshLiveTrailLine(key) {
       removeTrailPair(liveTrailLine, liveTrailLayer);
       liveTrailLine = null;
     }
+    liveTrailAlignGen += 1;
     liveTrailAlignWanted = null;
     return;
   }
@@ -5160,7 +5185,8 @@ function refreshLiveTrailLine(key) {
       setTrailPairPath(liveTrailLine, immediate, { gpsPoints, ...breakOpts });
     }
   }
-  liveTrailAlignWanted = { key: String(key), path, gpsPoints, breakOpts };
+  const generation = ++liveTrailAlignGen;
+  liveTrailAlignWanted = { key: String(key), path, gpsPoints, breakOpts, ping, generation };
   runLiveTrailAlign();
 }
 
@@ -5172,18 +5198,25 @@ async function runLiveTrailAlign() {
       const job = liveTrailAlignWanted;
       liveTrailAlignWanted = null;
       if (String(liveTrailKey) !== String(job.key)) continue;
-      const gen = ++liveTrailAlignGen;
+      const gen = Number.isFinite(Number(job.generation))
+        ? Number(job.generation)
+        : ++liveTrailAlignGen;
+      const safeGps = job.ping ? clipGpsPointsAtPing(job.gpsPoints, job.ping) : job.gpsPoints;
+      const safePath = job.ping
+        ? clipTrailPathAtPing(job.path, job.ping, { failClosed: true })
+        : job.path;
+      if (flattenTrailLatLngs(safePath).length < 2) continue;
       let aligned = [];
       try {
-        aligned = await prepareRoadTrail(job.path, undefined, job.breakOpts);
+        aligned = await prepareRoadTrail(safePath, undefined, job.breakOpts);
       } catch {
         aligned = [];
       }
       if (liveTrailAlignGen !== gen) continue;
       if (String(liveTrailKey) !== String(job.key) || !liveTrailLine) continue;
-      const drawn = preferRoadMatchedTrail(job.path, aligned, job.breakOpts || {});
+      const drawn = preferRoadMatchedTrail(safePath, aligned, job.breakOpts || {});
       if (flattenTrailLatLngs(drawn).length < 2) continue;
-      setTrailPairPath(liveTrailLine, drawn, { gpsPoints: job.gpsPoints });
+      setTrailPairPath(liveTrailLine, drawn, { gpsPoints: safeGps });
     }
   } finally {
     liveTrailAlignBusy = false;
@@ -5927,6 +5960,12 @@ function clearPinnedTrails() {
   liveTrailLayer.clearLayers();
   liveTrailLine = null;
   clearTrailArtifacts(liveTrailLayer);
+  for (const key of pinnedTrailAlignGen.keys()) {
+    pinnedTrailAlignGen.set(key, (pinnedTrailAlignGen.get(key) || 0) + 1);
+  }
+  pinnedTrailAlignWanted.clear();
+  liveTrailAlignGen += 1;
+  liveTrailAlignWanted = null;
   pinnedTrailLines.clear();
   pinnedTrailKeys.clear();
   pinnedTrailFilters.clear();
@@ -5936,6 +5975,8 @@ function clearPinnedTrails() {
 
 function setLiveTrailFocus(key) {
   const nextKey = key ? String(key) : "";
+  liveTrailAlignGen += 1;
+  liveTrailAlignWanted = null;
   if (liveTrailKey && liveTrailKey !== nextKey && liveTrailLine) {
     removeTrailPair(liveTrailLine, liveTrailLayer);
     liveTrailLine = null;
