@@ -4801,8 +4801,8 @@ export function createFleetBrowser({
               })
               .join("")}</ul>`
           : `<p class="fleet-muted">No GPS replay recorded for this bus in the last 5 days.</p>`;
-    return `<section class="fleet-section fleet-vehicle-replays">
-      <h2 class="fleet-section-title">Replay · last 5 days${count ? ` · ${count}` : ""}</h2>
+    return `<section class="fleet-section fleet-vehicle-replays" id="fleet-route-history">
+      <h2 class="fleet-section-title">Route history · last 5 days${count ? ` · ${count}` : ""}</h2>
       <p class="fleet-muted fleet-section-note">Grouped by route, with the newest replay for each route first. Replay uses the roads and positions actually recorded; older runs are removed after 5 days.</p>
       ${state.replayRunsLoading && count ? `<p class="fleet-muted">Refreshing recorded replays…</p>` : ""}
       ${body}
@@ -4890,6 +4890,7 @@ export function createFleetBrowser({
       </div>
       <div class="fleet-actions">
         <button type="button" class="fleet-track-btn" data-action="track-vehicle" data-id="${esc(v.id)}" data-reg="${esc(v.reg || "")}" data-fleet="${esc(v.fleet_code || "")}">Track this bus</button>
+        <button type="button" class="fleet-link-btn" data-action="show-route-history" aria-controls="fleet-route-history">Show route history</button>
         ${
           isSavedVehicle(v)
             ? `<button type="button" class="fleet-link-btn" data-action="remove-saved-vehicle" data-id="${esc(v.id)}" data-reg="${esc(v.reg || "")}">Remove from your vehicles</button>`
@@ -4992,6 +4993,7 @@ export function createFleetBrowser({
               </table>${state.loading ? `<p class="fleet-muted fleet-journeys-loading">Loading more journeys…</p>` : ""}`
             : `<p class="fleet-muted">No journeys recorded for this date.</p>`
       }
+      ${renderVehicleReplayRuns(v)}
     `;
   }
 
@@ -5902,6 +5904,7 @@ export function createFleetBrowser({
       state.error = "";
       render();
     }
+    void loadVehicleReplayRuns(state.vehicle, token);
 
     // Start the independent history/route requests before the detail request
     // finishes. The first page can render immediately; later pages enrich it.
@@ -6012,6 +6015,9 @@ export function createFleetBrowser({
       state.operator = resolveOperatorFromVehicle(vehicle, seed) || state.operator;
       state.loading = true;
       render(); // Shell with full bustimes meta; journeys still loading
+      // Re-run once the full vehicle metadata is available so route history can
+      // resolve by registration/operator aliases as well as the vehicle id.
+      void loadVehicleReplayRuns(vehicle, token);
       loadVehiclePhoto(vehicle);
 
       // Warm lastRoute cache in background when live AVL missed (do not block paint).
@@ -6307,6 +6313,17 @@ export function createFleetBrowser({
         lat: btn.dataset.lat,
         lng: btn.dataset.lng,
       });
+    }
+    if (action === "show-route-history") {
+      event.preventDefault();
+      event.stopPropagation();
+      const section = root.querySelector("#fleet-route-history");
+      if (section) {
+        section.scrollIntoView({ behavior: "smooth", block: "start" });
+        section.setAttribute("tabindex", "-1");
+        section.focus({ preventScroll: true });
+      }
+      return;
     }
     if (action === "play-journey") {
       onPlayJourney?.({
