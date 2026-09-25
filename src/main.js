@@ -2721,6 +2721,42 @@ function refreshBusSidePanel(marker) {
   }
 }
 
+function previewSelectedCoachRoute(marker) {
+  const bus = marker?.bus;
+  if (!bus || !isCoachTrailOperator(trailOperatorForBus(bus))) return;
+  const extra = marker.extra || {};
+  const line = String(bus.service?.line_name || extra.line || "").trim();
+  const operator = trailOperatorForBus(bus);
+  const datetime = bus.datetime || "";
+  const trailKey = String(bus.id || liveTrailKeyForMarker(marker) || "");
+  startRoutePlayback({
+    tripId: bus.trip_id || extra.tripId || "",
+    journeyId: bus.journey_id || "",
+    vehicleId: historyVehicleId(bus, extra),
+    trailKey,
+    reg: busRegistration(bus, extra) || bus.vehicle?.reg || extra.coachReg || "",
+    line,
+    operator,
+    direction: bus.direction || bus.directionRef || extra.direction || "",
+    dest: extra.to || bus.destination || "",
+    datetime,
+    showTail: true,
+    live: true,
+  })
+    .then(() => {
+      if (!playback && trailKey) {
+        rememberTrailVehicle(trailKey);
+        setLiveTrailFocus(trailKey);
+      }
+    })
+    .catch(() => {
+      if (trailKey) {
+        rememberTrailVehicle(trailKey);
+        setLiveTrailFocus(trailKey);
+      }
+    });
+}
+
 function selectMapMarker(marker) {
   if (!marker) return;
   try {
@@ -2729,14 +2765,18 @@ function selectMapMarker(marker) {
     /* ignore */
   }
   selectedMapMarker = marker;
-  // Coach markers get a live tail as soon as they are selected. Follow still
-  // controls the camera, but the selected coach's growing tail should not wait
-  // for a second click or for the first two recorder pings.
+  // At overview zoom, selecting a coach opens the same full planned route view
+  // as Bustimes: white route ahead, coloured travelled tail behind. At close
+  // zoom keep the lightweight live GPS tail; Follow still controls the camera.
   if (marker.bus && isCoachTrailOperator(trailOperatorForBus(marker.bus))) {
-    const coachTrailKey = liveTrailKeyForMarker(marker);
-    if (coachTrailKey) {
-      rememberTrailVehicle(coachTrailKey);
-      setLiveTrailFocus(coachTrailKey);
+    if (!playback && map.getZoom() <= 10) {
+      previewSelectedCoachRoute(marker);
+    } else {
+      const coachTrailKey = liveTrailKeyForMarker(marker);
+      if (coachTrailKey) {
+        rememberTrailVehicle(coachTrailKey);
+        setLiveTrailFocus(coachTrailKey);
+      }
     }
   }
   marker._lastPopupStructure = "";
@@ -6108,6 +6148,33 @@ function gpsPointsForJourneyArrows(roadPath, lastPing, trackedGps = [], datetime
 /** Bustimes-style playback colour — deep indigo route tail. */
 const PLAYBACK_LINE_COLOR = "#5b51e3";
 
+/** The planned remainder is deliberately white: green/blue is the travelled tail. */
+function drawPlannedRouteAhead(path, layer, breakOpts = {}) {
+  if (!layer || !Array.isArray(path) || path.length < 2) return;
+  const segs = asTrailLatLngs(path, breakOpts);
+  if (!segs.length) return;
+  const casing = {
+    color: "#0b1018",
+    weight: 8,
+    opacity: 0.38,
+    lineJoin: "round",
+    lineCap: "round",
+    interactive: false,
+    className: "planned-route-ahead-casing",
+  };
+  const line = {
+    color: "#f8fafc",
+    weight: 5,
+    opacity: 0.94,
+    lineJoin: "round",
+    lineCap: "round",
+    interactive: false,
+    className: "planned-route-ahead",
+  };
+  makeTrailPathLayer(segs, casing, layer);
+  makeTrailPathLayer(segs, line, layer);
+}
+
 /** Cut a path at the bus's current ping so the tail never runs ahead of it. */
 function clipTrailPathAtPing(path, ping, { failClosed = false } = {}) {
   if (!ping || !Number.isFinite(ping.lat) || !Number.isFinite(ping.lng)) {
@@ -6154,9 +6221,11 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
     alignBreak = {},
     datetime = "",
     tripStops = [],
+    plannedAheadPath = null,
   } = opts;
   playbackLayer.clearLayers();
   restoreGpsReplayLayers();
+  if (plannedAheadPath) drawPlannedRouteAhead(plannedAheadPath, playbackLayer, alignBreak);
   const flat = flattenTrailLatLngs(drawPath);
   if (flat.length < 2) return;
   if (!usingTracked && !replayOnly) {
@@ -6816,6 +6885,12 @@ async function startRoutePlayback({
         ? fastBase
         : clipTrailPathAtPing(fastBase, clipPing, { failClosed: true })
       : [];
+  // Bustimes shows the scheduled road ahead in white and the travelled portion
+  // in the operator colour. Keep that visual distinction for live coach routes.
+  const plannedAheadPath =
+    coachPlayback && !isHistorical && !replayOnly && plannedPath.length >= 2
+      ? fastBase
+      : null;
   const scene = {
     trackedGps: plannedPath.length >= 2 ? [] : trackedGps,
     lastPing,
@@ -6825,6 +6900,7 @@ async function startRoutePlayback({
     alignBreak,
     datetime,
     tripStops,
+    plannedAheadPath,
   };
   drawPlaybackScene(fastPath, scene, { fit: true });
   const label =
@@ -6930,9 +7006,17 @@ async function startRoutePlayback({
           if (stopPath.length >= 2) upgraded = stopPath;
         }
         const upPath = clipTrailPathAtPing(upgraded, clipPing, { failClosed: true });
-        if (flattenTrailLatLngs(upPath).length >= 2) {
-          drawPlaybackScene(upPath, scene, { fit: false });
-          playback.path = upPath;
+        const alignedAhead =
+          coachPlayback && !isHistorical && !replayOnly && flattenTrailLatLngs(upgraded).length >= 2
+            ? upgraded
+            : plannedAheadPath;
+        if (flattenTrailLatLngs(upPath).length >= 2 || alignedAhead) {
+          drawPlaybackScene(
+            upPath,
+            { ...scene, plannedAheadPath: alignedAhead },
+            { fit: false },
+          );
+          if (flattenTrailLatLngs(upPath).length >= 2) playback.path = upPath;
         }
       })
       .catch(() => {});
