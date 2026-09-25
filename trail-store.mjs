@@ -7,9 +7,13 @@ import { createRequire } from "node:module";
 import { hasDatabase } from "./auth-store.mjs";
 import pg from "pg";
 
-export const TRAIL_KEEP_DAYS = 5;
+export const TRAIL_KEEP_DAYS = 7;
 const MAX_BATCH = 250;
-const MAX_POINTS_PER_KEY = 4_000;
+/**
+ * Per-key point ceiling. Sized for a full day of one busy route so a 7-day
+ * store never trims a live journey in the middle.
+ */
+const MAX_POINTS_PER_KEY = 12_000;
 const MAX_KEYS_PER_QUERY = 24;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

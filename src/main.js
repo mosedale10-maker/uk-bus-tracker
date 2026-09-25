@@ -3176,10 +3176,11 @@ function clearMapMarkerSelection({ keepPlayback = false } = {}) {
 
 const TRAIL_STORE_KEY = "uk-bus-trails-v3";
 const PLANNED_ROUTE_STORE_KEY = "uk-bus-planned-routes-v1";
-const TRAIL_MAX_POINTS = 8000;
+/** Matches the server per-key ceiling so a long journey is not trimmed locally. */
+const TRAIL_MAX_POINTS = 12000;
 const TRAIL_MAX_VEHICLES = 60;
 /** Server + local GPS tails are always kept for this many days (independent of Plus history chips). */
-const TRAIL_KEEP_DAYS = 5;
+const TRAIL_KEEP_DAYS = 7;
 // The server-side recorder is the canonical five-day store. Uploading every
 // viewer's duplicate local trail stream adds POSTs and JSON work without adding
 // history; keep the client queue available as an explicit fallback switch.
@@ -3202,7 +3203,8 @@ const pinnedTrailAlignBusy = new Map();
 const pinnedTrailAlignWanted = new Map();
 const pinnedLiveRouteStates = new Map();
 const livePlannedProgress = new Map();
-const LIVE_ROUTE_RESET_GAP_MS = 15 * 60_000;
+/** Keep a bus attached to its live tail across long terminus layovers. */
+const LIVE_ROUTE_RESET_GAP_MS = 45 * 60_000;
 const trailUploadQueue = new Map(); // key -> points[]
 let trailUploadTimer = null;
 const trailServerFetched = new Map(); // key -> last fetch ms
@@ -4179,7 +4181,12 @@ function trailLineColor(operator) {
 /** Break trails only on real GPS teleports — not normal sparse AVL pings (rural Staffs runs often skip 2–4 km). */
 const TRAIL_BREAK_GAP_M = 4500;
 const TRAIL_BREAK_HARD_M = 12000;
-const TRAIL_BREAK_GAP_MS = 15 * 60_000;
+/**
+ * A gap longer than this splits the drawn tail. A terminus layover can easily
+ * top 15 minutes, which used to cut a finished journey in half — 45 keeps the
+ * whole A→B run (and its return) as one continuous tail.
+ */
+const TRAIL_BREAK_GAP_MS = 45 * 60_000;
 const TRAIL_BREAK_SPEED_MPH = 100;
 /** FlixBus / National Express motorway runs — sparse AVL; keep A→B continuous. */
 const COACH_TRAIL_NOCS = new Set(["FLIX", "NATX"]);
