@@ -4573,12 +4573,17 @@ function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
     // already clipped to the current marker and is replaced by the road path.
     return flattenTrailLatLngs(gpsPath).length >= 2 ? gpsPath : [];
   }
+  const fpot11Actual =
+    breakOpts.actualRoute &&
+    sameServiceLine(breakOpts.line, "11") &&
+    String(breakOpts.operator || "").trim().toUpperCase() === "FPOT";
   if (
-    breakOpts.coach ||
-    breakOpts.staffs ||
-    isCoachTrailOperator(breakOpts.operator) ||
-    isStaffsTrailOperator(breakOpts.operator) ||
-    isAltonLine(breakOpts.line)
+    !fpot11Actual &&
+    (breakOpts.coach ||
+      breakOpts.staffs ||
+      isCoachTrailOperator(breakOpts.operator) ||
+      isStaffsTrailOperator(breakOpts.operator) ||
+      isAltonLine(breakOpts.line))
   ) return [];
   const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
   if (flattenTrailLatLngs(local).length >= 2) return local;
