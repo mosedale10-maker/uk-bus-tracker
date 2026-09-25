@@ -4030,7 +4030,7 @@ function staffsDiversionBridgePoints(entry, exit, reverse = false) {
 }
 
 /** Replace only the Potteries Way loop in a Staffordshire Hanley tail. */
-function applyStaffsHanleyDiversion(path, operatorOrOpts = {}) {
+function applyStaffsHanleyDiversionOnly(path, operatorOrOpts = {}) {
   if (!Array.isArray(path) || path.length < 2 || !staffsHanleyDiversionEnabled(operatorOrOpts)) {
     return path;
   }
@@ -4085,6 +4085,102 @@ function applyStaffsHanleyDiversion(path, operatorOrOpts = {}) {
   return multi ? corrected : corrected[0];
 }
 
+/** Longton's A5005/A5007 junction has a bus-only gate (The Strand). */
+const STAFFS_LONGON_BUS_GATE_PATH = Object.freeze([
+  [52.9860723, -2.1345424],
+  [52.9860304, -2.1345847],
+  [52.985968, -2.1346536],
+  [52.9859164, -2.1347311],
+  [52.9858976, -2.1347712],
+  [52.985859, -2.1348703],
+  [52.9858319, -2.1349713],
+  [52.9858215, -2.1350748],
+]);
+const STAFFS_LONGON_ROUNDABOUT = [52.9857, -2.13442];
+
+function staffsPointIsLongonRoundabout(point) {
+  const lat = Number(point?.[0]);
+  const lng = Number(point?.[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  if (lat < 52.9852 || lat > 52.9863 || lng < -2.1353 || lng > -2.13375) return false;
+  return haversineMeters(lat, lng, STAFFS_LONGON_ROUNDABOUT[0], STAFFS_LONGON_ROUNDABOUT[1]) <= 120;
+}
+
+function staffsMergeDiversionPoints(points) {
+  return points.filter((point, index) => {
+    if (!index) return true;
+    const previous = points[index - 1];
+    return (
+      haversineMeters(point[0], point[1], previous[0], previous[1]) > 1
+    );
+  });
+}
+
+/** Keep buses on the signed bus gate rather than sending them around the roundabout. */
+function applyStaffsLongtonBusGate(path, operatorOrOpts = {}) {
+  if (!Array.isArray(path) || path.length < 2 || !staffsHanleyDiversionEnabled(operatorOrOpts)) {
+    return path;
+  }
+  const multi = Array.isArray(path[0]) && Array.isArray(path[0][0]);
+  const segments = multi ? path : [path];
+  let changed = false;
+  const corrected = segments.map((segment) => {
+    const flat = flattenTrailLatLngs(segment);
+    if (flat.length < 4) return segment;
+    const gateStart = STAFFS_LONGON_BUS_GATE_PATH[0];
+    const gateEnd = STAFFS_LONGON_BUS_GATE_PATH[STAFFS_LONGON_BUS_GATE_PATH.length - 1];
+    const exactGatePoints = flat.filter((point) =>
+      STAFFS_LONGON_BUS_GATE_PATH.some(
+        (gatePoint) => haversineMeters(point[0], point[1], gatePoint[0], gatePoint[1]) <= 12,
+      ),
+    ).length;
+    if (exactGatePoints >= 3) return segment;
+    const localIndices = flat
+      .map((point, index) => {
+        const lat = Number(point[0]);
+        const lng = Number(point[1]);
+        return lat >= 52.9848 && lat <= 52.987 && lng >= -2.137 && lng <= -2.1332
+          ? index
+          : -1;
+      })
+      .filter((index) => index >= 0);
+    let best = null;
+    for (const i of localIndices) {
+      for (const j of localIndices) {
+        if (j <= i) continue;
+        const between = flat.slice(i, j + 1);
+        if (!between.some((point) => staffsPointIsLongonRoundabout(point))) continue;
+        const forward =
+          haversineMeters(flat[i][0], flat[i][1], gateStart[0], gateStart[1]) +
+          haversineMeters(flat[j][0], flat[j][1], gateEnd[0], gateEnd[1]);
+        const reverse =
+          haversineMeters(flat[i][0], flat[i][1], gateEnd[0], gateEnd[1]) +
+          haversineMeters(flat[j][0], flat[j][1], gateStart[0], gateStart[1]);
+        const reverseOrder = reverse < forward;
+        const score = Math.min(forward, reverse);
+        if (score > 520) continue;
+        if (!best || score < best.score) {
+          best = { i, j, reverseOrder, score };
+        }
+      }
+    }
+    if (!best) return segment;
+    const orderedGate = best.reverseOrder
+      ? [...STAFFS_LONGON_BUS_GATE_PATH].reverse()
+      : STAFFS_LONGON_BUS_GATE_PATH;
+    const bridge = staffsMergeDiversionPoints([flat[best.i], ...orderedGate, flat[best.j]]);
+    changed = true;
+    return [...flat.slice(0, best.i), ...bridge, ...flat.slice(best.j + 1)];
+  });
+  if (!changed) return path;
+  return multi ? corrected : corrected[0];
+}
+
+/** Apply every recorded Staffordshire local-road correction in one place. */
+function applyStaffsHanleyDiversion(path, operatorOrOpts = {}) {
+  const hanley = applyStaffsHanleyDiversionOnly(path, operatorOrOpts);
+  return applyStaffsLongtonBusGate(hanley, operatorOrOpts);
+}
 /** Canonical NOC for a Staffordshire live bus, including BODS rows with no operator field. */
 function staffsOperatorCode(bus, extra = {}) {
   const candidates = [
