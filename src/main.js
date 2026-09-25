@@ -313,6 +313,23 @@ const ROAD_NOTICES = [
       [52.98865, -2.1337],
       [52.98845, -2.1332],
     ],
+    // First's published Longton diversion: King Street → Baths Road /
+    // Longton Interchange → Wood Street → Upper Cross Street → Anchor Road.
+    // Market Street is not part of the replacement geometry.
+    diversionPath: [
+      [52.989817, -2.136028],
+      [52.989750, -2.135928],
+      [52.989785, -2.135869],
+      [52.989851, -2.135762],
+      [52.990202, -2.134442],
+      [52.990440, -2.133797],
+      [52.990829, -2.133281],
+      [52.991255, -2.132574],
+      [52.990796, -2.131669],
+      [52.990621, -2.131097],
+      [52.989172, -2.132341],
+      [52.988754, -2.133402],
+    ],
     // Sign goes live 6:40pm, though the wording above still says 7pm.
     from: "2026-09-24T18:40:00+01:00",
     until: "2026-09-27T15:00:00+01:00",
@@ -7609,6 +7626,7 @@ async function startRoutePlayback({
     plannedRouteOverride &&
     tripPath.length >= 2 &&
     pathCrossesActiveRoadNotice(tripPath);
+  const diversionFallbackPath = plannedPathBlocked ? activeDiversionReplacement(tripPath) : [];
   let plannedPath =
     plannedRouteOverride &&
     !actualRouteRequired &&
@@ -7634,8 +7652,8 @@ async function startRoutePlayback({
   // An active road notice invalidates the planned alignment just like a
   // confirmed diversion; use the recorded GPS path and road matcher instead.
   const effectiveActualRoute = actualRouteRequired || plannedPathBlocked;
-  const plannedReplayPoints = plannedPath.length >= 2
-    ? plannedPathReplayPoints(plannedPath, {
+  const plannedReplayPoints = (plannedPath.length >= 2 ? plannedPath : diversionFallbackPath).length >= 2
+    ? plannedPathReplayPoints(plannedPath.length >= 2 ? plannedPath : diversionFallbackPath, {
         startMs: trip?.startMs || aroundMs || Date.now(),
         endMs: trip?.endMs || 0,
         direction: safeDirection,
@@ -7653,7 +7671,7 @@ async function startRoutePlayback({
   let path = plannedPath.length >= 2
     ? plannedPath
     : effectiveActualRoute
-      ? tracked
+      ? tracked.length >= 2 ? tracked : diversionFallbackPath
       : replayOnly
         ? tracked
         : historicalPlayback && tripPath.length >= 2 && !usingTracked
@@ -7677,7 +7695,7 @@ async function startRoutePlayback({
     path = tracked;
     usingTracked = path.length >= 2;
   }
-  if (effectiveActualRoute && tracked.length < 2) {
+  if (effectiveActualRoute && tracked.length < 2 && diversionFallbackPath.length < 2) {
     showMessage(
       "This journey is diverted, but no recorded GPS is available yet — the planned route will not be shown",
     );
@@ -11270,6 +11288,36 @@ function pathCrossesActiveRoadNotice(path) {
     }
   }
   return false;
+}
+
+function activeDiversionReplacement(path) {
+  const flat = Array.isArray(path?.[0]?.[0]) ? path.flat() : path;
+  if (!Array.isArray(flat) || flat.length < 2) return [];
+  const now = Date.now();
+  for (const notice of ROAD_NOTICES || []) {
+    if (!roadNoticeIsActive(notice, now) || !Array.isArray(notice.diversionPath) || notice.diversionPath.length < 2) continue;
+    const closedPath = Array.isArray(notice.path) ? notice.path : [];
+    if (closedPath.length < 2) continue;
+    let first = -1;
+    let last = -1;
+    for (let i = 0; i < flat.length; i += 1) {
+      let near = Infinity;
+      for (let j = 1; j < closedPath.length; j += 1) {
+        near = Math.min(near, distPointToSegmentMeters(flat[i], closedPath[j - 1], closedPath[j]));
+      }
+      if (near <= 120) {
+        if (first < 0) first = i;
+        last = i;
+      }
+    }
+    if (first < 0 || last <= first) continue;
+    return [
+      ...flat.slice(0, first + 1),
+      ...notice.diversionPath,
+      ...flat.slice(last),
+    ];
+  }
+  return [];
 }
 
 function plannedPathReplayPoints(path, { startMs = Date.now(), endMs = 0, direction = "" } = {}) {
