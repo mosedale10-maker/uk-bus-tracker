@@ -5636,6 +5636,27 @@ async function showFleetRouteTails({
         break;
       }
     }
+    if (!currentBus) {
+      try {
+        const query = opCode ? `?operator=${encodeURIComponent(opCode)}` : "";
+        const res = await fetch(`/api/vehicles${query}`, { signal: AbortSignal.timeout(4500) });
+        if (res.ok) {
+          const payload = await res.json();
+          const rows = Array.isArray(payload) ? payload : [];
+          currentBus = rows.find((bus) => {
+            const ids = [bus?.id, bus?.btId, bus?.vehicle?.id, bus?._bods?.vehicleRef]
+              .map((value) => String(value || ""))
+              .filter(Boolean);
+            const busReg = compactReg(bus?.vehicle?.reg || regFromVehicleName(bus?.vehicle?.name));
+            const age = Date.now() - new Date(bus?.datetime || "").getTime();
+            return (ids.some((id) => wantedIds.has(id)) || (wantedReg && busReg === wantedReg)) &&
+              (!Number.isFinite(age) || age <= 120_000);
+          }) || null;
+        }
+      } catch {
+        /* optional live refresh */
+      }
+    }
     if (currentBus) {
       const target = single[0];
       target.journey_id = String(currentBus.journey_id || "").trim();
