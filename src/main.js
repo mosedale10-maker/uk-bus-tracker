@@ -3937,9 +3937,12 @@ function isFirstPotteriesTrailOperator(operator) {
   return String(operator || "").trim().toUpperCase() === "FPOT";
 }
 
-/** Staffordshire tails use recorded GPS when it is available. */
-function prefersRecordedStaffsRoute(operator, hasRecordedPoints = false) {
-  return hasRecordedPoints && isStaffsTrailOperator(operator);
+/** Staffordshire tails, including AT1–AT3, use recorded GPS when available. */
+function prefersRecordedStaffsRoute(operator, hasRecordedPoints = false, line = "") {
+  return (
+    hasRecordedPoints &&
+    (isStaffsTrailOperator(operator) || isAltonLine(line))
+  );
 }
 
 /*
@@ -3990,6 +3993,7 @@ function staffsHanleyDiversionEnabled(operatorOrOpts) {
   return Boolean(
     opts.staffs ||
       isStaffsTrailOperator(operator) ||
+      isAltonLine(opts.line) ||
       /^staff-/i.test(key) ||
       /^at:/i.test(key),
   );
@@ -4706,7 +4710,10 @@ function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
     return flattenTrailLatLngs(gpsPath).length >= 2 ? gpsPath : [];
   }
   const staffsActual =
-    breakOpts.actualRoute && isStaffsTrailOperator(breakOpts.operator);
+    breakOpts.actualRoute &&
+    (breakOpts.staffs ||
+      isStaffsTrailOperator(breakOpts.operator) ||
+      isAltonLine(breakOpts.line));
   if (
     !staffsActual &&
     (breakOpts.coach ||
@@ -6160,7 +6167,7 @@ async function showFleetRouteTails({
   // route with a Bustimes service/trip already has a planned path, so do not
   // wait on a broad recorder lookup before drawing it.
   const hasPlannedService = Boolean(plannedTripId || plannedServiceId);
-  const needsStaffsRecordedKeys = prefersRecordedStaffsRoute(opCode, true);
+  const needsStaffsRecordedKeys = prefersRecordedStaffsRoute(opCode, true, code);
   if (
     code &&
     !hasExplicitSelection &&
@@ -6434,7 +6441,7 @@ async function showFleetRouteTails({
       baseKey: base,
       line: vLine || code,
       operator: opCode,
-      actualRoute: isStaffsTrailOperator(opCode),
+      actualRoute: isStaffsTrailOperator(opCode) || isAltonLine(vLine || code),
     });
     for (const key of pinned) {
       if (seenSeg.has(key)) continue;
@@ -6484,7 +6491,7 @@ async function showFleetRouteTails({
     }
   }
 
-  const keepRecordedStaffs = prefersRecordedStaffsRoute(opCode, drawn.length > 0);
+  const keepRecordedStaffs = prefersRecordedStaffsRoute(opCode, drawn.length > 0, code);
   if (plannedPathUsable && !isCoachTrailOperator(opCode) && !hasExplicitSelection && !keepRecordedStaffs) {
     clearPinnedTrails();
     const plannedFlatPath = flattenTrailLatLngs(plannedRoutePath);
@@ -6523,7 +6530,7 @@ async function showFleetRouteTails({
       baseKey: code || "route",
       line: code,
       operator: opCode,
-      actualRoute: isStaffsTrailOperator(opCode),
+      actualRoute: isStaffsTrailOperator(opCode) || isAltonLine(code),
     });
     drawn.push(...pinned);
   }
@@ -8199,7 +8206,7 @@ async function startRoutePlayback({
     plannedRouteOverride &&
     tripPath.length >= 2 &&
     pathCrossesActiveRoadNotice(tripPath);
-  const staffsRecordedRoute = prefersRecordedStaffsRoute(operator, true);
+  const staffsRecordedRoute = prefersRecordedStaffsRoute(operator, true, line || trip?.line || "");
   if (staffsRecordedRoute && hasRecordedGps) {
     // The recorded GPS is the authority for the current diverted stint.
     actualRouteRequired = true;
@@ -8273,7 +8280,12 @@ async function startRoutePlayback({
     usingTracked = path.length >= 2;
   }
   const recordedPathSelected = usingTracked;
-  path = applyStaffsHanleyDiversion(path, { operator, line, staffs: isStaffsTrailOperator(operator) });
+  const playbackLine = line || trip?.line || "";
+  path = applyStaffsHanleyDiversion(path, {
+    operator,
+    line: playbackLine,
+    staffs: isStaffsTrailOperator(operator) || isAltonLine(playbackLine),
+  });
   // The correction changes the geometry, not the source-selection decision.
   usingTracked = recordedPathSelected && tracked.length >= 2;
   if (effectiveActualRoute && tracked.length < 2 && diversionFallbackPath.length < 2) {
