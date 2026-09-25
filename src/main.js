@@ -6753,6 +6753,14 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
       .bindTooltip(stop.name || "Stop", { direction: "top", opacity: 0.9 });
   }
   if (fit) {
+    try {
+      // Fleet can open the map after Leaflet was initialised while its
+      // container was hidden. Invalidate the stale 0×0 size before fitting
+      // the selected route, otherwise the route is centred at [0, 0].
+      map.invalidateSize({ animate: false });
+    } catch {
+      /* ignore */
+    }
     map.fitBounds(L.latLngBounds(flat).pad(0.1), { maxZoom: 13, animate: true });
   }
   // A late scene/road redraw must not detach the replay cursor or its tail.
@@ -7578,6 +7586,13 @@ async function startRoutePlayback({
     if (playback) playback.path = roadPath.length >= 2 ? roadPath : roadSource;
     const roadFlat = flattenTrailLatLngs(roadPath.length >= 2 ? roadPath : roadSource);
     if (roadFlat.length >= 2) {
+      try {
+        // The map may have been shown from Fleet after the initial 0×0
+        // Leaflet layout pass. Refresh it before fitting the recorded route.
+        map.invalidateSize({ animate: false });
+      } catch {
+        /* ignore */
+      }
       map.fitBounds(L.latLngBounds(roadFlat).pad(0.1), { maxZoom: 15, animate: true });
     }
   }
