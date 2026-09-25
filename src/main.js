@@ -5338,7 +5338,7 @@ function liveFirstPotteriesGuidePath(filter = {}, gpsPoints = [], ping = null) {
   if (!(filter.live || filter.follow) || !isFirstPotteriesTrailOperator(filter.operator)) return null;
   // The 11 is temporarily diverted from Potteries Way. Keep the recorded GPS
   // alignment for this stint instead of snapping the tail back to the timetable.
-  if (sameServiceLine(filter.line, "11") && gpsPoints.length >= 2) return null;
+  if (sameServiceLine(filter.line, "11")) return null;
   if (filter.actualRoute || filter.diverted || !Array.isArray(filter.plannedPath)) return null;
   const planned = filter.plannedPath;
   if (planned.length < 2 || !ping || !Number.isFinite(Number(ping.lat)) || !Number.isFinite(Number(ping.lng))) {
