@@ -800,15 +800,19 @@ const BUS_POLL_MS = 6000;
 const TABLET_LIVE_POLL_MS = 10000;
 const LIVE_MARKER_BATCH_SIZE = 48;
 
-function livePollMs() {
+function isTabletPerformanceDevice() {
   try {
     const coarse = window.matchMedia?.("(pointer: coarse)").matches;
     const shortSide = Math.min(window.screen?.width || 0, window.screen?.height || 0);
     const longSide = Math.max(window.screen?.width || 0, window.screen?.height || 0);
-    return coarse && shortSide >= 600 && longSide >= 900 ? TABLET_LIVE_POLL_MS : BUS_POLL_MS;
+    return Boolean(coarse && shortSide >= 600 && longSide >= 900);
   } catch {
-    return BUS_POLL_MS;
+    return false;
   }
+}
+
+function livePollMs() {
+  return isTabletPerformanceDevice() ? TABLET_LIVE_POLL_MS : BUS_POLL_MS;
 }
 const STALE_PING_MS = 5 * 60 * 1000;
 /** Staffs Ticketer buses often sit quietly at termini on overnight routes — keep them a bit longer. */
@@ -9156,7 +9160,7 @@ async function ensureLiveries(idsOrBuses) {
   const ids = [...bustimesIds].filter((id) => !liveryCss(liveryById.get(id)));
   if (!ids.length) return;
   // Bustimes flakes under a flood — few at a time; drop misses so the next poll retries.
-  const concurrency = 8;
+  const concurrency = isTabletPerformanceDevice() ? 20 : 8;
   for (let i = 0; i < ids.length; i += concurrency) {
     const chunk = ids.slice(i, i + concurrency);
     await Promise.all(
@@ -10982,7 +10986,7 @@ function busIconKey(bus, heading = null, speedMph = null) {
   const zoomBand = map.getZoom() >= 15 ? "close" : "mid";
   return [
     zoomBand,
-    Math.round(h),
+    Math.round(h / 15) * 15,
     speedBucket(speed),
     livId,
     liveryCss(liv) || bus?.vehicle?.colour || "",
