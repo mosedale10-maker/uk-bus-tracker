@@ -15777,14 +15777,16 @@ function alignTrailToRoadsLocal(latlngs, breakOpts = {}) {
     !!breakOpts.staffs ||
     isStaffsTrailOperator(breakOpts.operator) ||
     isAltonLine(breakOpts.line);
-  // Rural AVL often sits further from the carriageway centreline than urban BODS.
-  const snapNear = staffs ? 380 : 280;
-  const snapFar = staffs ? 560 : 420;
+  // A wide snap radius is what makes a tail drift over buildings: a fix 300m away
+  // still "finds" a road, just the wrong one. Stay close to the carriageway and
+  // drop anything further out rather than inventing a line across a block.
+  const snapNear = staffs ? 140 : 120;
+  const snapFar = staffs ? 240 : 200;
   const inputSegs = splitLatLngsByGaps(latlngs, limits.gapM, breakOpts);
-  // Snapping is O(points × roads); a whole-day trail (thousands of fixes) froze
-  // the map. Thin only very long runs — the roads themselves get drawn, so
-  // dropping intermediate pings does not change the shape of the tail.
-  const MAX_SNAP_INPUT = 900;
+  // Snapping is O(points × roads). Keep a runaway guard only — thinning to a few
+  // hundred fixes left 300m gaps that the snapper bridged straight across
+  // buildings, so the tail must see the real point sequence.
+  const MAX_SNAP_INPUT = 6000;
   const sourceSegs = (inputSegs.length ? inputSegs : [latlngs]).map((seg) => {
     if (seg.length <= MAX_SNAP_INPUT) return seg;
     const step = Math.ceil(seg.length / MAX_SNAP_INPUT);
