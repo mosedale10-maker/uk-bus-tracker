@@ -6067,6 +6067,28 @@ async function runPinnedTrailAlign(id) {
   }
 }
 
+/**
+ * Keep the whole current journey, but cap the point count. Road matching has to
+ * finish for anything to be drawn: the local snapper is O(points × roads) and
+ * OSRM will not take a huge match. The cap is deliberately generous so a normal
+ * journey is never cut — it only stops a `reg:` key's whole-day backlog from
+ * blocking the render.
+ */
+const LIVE_TRAIL_MAX_POINTS = 1500;
+const LIVE_TRAIL_MAX_AGE_MS = 8 * 60 * 60_000;
+
+function boundLiveTrailPoints(points, ping) {
+  const list = Array.isArray(points) ? points : [];
+  if (list.length <= LIVE_TRAIL_MAX_POINTS) return list;
+  const end = Number(ping) || Number(list[list.length - 1]?.t) || 0;
+  const cutoff = end > 0 ? end - LIVE_TRAIL_MAX_AGE_MS : 0;
+  let start = 0;
+  while (start < list.length && cutoff > 0 && Number(list[start]?.t) < cutoff) start += 1;
+  const kept = start ? list.slice(start) : list;
+  if (kept.length <= LIVE_TRAIL_MAX_POINTS) return kept;
+  return kept.slice(-LIVE_TRAIL_MAX_POINTS);
+}
+
 function refreshLiveTrailLine(key) {
   const filter = {
     ...(pinnedTrailFilters.get(String(key)) || {}),
@@ -6080,6 +6102,10 @@ function refreshLiveTrailLine(key) {
     if (fallback.length > gpsPoints.length) gpsPoints = fallback;
   }
   const ping = livePingForTrailFilter(filter, gpsPoints);
+  if (filter.live) {
+    const bounded = boundLiveTrailPoints(gpsPoints, Number(ping?.t) || Number(ping) || 0);
+    if (bounded.length >= 2) gpsPoints = bounded;
+  }
   gpsPoints = clipGpsPointsAtPing(gpsPoints, ping);
   const plannedGuidePath = liveFirstPotteriesGuidePath(filter, gpsPoints, ping);
   if (filter.plannedGuide) {
