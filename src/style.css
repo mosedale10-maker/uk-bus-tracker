@@ -1815,19 +1815,20 @@ html.map-night .leaflet-control-container {
   }
 
   .journey-panel {
-    /* Let the sheet shrink to its content instead of leaving a large empty
-       black strip below a live bus card on phones. */
-    flex: 0 1 auto;
-    height: auto;
+    /* Keep a predictable, scrollable sheet: short cards do not leave a huge
+       empty strip, while longer cards never spill outside the panel. */
+    flex: 0 0 min(44dvh, 320px);
+    height: min(44dvh, 320px);
     width: 100%;
     border-right: 0;
     border-bottom: 1px solid #2a303a;
-    max-height: min(52dvh, 420px);
+    max-height: min(44dvh, 320px);
   }
 
   .journey-panel-detail {
-    flex: 0 0 auto;
-    max-height: min(34dvh, 260px);
+    flex: 1 1 auto;
+    max-height: none;
+    min-height: 0;
   }
 
   .journey-panel.is-timetable-minimized {
