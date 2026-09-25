@@ -4420,9 +4420,28 @@ export function createFleetBrowser({
     `;
   }
 
+  function routeOperatorForEntry(entry, service = state.routeService) {
+    const entryService =
+      (entry?.service_id && state.routeServices?.find((row) => String(row.id) === String(entry.service_id))) ||
+      service;
+    return String(
+      entry?.operator?.id ||
+        entry?.operator?.noc ||
+        serviceOperatorNoc(entryService) ||
+        state._routePreferNoc ||
+        state.operator?.noc ||
+        "",
+    ).toUpperCase();
+  }
+
   function renderRoute() {
     const line = state.routeLine || "Route";
     const service = state.routeService;
+    const routeOverviewOperator =
+      serviceOperatorNoc(service) ||
+      state._routePreferNoc ||
+      state.operator?.noc ||
+      serviceOperatorNoc(state.routeServices?.[0]);
     const dates = [];
     for (let i = 0; i < 7; i += 1) {
       const d = new Date();
@@ -4474,12 +4493,7 @@ export function createFleetBrowser({
                               trailKey,
                               reg: entry.reg,
                               line: lineCode,
-                              operator:
-                                entry.operator?.id ||
-                                entry.operator?.noc ||
-                                (Array.isArray(service?.operator) && service.operator[0]) ||
-                                state._routePreferNoc ||
-                                "",
+                              operator: routeOperatorForEntry(entry, service),
                               direction: entry.direction || "",
                               dest: entry.destination || "",
                               datetime: entry.datetime || "",
@@ -4505,7 +4519,7 @@ export function createFleetBrowser({
         <h1 class="fleet-title">Route ${routeNumberBtn(line)}</h1>
         <p class="fleet-lead">Staffordshire buses that have run route <strong>${esc(line)}</strong> — each trip listed separately</p>
         <p class="fleet-actions">
-          <button type="button" class="fleet-link-btn" data-action="show-route-tails" data-line="${esc(line)}" data-operator="FPOT">Map · tails</button>
+          <button type="button" class="fleet-link-btn" data-action="show-route-tails" data-line="${esc(line)}" data-operator="${esc(routeOverviewOperator)}">Map · tails</button>
         </p>
         <label class="fleet-date-label">
           <span class="sr-only">Date</span>

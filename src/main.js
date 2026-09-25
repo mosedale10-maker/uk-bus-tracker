@@ -5107,7 +5107,8 @@ async function showFleetRouteTails({
   // may use the matching Bustimes service path even when the live feed has many
   // anonymous vehicles (and therefore no single safe target to select).
   const forceSingle = isSingleVehicleRouteLine(code) ||
-    (isSingleVehicleRouteOperator(opCode) && hasExplicitSelection);
+    (isSingleVehicleRouteOperator(opCode) &&
+      (hasExplicitSelection || !isCoachTrailOperator(opCode)));
   if (!code && !vehicleId && !trailKey && !reg) {
     showMessage("No route to show");
     return;
@@ -5210,14 +5211,17 @@ async function showFleetRouteTails({
   // Start the Bustimes route lookup before the GPS-key check. A coach route can
   // have no usable recorder key (anonymous AVL / stale feed) but still has a
   // valid published service path.
-  const plannedRoutePromise = fetchPlannedRoutePath({
-    targets,
-    code,
-    opCode,
-    plannedTripId,
-    plannedServiceId,
-    plannedDate,
-  });
+  const plannedRoutePromise =
+    keys.size || isCoachTrailOperator(opCode)
+      ? fetchPlannedRoutePath({
+          targets,
+          code,
+          opCode,
+          plannedTripId,
+          plannedServiceId,
+          plannedDate,
+        })
+      : Promise.resolve([]);
   if (isCoachTrailOperator(opCode) && targets.length === 1) {
     const v = targets[0];
     const expanded = await expandCoachTrailKeys([...keys], {
@@ -5248,11 +5252,11 @@ async function showFleetRouteTails({
       new Promise((resolve) => setTimeout(resolve, 1200)),
     ]);
   }
-  if (!keys.size && plannedRoutePath.length < 2) {
+  if (!keys.size && (!isCoachTrailOperator(opCode) || plannedRoutePath.length < 2)) {
     showMessage(
-      hasExplicitSelection
-        ? `No GPS or Bustimes path for this bus yet — leave it open on the map or try again later`
-        : `No GPS or Bustimes tails for ${label} yet`,
+      forceSingle
+        ? `No GPS tail for this bus yet — leave it open on the map or wait for the server recorder`
+        : `No GPS tails for ${label} yet`,
     );
     return;
   }
@@ -13649,7 +13653,10 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
       gaps.push(haversineMeters(flat[i - 1][0], flat[i - 1][1], flat[i][0], flat[i][1]));
     }
     const averageGap = gaps.length ? gaps.reduce((sum, value) => sum + value, 0) / gaps.length : 0;
-    const sparsePlannedPath = flat.length >= 2 && (flat.length <= 24 || averageGap > 800);
+    const sparsePlannedPath =
+      (coach || isCoachTrailOperator(breakOpts.operator)) &&
+      flat.length >= 2 &&
+      (flat.length <= 24 || averageGap > 800);
     if (!sparsePlannedPath) {
       trailAlignCache.set(key, cleaned);
       return cleaned;
