@@ -13539,8 +13539,48 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
     const cleaned = Array.isArray(latlngs?.[0]?.[0])
       ? latlngs.map((seg) => dedupeNearTrailPoints(seg, 2)).filter((seg) => seg.length >= 2)
       : dedupeNearTrailPoints(latlngs, 2);
-    trailAlignCache.set(key, cleaned);
-    return cleaned;
+    const flat = Array.isArray(cleaned?.[0]?.[0]) ? cleaned.flat() : cleaned;
+    // Bustimes sometimes returns only stop locations (no track points). Those
+    // sparse stop-to-stop chords are fine for a timetable, but a live coach
+    // can be tens of kilometres from the next vertex and the strict 350 m clip
+    // then correctly hides the whole tail. Align sparse planned geometry to
+    // the driving road first; the live clip still uses the real bus ping.
+    const gaps = [];
+    for (let i = 1; i < flat.length; i += 1) {
+      gaps.push(haversineMeters(flat[i - 1][0], flat[i - 1][1], flat[i][0], flat[i][1]));
+    }
+    const averageGap = gaps.length ? gaps.reduce((sum, value) => sum + value, 0) / gaps.length : 0;
+    const sparsePlannedPath = flat.length >= 2 && (flat.length <= 24 || averageGap > 800);
+    if (!sparsePlannedPath) {
+      trailAlignCache.set(key, cleaned);
+      return cleaned;
+    }
+    if (trailAlignPending.has(key)) return trailAlignPending.get(key);
+    const pending = (async () => {
+      try {
+        const aligned = await stitchTrailViaOsrmRoutes(cleaned, signal, {
+          ...breakOpts,
+          plannedRoute: true,
+          coach,
+        });
+        const valid = trailSegmentsOf(aligned, { ...breakOpts, plannedRoute: true });
+        if (valid.length) return valid.length === 1 ? valid[0] : valid;
+      } catch {
+        /* keep the published stop path as a safe fallback */
+      }
+      return cleaned;
+    })();
+    trailAlignPending.set(key, pending);
+    try {
+      const result = await pending;
+      trailAlignCache.set(key, result);
+      if (trailAlignCache.size > 48) {
+        trailAlignCache.delete(trailAlignCache.keys().next().value);
+      }
+      return result;
+    } finally {
+      trailAlignPending.delete(key);
+    }
   }
   if (trailAlignPending.has(key)) return trailAlignPending.get(key);
   const pending = (async () => {
