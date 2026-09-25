@@ -7765,7 +7765,15 @@ function followButtonHtml(marker) {
 /** Clickable reg (or fleet#) that opens the Fleet vehicle page. */
 function fleetRegButtonHtml(
   reg,
-  { fleet = "", vehicleId = "", operatorSlug = "", serviceId = "", line = "", operatorNoc = "" } = {},
+  {
+    fleet = "",
+    vehicleId = "",
+    operatorSlug = "",
+    serviceId = "",
+    line = "",
+    operatorNoc = "",
+    className = "",
+  } = {},
 ) {
   const plate = String(reg || "").replace(/\s+/g, " ").trim();
   const fleetCode = String(fleet || "").trim();
@@ -7776,7 +7784,8 @@ function fleetRegButtonHtml(
   const noc = String(operatorNoc || "").trim();
   if (!plate && !fleetCode && !id && !slug && !svc) return "";
   const label = plate || (fleetCode ? `#${fleetCode}` : "Fleet");
-  return `<button type="button" class="popup-fleet-reg" data-action="open-fleet-vehicle" data-reg="${esc(plate)}" data-fleet="${esc(fleetCode)}" data-vehicle-id="${esc(id)}" data-operator-slug="${esc(slug)}" data-service-id="${esc(svc)}" data-line="${esc(route)}" data-operator-noc="${esc(noc)}" title="Open in Fleet">${esc(label)}</button>`;
+  const classes = ["popup-fleet-reg", String(className || "").trim()].filter(Boolean).join(" ");
+  return `<button type="button" class="${esc(classes)}" data-action="open-fleet-vehicle" data-reg="${esc(plate)}" data-fleet="${esc(fleetCode)}" data-vehicle-id="${esc(id)}" data-operator-slug="${esc(slug)}" data-service-id="${esc(svc)}" data-line="${esc(route)}" data-operator-noc="${esc(noc)}" title="Open in Fleet">${esc(label)}</button>`;
 }
 
 /** True only for real bustimes vehicle ids — not journey/trip ids (Flix AVL uses those as bus.id). */
@@ -11066,16 +11075,22 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
     trailOperatorForBus(bus) ||
     staffsOperatorCode(bus, extra) ||
     (isFlixBus(bus) ? "FLIX" : isNationalExpress(bus) ? "NATX" : "");
-  const regLink = fleetRegButtonHtml(reg, {
+  const regLinkOptions = {
     fleet,
     vehicleId: fleetVehicleId,
     operatorSlug: opSlug,
     serviceId: bus.service_id || bus.service?.id || "",
     line: bus.service?.line_name || extra.line || "",
     operatorNoc: opNoc,
-  });
+  };
+  const regLink = fleetRegButtonHtml(reg, regLinkOptions);
+  const regAction = regLink
+    ? fleetRegButtonHtml(reg, { ...regLinkOptions, className: "popup-reg-action" })
+    : reg
+      ? `<span class="popup-reg-action popup-reg-static">${esc(reg)}</span>`
+      : "";
   const idLine =
-    [fleet ? esc(`#${fleet}`) : "", regLink || (reg ? esc(reg) : "")].filter(Boolean).join(" · ") ||
+    [fleet ? esc(`#${fleet}`) : "", !regAction && reg ? esc(reg) : ""].filter(Boolean).join(" · ") ||
     (opSlug
       ? fleetRegButtonHtml("", {
           operatorSlug: opSlug,
@@ -11133,7 +11148,7 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
       ${nis ? (to ? `<div class="popup-meta">Shown as ${esc(to)}</div>` : "") : routeBlock(from, to)}
       <div class="popup-actions">
         ${followButtonHtml({ bus })}
-        ${playRouteButtonHtml(bus, historyExtra)}
+        ${regAction}
         ${hideLiveReplay ? "" : replayBusButtonHtml(bus, historyExtra)}
       </div>
       ${photoBlock(extra, { reg: photoReg, fleet, operator })}
@@ -11685,6 +11700,12 @@ function staffPopup(item, extra = {}, { omitStops = false, sidePanel = false } =
     : "Unknown time";
   const trailKey = extra.trailKey || staffTrailKey(item);
   const popupExtra = { ...extra, trailKey, line };
+  const staffReg = parsed.reg || extra.btVehicle?.reg || "";
+  const regAction = fleetRegButtonHtml(staffReg, {
+    fleet: parsed.fleet || "",
+    vehicleId: extra.btVehicle?.id || "",
+    className: "popup-reg-action",
+  }) || (staffReg ? `<span class="popup-reg-action popup-reg-static">${esc(staffReg)}</span>` : "");
   void omitStops;
 
   return `
@@ -11697,7 +11718,7 @@ function staffPopup(item, extra = {}, { omitStops = false, sidePanel = false } =
       ${via ? `<div class="popup-meta">${esc(via)}</div>` : ""}
       <div class="popup-actions">
         ${followButtonHtml({ staff: item })}
-        ${playStaffRouteButtonHtml(item, popupExtra)}
+        ${regAction}
       </div>
       ${photoBlock(popupExtra, {
         reg: parsed.reg || extra.btVehicle?.reg || "",

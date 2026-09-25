@@ -3232,6 +3232,42 @@ html.map-night .leaflet-control-container {
   outline: none;
 }
 
+/* The registration is the primary action on a live bus card. */
+.popup-actions .popup-reg-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0e131b;
+  color: var(--ink);
+  font-size: 1rem;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  text-align: center;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.popup-actions .popup-reg-action.popup-reg-static {
+  cursor: default;
+}
+
+.popup-actions .popup-fleet-reg.popup-reg-action:hover,
+.popup-actions .popup-fleet-reg.popup-reg-action:focus-visible {
+  border-color: #38bdf8;
+  background: #172033;
+  color: var(--ink);
+  outline: none;
+}
+
 .popup-details-live {
   color: var(--ink);
   font-weight: 650;
@@ -4382,9 +4418,10 @@ html.map-night .leaflet-control-container {
   }
 
   .follow-bus-btn,
-  .play-route-btn {
+  .play-route-btn,
+  .popup-actions .popup-reg-action {
     min-height: 40px;
-    font-size: 13px;
+    font-size: 14px;
     padding: 8px 10px;
   }
 
