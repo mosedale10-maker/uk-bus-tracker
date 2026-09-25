@@ -3063,7 +3063,7 @@ function normalizeTrailDestination(raw) {
     .trim();
 }
 
-/** Live follow tracks the bus only — no growing day tail behind it. Map · trail / Map · tails draw per-journey GPS. */
+/** Ordinary live follow remains marker-only; coach follows opt into a clipped live tail below. */
 const SHOW_LIVE_TAIL_WHILE_FOLLOWING = false;
 
 function trailKeysForVehicle({
@@ -7360,14 +7360,19 @@ function startFollowBus(marker) {
     startedAt: Date.now(),
   };
   showMessage("");
-  // Live follow: keep recording GPS, but do not auto-draw a growing day trail.
-  // Map · trail / Map · tails pin each journey separately.
+  // Keep ordinary local-bus follow as marker-only, but coaches need the live
+  // growing tail requested by the map view. The tail renderer clips it at the
+  // current ping, so it can never run ahead of the followed vehicle.
   const trailKey = liveTrailKeyForMarker(marker);
+  const showFollowTail =
+    SHOW_LIVE_TAIL_WHILE_FOLLOWING ||
+    Boolean(marker.bus && isCoachTrailOperator(trailOperatorForBus(marker.bus)));
   if (trailKey) rememberTrailVehicle(trailKey);
-  if (SHOW_LIVE_TAIL_WHILE_FOLLOWING && trailKey) {
+  if (showFollowTail && trailKey) {
     setLiveTrailFocus(trailKey);
   } else if (liveTrailKey) {
-    // Following shows the bus only — drop any growing day tail that was already up.
+    // Ordinary local follow shows the bus only — drop any growing day tail that
+    // was already up. Coach follows deliberately retain the live tail.
     setLiveTrailFocus("");
   }
   keepFollowedInView(marker, { force: true });
