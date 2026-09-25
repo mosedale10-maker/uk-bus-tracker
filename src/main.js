@@ -2729,6 +2729,16 @@ function selectMapMarker(marker) {
     /* ignore */
   }
   selectedMapMarker = marker;
+  // Coach markers get a live tail as soon as they are selected. Follow still
+  // controls the camera, but the selected coach's growing tail should not wait
+  // for a second click or for the first two recorder pings.
+  if (marker.bus && isCoachTrailOperator(trailOperatorForBus(marker.bus))) {
+    const coachTrailKey = liveTrailKeyForMarker(marker);
+    if (coachTrailKey) {
+      rememberTrailVehicle(coachTrailKey);
+      setLiveTrailFocus(coachTrailKey);
+    }
+  }
   marker._lastPopupStructure = "";
   if (marker._occRetry) clearTimeout(marker._occRetry);
   marker._occRetry = null;
