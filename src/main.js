@@ -6283,6 +6283,7 @@ async function showFleetRouteTails({
       baseKey: base,
       line: vLine || code,
       operator: opCode,
+      actualRoute: isStaffsTrailOperator(opCode),
     });
     for (const key of pinned) {
       if (seenSeg.has(key)) continue;
@@ -6371,6 +6372,7 @@ async function showFleetRouteTails({
       baseKey: code || "route",
       line: code,
       operator: opCode,
+      actualRoute: isStaffsTrailOperator(opCode),
     });
     drawn.push(...pinned);
   }
@@ -8061,10 +8063,7 @@ async function startRoutePlayback({
     tripPath.length >= 2 &&
     pathCrossesActiveRoadNotice(tripPath);
   const staffsRecordedRoute = prefersRecordedStaffsRoute(operator, true);
-  if (
-    staffsRecordedRoute &&
-    (hasRecordedGps || live || autoReplay || requestedRecordedReplay || historicalPlayback)
-  ) {
+  if (staffsRecordedRoute && hasRecordedGps) {
     // The recorded GPS is the authority for the current diverted stint.
     actualRouteRequired = true;
   }
