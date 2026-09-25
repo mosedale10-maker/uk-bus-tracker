@@ -3946,13 +3946,9 @@ function prefersRecordedDg27Route(line, operator, hasRecordedPoints = false) {
   );
 }
 
-/** First Potteries 11 is being diverted away from Potteries Way. */
-function prefersRecordedFpot11Route(line, operator, hasRecordedPoints = false) {
-  return (
-    hasRecordedPoints &&
-    sameServiceLine(line, "11") &&
-    String(operator || "").trim().toUpperCase() === "FPOT"
-  );
+/** First Potteries tails use recorded GPS when it is available. */
+function prefersRecordedFpotRoute(line, operator, hasRecordedPoints = false) {
+  return hasRecordedPoints && String(operator || "").trim().toUpperCase() === "FPOT";
 }
 
 /** Canonical NOC for a Staffordshire live bus, including BODS rows with no operator field. */
@@ -4573,12 +4569,11 @@ function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
     // already clipped to the current marker and is replaced by the road path.
     return flattenTrailLatLngs(gpsPath).length >= 2 ? gpsPath : [];
   }
-  const fpot11Actual =
+  const fpotActual =
     breakOpts.actualRoute &&
-    sameServiceLine(breakOpts.line, "11") &&
     String(breakOpts.operator || "").trim().toUpperCase() === "FPOT";
   if (
-    !fpot11Actual &&
+    !fpotActual &&
     (breakOpts.coach ||
       breakOpts.staffs ||
       isCoachTrailOperator(breakOpts.operator) ||
@@ -5341,9 +5336,9 @@ function clipTrailPathAtProgress(path, progress, ping) {
  */
 function liveFirstPotteriesGuidePath(filter = {}, gpsPoints = [], ping = null) {
   if (!(filter.live || filter.follow) || !isFirstPotteriesTrailOperator(filter.operator)) return null;
-  // The 11 is temporarily diverted from Potteries Way. Keep the recorded GPS
-  // alignment for this stint instead of snapping the tail back to the timetable.
-  if (sameServiceLine(filter.line, "11")) return null;
+  // First Potteries GPS is the authority for a recorded live stint; do not
+  // snap a diversion back to the timetable alignment.
+  if (gpsPoints.length >= 2) return null;
   if (filter.actualRoute || filter.diverted || !Array.isArray(filter.plannedPath)) return null;
   const planned = filter.plannedPath;
   if (planned.length < 2 || !ping || !Number.isFinite(Number(ping.lat)) || !Number.isFinite(Number(ping.lng))) {
@@ -6027,7 +6022,7 @@ async function showFleetRouteTails({
   // wait on a broad recorder lookup before drawing it.
   const hasPlannedService = Boolean(plannedTripId || plannedServiceId);
   const needsDg27RecordedKeys = prefersRecordedDg27Route(code, opCode, true);
-  const needsFpot11RecordedKeys = prefersRecordedFpot11Route(code, opCode, true);
+  const needsFpot11RecordedKeys = prefersRecordedFpotRoute(code, opCode, true);
   if (
     code &&
     !hasExplicitSelection &&
@@ -6349,7 +6344,7 @@ async function showFleetRouteTails({
   }
 
   const keepRecordedDg27 = prefersRecordedDg27Route(code, opCode, drawn.length > 0);
-  const keepRecordedFpot11 = prefersRecordedFpot11Route(code, opCode, true);
+  const keepRecordedFpot11 = prefersRecordedFpotRoute(code, opCode, true);
   if (plannedPathUsable && !isCoachTrailOperator(opCode) && !hasExplicitSelection && !keepRecordedDg27 && !keepRecordedFpot11) {
     clearPinnedTrails();
     const plannedFlatPath = flattenTrailLatLngs(plannedRoutePath);
@@ -7829,7 +7824,7 @@ async function startRoutePlayback({
   });
   const needsRecordedDiversionKeys =
     prefersRecordedDg27Route(line, operator, true) ||
-    prefersRecordedFpot11Route(line, operator, true);
+    prefersRecordedFpotRoute(line, operator, true);
   if (needsRecordedDiversionKeys) {
     const recordedOperator = String(operator || "").trim().toUpperCase() === "FPOT" ? "FPOT" : "DAGC";
     const recordedKeys = await fetchTrailKeysForGroup(
@@ -8079,10 +8074,10 @@ async function startRoutePlayback({
     plannedRouteOverride &&
     tripPath.length >= 2 &&
     pathCrossesActiveRoadNotice(tripPath);
-  const fpot11Diversion = prefersRecordedFpot11Route(line, operator, true);
+  const fpotRecordedRoute = prefersRecordedFpotRoute(line, operator, true);
   if (
     prefersRecordedDg27Route(line, operator, hasRecordedGps) ||
-    (fpot11Diversion && (hasRecordedGps || live || autoReplay || requestedRecordedReplay || historicalPlayback))
+    (fpotRecordedRoute && (hasRecordedGps || live || autoReplay || requestedRecordedReplay || historicalPlayback))
   ) {
     // The recorded GPS is the authority for the current diverted stint.
     actualRouteRequired = true;
