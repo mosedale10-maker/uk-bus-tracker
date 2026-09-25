@@ -1487,7 +1487,7 @@ function dayKeysForTrail(ms = Date.now()) {
   return utc === uk ? [utc] : [utc, uk];
 }
 
-function atTrailSegmentKeys(baseKey, line, { days = 7, date = "" } = {}) {
+function atTrailSegmentKeys(baseKey, line, { days = 5, date = "" } = {}) {
   const primary = String(baseKey || "").trim();
   const code = String(line || "").trim().toUpperCase();
   if (!primary || !AT_LINE_SET.has(code)) return [];
@@ -1774,11 +1774,11 @@ export async function fetchAtHistoryFromTrails({
   trailKeys = [],
   line = "",
   date = "",
-  days = 7,
+  days = 5,
 } = {}) {
   const wantLine = String(line || "").trim().toUpperCase();
   const wantDate = String(date || "").trim();
-  const keepDays = Math.min(7, Math.max(1, Number(days) || 7));
+  const keepDays = Math.min(5, Math.max(1, Number(days) || 5));
   const bases = [...new Set((trailKeys || []).map((k) => String(k || "").trim()).filter(Boolean))];
   if (!bases.length) return [];
   const primary = bases.find((k) => k.startsWith("staff-")) || bases[0];
@@ -1948,13 +1948,13 @@ export function mergeAtHistoryRows(journeys, atRows) {
 export async function fetchCoachHistoryFromTrails({
   trailKeys = [],
   line = "",
-  days = 7,
+  days = 5,
   operator = "",
   busMode = false,
 } = {}) {
   const wantLine = String(line || "").trim().toUpperCase();
   const wantOp = String(operator || "").trim().toUpperCase();
-  const keepDays = Math.min(7, Math.max(1, Number(days) || 7));
+  const keepDays = Math.min(5, Math.max(1, Number(days) || 5));
   const bases = [...new Set((trailKeys || []).map((k) => String(k || "").trim()).filter(Boolean))];
   if (!bases.length) return [];
   const keys = [];
@@ -2178,7 +2178,7 @@ function vehicleReplayTrailKeys(vehicle = {}) {
   return [...new Set(keys.filter(Boolean))].slice(0, 12);
 }
 
-/** Build replay rows from the seven-day GPS trail store for one Fleet vehicle. */
+/** Build replay rows from the five-day GPS trail store for one Fleet vehicle. */
 async function fetchVehicleReplayRuns(vehicle = {}, { days = FLEET_REPLAY_DAYS } = {}) {
   const trailKeys = vehicleReplayTrailKeys(vehicle);
   if (!trailKeys.length) return [];
@@ -5721,7 +5721,7 @@ export function createFleetBrowser({
         trailKeys,
         line: atLineFilter || "",
         date,
-        days: 7,
+        days: 5,
       });
       if (token !== vehicleLoadToken || String(state.vehicle?.id) !== String(vehicle.id)) return;
       const defaultTrail =
@@ -5797,7 +5797,7 @@ export function createFleetBrowser({
       const filtered = date
         ? coachRows.filter((row) => !row.date || row.date === date)
         : coachRows;
-      // "Routes this bus has run" should keep every route from the whole 7-day window,
+      // "Routes this bus has run" should keep every route from the whole five-day window,
       // not just the day on screen — otherwise a finished BS1/BS2 run drops off the list.
       state.vehicleRoutes = unionRouteLines(state.vehicleRoutes, coachRows);
       if (!filtered.length) {
