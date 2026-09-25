@@ -3915,6 +3915,10 @@ function isStaffsTrailOperator(operator) {
   return STAFFS_TRAIL_NOCS.has(String(operator || "").trim().toUpperCase());
 }
 
+function isFirstPotteriesTrailOperator(operator) {
+  return String(operator || "").trim().toUpperCase() === "FPOT";
+}
+
 /** Canonical NOC for a Staffordshire live bus, including BODS rows with no operator field. */
 function staffsOperatorCode(bus, extra = {}) {
   const candidates = [
@@ -4345,18 +4349,19 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
   const id = String(key || "");
   const actualRoute = Boolean(filter?.actualRoute || filter?.diverted);
   const plannedRoute = Boolean(filter?.plannedRoute);
+  const plannedGuide = Boolean(filter?.plannedGuide);
   const staffs =
     Boolean(filter?.staffs) ||
     isStaffsTrailOperator(op) ||
     isAltonLine(line) ||
     id.startsWith("staff-") ||
     id.startsWith("at:");
-  if (op) return { operator: op, coach: isCoachTrailOperator(op), staffs, actualRoute, plannedRoute, live: Boolean(filter?.live || filter?.follow) };
-  if (filter?.coach) return { coach: true, operator: op || "", staffs, actualRoute, plannedRoute, live: Boolean(filter?.live || filter?.follow) };
+  if (op) return { operator: op, coach: isCoachTrailOperator(op), staffs, actualRoute, plannedRoute, plannedGuide, live: Boolean(filter?.live || filter?.follow) };
+  if (filter?.coach) return { coach: true, operator: op || "", staffs, actualRoute, plannedRoute, plannedGuide, live: Boolean(filter?.live || filter?.follow) };
   const pts = trailMem.get(id) || [];
   for (let i = pts.length - 1; i >= 0; i -= 1) {
     const pOp = String(pts[i]?.operator || "").trim().toUpperCase();
-    if (pOp) return { operator: pOp, coach: isCoachTrailOperator(pOp), staffs: staffs || isStaffsTrailOperator(pOp), actualRoute, plannedRoute, live: Boolean(filter?.live || filter?.follow) };
+    if (pOp) return { operator: pOp, coach: isCoachTrailOperator(pOp), staffs: staffs || isStaffsTrailOperator(pOp), actualRoute, plannedRoute, plannedGuide, live: Boolean(filter?.live || filter?.follow) };
   }
   // Live Flix / NATX markers: bus.id is the trail key but points may lack operator yet.
   if (id) {
@@ -4364,11 +4369,11 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
       if (String(marker?.bus?.id) !== id) continue;
       if (isFlixBus(marker.bus) || isNationalExpress(marker.bus)) {
         const noc = trailOperatorForBus(marker.bus);
-        return { operator: noc, coach: true, staffs: false, actualRoute, plannedRoute, live: Boolean(filter?.live || filter?.follow) };
+        return { operator: noc, coach: true, staffs: false, actualRoute, plannedRoute, plannedGuide, live: Boolean(filter?.live || filter?.follow) };
       }
     }
   }
-  return { staffs, actualRoute, plannedRoute, live: Boolean(filter?.live || filter?.follow) };
+  return { staffs, actualRoute, plannedRoute, plannedGuide, live: Boolean(filter?.live || filter?.follow) };
 }
 
 /**
@@ -4497,6 +4502,25 @@ function routeDeviationEvidence({ plannedPath, gpsPoints = [], livePing = null, 
 function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
   const roadFlat = flattenTrailLatLngs(roadPath);
   if (roadFlat.length >= 2) return roadPath;
+  // A live First Potteries guide is already Bustimes road geometry. Keep that
+  // geometry visible while the asynchronous OSRM pass validates/straightens
+  // sparse pieces; unlike raw GPS it cannot cut across fields or buildings.
+  const livePlannedStaffs =
+    breakOpts.live &&
+    breakOpts.plannedGuide &&
+    (breakOpts.staffs || isStaffsTrailOperator(breakOpts.operator) || isAltonLine(breakOpts.line));
+  if (livePlannedStaffs) {
+    const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
+    if (flattenTrailLatLngs(local).length >= 2) return local;
+    return flattenTrailLatLngs(gpsPath).length >= 2 ? gpsPath : [];
+  }
+  // Do not put a raw First Potteries GPS chord on the map while its road
+  // matcher is pending. A short blank interval is preferable to a line through
+  // buildings/fields; the validated path replaces it when OSRM completes.
+  if (breakOpts.live && isFirstPotteriesTrailOperator(breakOpts.operator)) {
+    const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
+    return flattenTrailLatLngs(local).length >= 2 ? local : [];
+  }
   if (breakOpts.plannedRoute) {
     return plannedPathNeedsRoadMatch(gpsPath, breakOpts) ? [] : gpsPath;
   }
@@ -4655,6 +4679,7 @@ function trailPairBreakOpts(opts = {}, fallback = {}) {
     staffs: !!(opts.staffs ?? fallback.staffs),
     actualRoute: !!(opts.actualRoute ?? fallback.actualRoute),
     plannedRoute: !!(opts.plannedRoute ?? fallback.plannedRoute),
+    plannedGuide: !!(opts.plannedGuide ?? fallback.plannedGuide),
     live: !!(opts.live ?? fallback.live),
   };
 }
@@ -4734,13 +4759,14 @@ function setTrailPairPath(pair, path, opts = {}) {
   const breakOpts = trailPairBreakOpts(
     {
       ...(pair.breakOpts || {}),
-      ...(opts.operator != null || opts.coach != null || opts.staffs != null || opts.actualRoute != null || opts.plannedRoute != null
+      ...(opts.operator != null || opts.coach != null || opts.staffs != null || opts.actualRoute != null || opts.plannedRoute != null || opts.plannedGuide != null
         ? {
             operator: opts.operator ?? pair.breakOpts?.operator,
             coach: opts.coach ?? pair.breakOpts?.coach,
             staffs: opts.staffs ?? pair.breakOpts?.staffs,
             actualRoute: opts.actualRoute ?? pair.breakOpts?.actualRoute,
             plannedRoute: opts.plannedRoute ?? pair.breakOpts?.plannedRoute,
+            plannedGuide: opts.plannedGuide ?? pair.breakOpts?.plannedGuide,
           }
         : {}),
     },
@@ -5217,6 +5243,30 @@ function clipGpsPointsAtPing(gpsPoints, ping) {
   return out;
 }
 
+/**
+ * First Potteries publishes a dense, road-shaped track for each timetable
+ * trip. Use the current trip's track as a guide for a live tail instead of
+ * drawing the recorder's raw GPS chords while OSRM is pending. If the bus has
+ * genuinely left that alignment, the recorded route remains authoritative.
+ */
+function liveFirstPotteriesGuidePath(filter = {}, gpsPoints = [], ping = null) {
+  if (!(filter.live || filter.follow) || !isFirstPotteriesTrailOperator(filter.operator)) return null;
+  if (filter.actualRoute || filter.diverted || !Array.isArray(filter.plannedPath)) return null;
+  const planned = filter.plannedPath;
+  if (planned.length < 2 || !ping || !Number.isFinite(Number(ping.lat)) || !Number.isFinite(Number(ping.lng))) {
+    return null;
+  }
+  const clipped = clipTrailPathAtPing(planned, ping, { failClosed: false });
+  if (flattenTrailLatLngs(clipped).length < 2) return null;
+  const evidence = routeDeviationEvidence({
+    plannedPath: planned,
+    gpsPoints,
+    livePing: ping,
+  });
+  if (evidence?.detected && !evidence.sparse) return null;
+  return clipped;
+}
+
 function refreshPinnedTrailLine(key) {
   const id = String(key || "");
   if (!id) return;
@@ -5226,7 +5276,7 @@ function refreshPinnedTrailLine(key) {
     filter.toMs = 0;
     pinnedTrailFilters.set(id, filter);
   }
-  const breakOpts = {
+  let breakOpts = {
     ...trailBreakOptsFromFilter(filter, id),
     staffs:
       isStaffsTrailOperator(filter.operator) ||
@@ -5282,6 +5332,14 @@ function refreshPinnedTrailLine(key) {
     livePing = livePingForTrailFilter(filter, gpsPoints);
     gpsPoints = clipGpsPointsAtPing(gpsPoints, livePing);
   }
+  const plannedGuidePath = liveFirstPotteriesGuidePath(filter, gpsPoints, livePing);
+  if (filter.plannedGuide) {
+    breakOpts = {
+      ...breakOpts,
+      plannedRoute: Boolean(plannedGuidePath),
+      plannedGuide: Boolean(plannedGuidePath),
+    };
+  }
   // Overview previews are stored as pinned trails rather than the focused live
   // trail. Check those pings too, so a diversion detected after Show route was
   // opened still replaces the scheduled path with the recorded GPS route.
@@ -5312,7 +5370,9 @@ function refreshPinnedTrailLine(key) {
   // Split there-and-back / multi-route GPS into separate strokes (never one continuous line).
   // tripseg: keys are already one trip from pinSeparateTripTails.
   let path;
-  if (String(id).startsWith("tripseg:")) {
+  if (plannedGuidePath) {
+    path = plannedGuidePath;
+  } else if (String(id).startsWith("tripseg:")) {
     path = pathFromGpsPoints(gpsPoints);
   } else {
     const gapMs = breakOpts.coach
@@ -5406,7 +5466,7 @@ function refreshLiveTrailLine(key) {
     live: true,
     liveTrailKey: String(key),
   };
-  const breakOpts = trailBreakOptsFromFilter(filter, key);
+  let breakOpts = trailBreakOptsFromFilter(filter, key);
   let gpsPoints = trackedPointsFor(key, filter);
   if (filter.live && gpsPoints.length < 2) {
     const fallback = trackedPointsFor(key, { ...filter, journeyId: "", tripId: "" });
@@ -5414,6 +5474,14 @@ function refreshLiveTrailLine(key) {
   }
   const ping = livePingForTrailFilter(filter, gpsPoints);
   gpsPoints = clipGpsPointsAtPing(gpsPoints, ping);
+  const plannedGuidePath = liveFirstPotteriesGuidePath(filter, gpsPoints, ping);
+  if (filter.plannedGuide) {
+    breakOpts = {
+      ...breakOpts,
+      plannedRoute: Boolean(plannedGuidePath),
+      plannedGuide: Boolean(plannedGuidePath),
+    };
+  }
   const playbackDeviation =
     playback &&
     !playback.diverted &&
@@ -5429,8 +5497,8 @@ function refreshLiveTrailLine(key) {
   if (playbackDeviation?.detected && !playbackDeviation.sparse) {
     switchPlaybackToActualRoute();
   }
-  const path = pathFromGpsPoints(gpsPoints);
-  if (path.length < 2) {
+  const path = plannedGuidePath || pathFromGpsPoints(gpsPoints);
+  if (flattenTrailLatLngs(path).length < 2) {
     if (liveTrailLine) {
       removeTrailPair(liveTrailLine, liveTrailLayer);
       liveTrailLine = null;
@@ -5529,6 +5597,45 @@ function trailTimeWindow(datetime, { coach = false } = {}) {
     // One there OR back run — not a full day of both directions.
     toMs: start + 5 * 60 * 60 * 1000,
   };
+}
+
+function inferCurrentTrailTripId(points = [], ping = null, { windowMs = 30 * 60_000 } = {}) {
+  const list = normalizeGpsTrailPoints(points).filter(
+    (point) => String(point.tripId || "").trim() && Number.isFinite(Number(point.t)),
+  );
+  if (!list.length) return "";
+  const at = Number(ping?.t) || Date.now();
+  const recent = list.filter(
+    (point) => Number(point.t) <= at + 90_000 && Number(point.t) >= at - windowMs,
+  );
+  const source = recent.length ? recent : list;
+  const groups = new Map();
+  for (const point of source) {
+    const id = String(point.tripId || "").trim();
+    if (!id) continue;
+    const current = groups.get(id) || {
+      id,
+      count: 0,
+      latest: -Infinity,
+      distanceM: Infinity,
+    };
+    current.count += 1;
+    current.latest = Math.max(current.latest, Number(point.t));
+    if (ping && Number.isFinite(Number(ping.lat)) && Number.isFinite(Number(ping.lng))) {
+      current.distanceM = Math.min(
+        current.distanceM,
+        haversineMeters(point.lat, point.lng, Number(ping.lat), Number(ping.lng)),
+      );
+    }
+    groups.set(id, current);
+  }
+  const ranked = [...groups.values()].sort(
+    (a, b) =>
+      b.latest - a.latest ||
+      a.distanceM - b.distanceM ||
+      b.count - a.count,
+  );
+  return ranked[0]?.id || "";
 }
 
 async function fetchPlannedRoutePath({
@@ -5729,8 +5836,9 @@ async function showFleetRouteTails({
     }
     if (currentBus) {
       const target = single[0];
+      const selectedTripId = String(target.trip_id || tripId || plannedTripId || "").trim();
       target.journey_id = String(currentBus.journey_id || "").trim();
-      target.trip_id = String(currentBus.trip_id || "").trim();
+      target.trip_id = String(currentBus.trip_id || selectedTripId || "").trim();
       target.datetime = currentBus.datetime || new Date().toISOString();
       target.line = currentBus.service?.line_name || target.line || code;
       target.direction = currentBus.direction || currentBus.directionRef || "";
@@ -5829,20 +5937,10 @@ async function showFleetRouteTails({
     }
   }
 
-  // Start the Bustimes route lookup before the GPS-key check. A coach route can
-  // have no usable recorder key (anonymous AVL / stale feed) but still has a
-  // valid published service path.
-  const plannedRoutePromise =
-    keys.size || isCoachTrailOperator(opCode)
-      ? fetchPlannedRoutePath({
-          targets,
-          code,
-          opCode,
-          plannedTripId,
-          plannedServiceId,
-          plannedDate,
-        })
-      : Promise.resolve([]);
+  // Start the recorder fetch before the planned-route lookup for a live
+  // First Potteries bus. Its BODS row often has no Bustimes trip id, but the
+  // recorder points carry the current trip id; use that to select the matching
+  // published road track instead of guessing a same-numbered journey.
   if (isCoachTrailOperator(opCode) && targets.length === 1) {
     const v = targets[0];
     const expanded = await expandCoachTrailKeys([...keys], {
@@ -5862,6 +5960,44 @@ async function showFleetRouteTails({
         })
         .catch(() => {})
     : Promise.resolve();
+  if (live && hasExplicitSelection && targets.length === 1 && isFirstPotteriesTrailOperator(opCode)) {
+    // Give the recorder a short head start, but do not make the map wait for
+    // the full five-day store on a slow connection.
+    await Promise.race([
+      trailsPromise,
+      new Promise((resolve) => setTimeout(resolve, 2500)),
+    ]);
+    const target = targets[0];
+    const targetTime = target?.datetime ? new Date(target.datetime).getTime() : NaN;
+    const planPing = {
+      lat: Number(target?.coordinates?.[1]),
+      lng: Number(target?.coordinates?.[0]),
+      t: Number.isFinite(targetTime) ? targetTime : Date.now(),
+    };
+    const planGps = collectTrailGpsForKeys([...keys], {
+      line: String(target?.line || target?.route_name || code || "").trim(),
+      fromMs: Math.max(0, (Number(planPing.t) || Date.now()) - 6 * 60 * 60_000),
+      toMs: 0,
+    });
+    const inferredTripId = inferCurrentTrailTripId(planGps, planPing);
+    if (inferredTripId) {
+      plannedTripId = inferredTripId;
+      plannedDate = ukDateKey(Number(planPing.t) || Date.now());
+    }
+  }
+  // A coach route can have no usable recorder key (anonymous AVL / stale
+  // feed) but still has a valid published service path.
+  const plannedRoutePromise =
+    keys.size || isCoachTrailOperator(opCode)
+      ? fetchPlannedRoutePath({
+          targets,
+          code,
+          opCode,
+          plannedTripId,
+          plannedServiceId,
+          plannedDate,
+        })
+      : Promise.resolve([]);
   const plannedRoutePath = await plannedRoutePromise;
   const plannedPathBlocked =
     plannedRoutePath.length >= 2 && pathCrossesActiveRoadNotice(plannedRoutePath);
@@ -6076,6 +6212,13 @@ async function showFleetRouteTails({
         liveFocus: false,
         livePing: targetPing,
         diverted: plannedPathBlocked,
+        plannedPath:
+          live && targets.length === 1 && plannedPathUsable && !plannedPathBlocked
+            ? plannedRoutePath
+            : [],
+        plannedTripId,
+        plannedGuide:
+          live && targets.length === 1 && plannedPathUsable && !plannedPathBlocked,
       });
     } catch {
       showMessage("Could not load this live tail yet");
@@ -6343,7 +6486,11 @@ function updatePinnedLiveRouteForBus(bus, trailMeta = {}) {
     if (!liveRouteStateMatchesBus(state, bus, reg)) continue;
     const lineChanged = Boolean(state.line && line && !sameServiceLine(state.line, line));
     const directionChanged = Boolean(state.direction && direction && state.direction !== direction);
-    const tripChanged = Boolean(state.tripId && tripId && state.tripId !== tripId);
+    const previousPlannedTrip = String(pinnedTrailFilters.get(key)?.plannedTripId || "").trim();
+    const tripChanged = Boolean(
+      (state.tripId && tripId && state.tripId !== tripId) ||
+        (previousPlannedTrip && tripId && previousPlannedTrip !== tripId),
+    );
     const destinationChanged = Boolean(
       !state.tripId &&
       !tripId &&
@@ -6368,6 +6515,10 @@ function updatePinnedLiveRouteForBus(bus, trailMeta = {}) {
         liveReg: reg || state.reg || "",
         liveJourneyId: journeyId,
         liveTripId: tripId,
+        plannedPath: [],
+        plannedTripId: "",
+        plannedGuide: false,
+        plannedRoute: false,
       };
       pinnedTrailFilters.set(key, filter);
       const oldPair = pinnedTrailLines.get(key);
@@ -6382,6 +6533,36 @@ function updatePinnedLiveRouteForBus(bus, trailMeta = {}) {
       state.destination = destination || state.destination;
       state.lastT = now;
       refreshPinnedTrailLine(key);
+      if (isFirstPotteriesTrailOperator(pinnedTrailFilters.get(key)?.operator) && tripId) {
+        const requestedTripId = tripId;
+        fetchPlannedRoutePath({
+          targets: [{ line, destination, datetime: new Date(now).toISOString() }],
+          code: line,
+          opCode: "FPOT",
+          plannedTripId: requestedTripId,
+          plannedDate: ukDateKey(now),
+        })
+          .then((plannedPath) => {
+            const current = pinnedTrailFilters.get(key);
+            if (
+              !pinnedTrailKeys.has(key) ||
+              !current ||
+              String(current.tripId || "") !== requestedTripId ||
+              !Array.isArray(plannedPath) ||
+              plannedPath.length < 2 ||
+              pathCrossesActiveRoadNotice(plannedPath)
+            ) return;
+            pinnedTrailFilters.set(key, {
+              ...current,
+              plannedPath,
+              plannedTripId: requestedTripId,
+              plannedGuide: true,
+              plannedRoute: true,
+            });
+            refreshPinnedTrailLine(key);
+          })
+          .catch(() => {});
+      }
     } else {
       state.line = line || state.line;
       state.direction = direction || state.direction;
@@ -6413,6 +6594,9 @@ function pinVehicleTrail({
   liveFocus = true,
   livePing = null,
   diverted = false,
+  plannedPath = [],
+  plannedTripId = "",
+  plannedGuide = false,
 } = {}) {
   const safeDirection = normalizeTrailDirection(direction);
   const keys = trailKeysForVehicle({
@@ -6442,6 +6626,10 @@ function pinVehicleTrail({
   const window = trailTimeWindow(datetime);
   const followLive = live || !datetime;
   const coachLive = isCoachTrailOperator(operator);
+  const guidePath =
+    !diverted && plannedGuide && Array.isArray(plannedPath) && plannedPath.length >= 2
+      ? plannedPath.slice()
+      : [];
   const filter = {
     line: String(line || "").trim(),
     journeyId: trailFilterJourneyId(journeyId, line),
@@ -6465,6 +6653,10 @@ function pinVehicleTrail({
     livePing: followLive ? livePing : null,
     diverted: Boolean(diverted),
     actualRoute: Boolean(diverted),
+    plannedPath: guidePath,
+    plannedTripId: String(plannedTripId || "").trim(),
+    plannedGuide: Boolean(guidePath.length >= 2),
+    plannedRoute: Boolean(guidePath.length >= 2),
   };
   multiTailActiveGroup = null;
   if (
@@ -6513,9 +6705,17 @@ function pinVehicleTrail({
     });
     const clippedGps = livePing ? clipGpsPointsAtPing(windowGps, livePing) : windowGps;
     const fallbackGps = clippedGps.length >= 2 ? clippedGps : windowGps;
-    const fallbackPath = pathFromGpsPoints(fallbackGps);
-    if (fallbackPath.length >= 2) {
-      const fallbackOpts = { ...filter, live: true, follow: true, gpsPoints: fallbackGps };
+    const fallbackGuide = liveFirstPotteriesGuidePath(filter, fallbackGps, livePing);
+    const fallbackPath = fallbackGuide || pathFromGpsPoints(fallbackGps);
+    if (flattenTrailLatLngs(fallbackPath).length >= 2) {
+      const fallbackOpts = {
+        ...filter,
+        live: true,
+        follow: true,
+        gpsPoints: fallbackGps,
+        plannedGuide: Boolean(fallbackGuide),
+        plannedRoute: Boolean(fallbackGuide),
+      };
       const fallbackBreak = trailBreakOptsFromFilter(fallbackOpts, renderKey);
       const immediate = preferRoadMatchedTrail(fallbackPath, [], fallbackBreak);
       const pair = makeTrailPair(immediate, liveTrailLayer, {
