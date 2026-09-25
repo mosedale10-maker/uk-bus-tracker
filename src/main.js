@@ -11326,7 +11326,7 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
   };
   const regLink = fleetRegButtonHtml(reg, regLinkOptions);
   const regAction = regLink
-    ? fleetRegButtonHtml(reg, { ...regLinkOptions, className: "popup-reg-action" })
+    ? `<div class="popup-reg-action-wrap">${fleetRegButtonHtml(reg, { ...regLinkOptions, className: "popup-reg-action" })}<span class="popup-reg-hint">Click reg to use playback</span></div>`
     : reg
       ? `<span class="popup-reg-action popup-reg-static">${esc(reg)}</span>`
       : "";
@@ -11942,11 +11942,16 @@ function staffPopup(item, extra = {}, { omitStops = false, sidePanel = false } =
   const trailKey = extra.trailKey || staffTrailKey(item);
   const popupExtra = { ...extra, trailKey, line };
   const staffReg = parsed.reg || extra.btVehicle?.reg || "";
-  const regAction = fleetRegButtonHtml(staffReg, {
+  const regButton = fleetRegButtonHtml(staffReg, {
     fleet: parsed.fleet || "",
     vehicleId: extra.btVehicle?.id || "",
     className: "popup-reg-action",
-  }) || (staffReg ? `<span class="popup-reg-action popup-reg-static">${esc(staffReg)}</span>` : "");
+  });
+  const regAction = regButton
+    ? `<div class="popup-reg-action-wrap">${regButton}<span class="popup-reg-hint">Click reg to use playback</span></div>`
+    : staffReg
+      ? `<span class="popup-reg-action popup-reg-static">${esc(staffReg)}</span>`
+      : "";
   void omitStops;
 
   return `

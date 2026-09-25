@@ -1098,6 +1098,24 @@ html[data-plus="1"] .plus-tag {
   max-width: 100%;
 }
 
+.popup-reg-action-wrap {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.popup-reg-hint {
+  color: var(--muted);
+  font-size: 0.62rem;
+  line-height: 1.15;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
 .popup-photo {
   display: flex;
   flex-direction: column;
