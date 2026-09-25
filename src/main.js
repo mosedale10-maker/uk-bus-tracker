@@ -7520,7 +7520,9 @@ async function startRoutePlayback({
     const roadSource = plannedPath.length >= 2
       ? plannedPath
       : replayPoints.length >= 2
-        ? replayPoints
+        ? Array.isArray(replayPoints[0])
+          ? replayPoints
+          : pathFromGpsPoints(replayPoints)
         : tracked;
     let roadPath = [];
     let roadTimeout = 0;
@@ -14179,9 +14181,12 @@ async function matchTrailViaOsrm(latlngs, signal, breakOpts = {}) {
   const sourceSegs = inputSegs.length ? inputSegs : [latlngs];
   const alignedSegs = [];
   for (const source of sourceSegs) {
-    const thinned = thinTrailPoints(source, 18);
+    const thinned = thinTrailPoints(
+      source,
+      breakOpts.actualRoute ? (isCoachTrailOperator(breakOpts.operator) ? 120 : 80) : 18,
+    );
     if (thinned.length < 2) continue;
-    const chunkSize = 40;
+    const chunkSize = breakOpts.actualRoute ? 10 : 40;
     const chunkParts = [];
     for (let i = 0; i < thinned.length; i += chunkSize - 1) {
       const chunk = thinned.slice(i, i + chunkSize);
@@ -14391,18 +14396,17 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
       const alignOpts = { ...breakOpts, coach, staffs };
       try {
         if (actualRoute) {
-          // Diverted services: preserve the recorded GPS sequence, but use the
-          // road-stitch matcher first so sparse actual routes do not become
-          // straight chords while OSRM is matching.
+          // Diverted services: match the recorded GPS sequence in small chunks
+          // first; this is faster and more reliable than one long trace.
           const thinned = thinTrailPoints(flat, 55);
-          aligned = await stitchTrailViaOsrmRoutes(
-            thinned.length >= 2 ? thinned : flat,
-            signal,
-            { ...alignOpts, actualRoute: true },
-          );
+          aligned = await matchTrailViaOsrm(thinned.length >= 2 ? thinned : flat, signal, alignOpts);
           segs = trailSegmentsOf(aligned, alignOpts);
           if (!segs.length) {
-            aligned = await matchTrailViaOsrm(thinned.length >= 2 ? thinned : flat, signal, alignOpts);
+            aligned = await stitchTrailViaOsrmRoutes(
+              thinned.length >= 2 ? thinned : flat,
+              signal,
+              { ...alignOpts, actualRoute: true },
+            );
             segs = trailSegmentsOf(aligned, alignOpts);
           }
         } else if (coach) {
