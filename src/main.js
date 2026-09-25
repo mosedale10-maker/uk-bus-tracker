@@ -796,7 +796,7 @@ let lastPaintAt = 0;
 let lastPaintRequestAt = 0;
 let lastPaintViewKey = "";
 const PAINT_REFRESH_MS = 60_000;
-const PAINT_MOVE_REFRESH_MS = 15_000;
+const PAINT_MOVE_REFRESH_MS = 4_000;
 const PAINT_STAFF_RETRY_MS = 30_000;
 /** Never let a slow /api/bt-paint hold the first render — it merges when it lands. */
 const PAINT_RENDER_DEADLINE_MS = 2500;
@@ -13537,8 +13537,7 @@ async function loadBuses({ replace = false } = {}) {
       (paintViewChanged && paintAgeMs >= PAINT_MOVE_REFRESH_MS);
     const paintRetryAllowed =
       !Number.isFinite(paintRequestAgeMs) ||
-      paintRequestAgeMs >=
-        (paintViewUncovered ? 2_000 : paintViewChanged ? 10_000 : 30_000);
+      paintRequestAgeMs >= (paintViewUncovered ? 1_500 : paintViewChanged ? 2_500 : 30_000);
     const wantPaint =
       paintRetryAllowed && (paintDue || (staffsNeedPaint && paintAgeMs >= PAINT_STAFF_RETRY_MS));
     if (wantPaint) {
