@@ -6206,7 +6206,12 @@ async function expandCoachTrailKeys(keys, { operator = "", line = "", reg = "", 
   const vid = String(vehicleId || "").trim();
   if (plate) out.add(regTrailKey(plate));
   if (vid && /^\d+$/.test(vid)) out.add(vid);
-  if (jid) out.add(`jny:${jid}`);
+  if (jid) {
+    out.add(`jny:${jid}`);
+    // The recorder stores anonymous coach samples under coach:<journey id>.
+    // This fallback is essential when Flix/NATX omit the registration.
+    out.add(`coach:${jid}`);
+  }
   if (tid) out.add(`trip:${tid}`);
 
   try {
@@ -11555,8 +11560,13 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
     historyLineFilter:
       extra.historyLineFilter || (scfc ? normalizeStokeFcLine(line) : extra.line || line || ""),
   };
+  const noRegCoachReplay =
+    !reg &&
+    (isFlixBus(bus) || isNationalExpress(bus)) &&
+    Boolean(bus.id || bus.journey_id || extra.trailKey);
   const hideLiveReplay =
-    isCoachTrailOperator(trailOperatorForBus(bus)) || isStaffsLiveBus(bus, historyExtra);
+    !noRegCoachReplay &&
+    (isCoachTrailOperator(trailOperatorForBus(bus)) || isStaffsLiveBus(bus, historyExtra));
 
   return `
     <div class="popup-card${sidePanel ? " is-side-panel" : ""}">

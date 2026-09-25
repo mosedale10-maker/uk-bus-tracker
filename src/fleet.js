@@ -2165,13 +2165,18 @@ const vehicleReplayInflight = new Map();
 /** Trail-store keys used to find a vehicle's recent GPS runs. */
 function vehicleReplayTrailKeys(vehicle = {}) {
   const id = String(vehicle.id || "").trim();
+  const journeyId = String(vehicle.journey_id || vehicle.journeyId || vehicle.lastRoute?.journeyId || "").trim();
   const reg = compactQuery(vehicle.reg);
   const noc = String(vehicle.operator?.noc || vehicle.operator?.id || "").trim().toUpperCase();
+  const coach = noc === "FLIX" || noc === "NATX";
   const keys = [
     id,
     /^\d+$/.test(id) ? `jny:${id}` : "",
+    journeyId,
+    journeyId ? `jny:${journeyId}` : "",
     reg ? `reg:${reg}` : "",
-    ["FLIX", "NATX"].includes(noc) && id && !id.startsWith("coach:") ? `coach:${id}` : "",
+    coach && journeyId ? `coach:${journeyId}` : "",
+    coach && id && !id.startsWith("coach:") ? `coach:${id}` : "",
   ];
   // First/BODS recorders commonly use a normalised BODS vehicle key as well as reg:.
   if (noc && /^[A-Z]{2}\d{2}[A-Z]{3}$/.test(reg)) {
@@ -4665,6 +4670,7 @@ export function createFleetBrowser({
                         ? `<button type="button" class="fleet-link-btn fleet-list-map" data-action="play-journey" ${fleetMapDataAttrs({
                             vehicleId: v.id,
                             trailKey: v.id,
+                            journeyId: v.journey_id || v.journeyId || "",
                             reg: v.reg || "",
                             line: route,
                             operator: op.noc || "",
@@ -4678,6 +4684,7 @@ export function createFleetBrowser({
                         ? `<button type="button" class="fleet-link-btn fleet-list-replay" data-action="play-journey" data-replay="1" data-replay-recorded="1" ${fleetMapDataAttrs({
                             vehicleId: v.id || "",
                             trailKey: v.id || `reg:${compactQuery(v.reg)}`,
+                            journeyId: v.journey_id || v.journeyId || "",
                             reg: v.reg || "",
                             line: route,
                             operator: op.noc || "",
@@ -4920,7 +4927,7 @@ export function createFleetBrowser({
                 const when =
                   v.lastRoute?.trackedAt || state.journeys?.[0]?.datetime || "";
                 const tripId = state.journeys?.[0]?.trip_id || "";
-                const journeyId = state.journeys?.[0]?.id || "";
+                const journeyId = state.journeys?.[0]?.id || v.journey_id || v.journeyId || "";
                 const direction =
                   state.journeys?.[0]?.direction || v.lastRoute?.direction || "";
                 return `<button type="button" class="fleet-link-btn" data-action="show-route-tails" data-line="${esc(route)}" data-operator="${esc(v.operator?.id || v.operator?.noc || state.operator?.noc || "")}" data-vehicle-id="${esc(v.id)}" data-trail-key="${esc(v.id)}" data-reg="${esc(v.reg || "")}" data-dest="${esc(dest)}" data-datetime="${esc(when)}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(journeyId)}" data-direction="${esc(normalizeFleetDirection(direction))}" data-live="1">Map · this bus</button>`;
@@ -5128,7 +5135,10 @@ export function createFleetBrowser({
   async function loadVehicleReplayRuns(vehicle, token = vehicleLoadToken) {
     const id = String(vehicle?.id || "").trim();
     const reg = String(vehicle?.reg || "").trim();
-    if (!id && !reg) {
+    const journeyId = String(vehicle?.journey_id || vehicle?.journeyId || "").trim();
+    const noc = String(vehicle?.operator?.noc || vehicle?.operator?.id || "").trim().toUpperCase();
+    const coachIdentity = (noc === "FLIX" || noc === "NATX") && journeyId;
+    if (!id && !reg && !coachIdentity) {
       state.replayRuns = [];
       state.replayRunsLoading = false;
       state.replayRunsError = "This vehicle has no replay identity yet.";
@@ -5645,6 +5655,7 @@ export function createFleetBrowser({
     const line = seed.line || seed.lastRoute?.route || "";
     return {
       id: id || seed.id || "",
+      journey_id: String(seed.journey_id || seed.journeyId || seed.lastRoute?.journeyId || ""),
       reg: plate,
       fleet_code: fleetCode,
       fleet_number: fleetCode,
@@ -6020,6 +6031,22 @@ export function createFleetBrowser({
           noc: "FLIX",
           id: vehicle.operator?.id || "FLIX",
         };
+      }
+
+      // NATX/Flix AVL often omits the plate. Preserve the live journey identity
+      // so recorded GPS playback can still be found by its coach trail key.
+      const liveCoachNoc = String(
+        liveBus?.operator?.noc || liveBus?._bods?.operator || vehicle.operator?.noc || vehicle.operator?.id || "",
+      ).toUpperCase();
+      if (liveCoachNoc === "FLIX" || liveCoachNoc === "NATX") {
+        const liveJourneyId = String(
+          liveBus?.journey_id ||
+            liveBus?.journeyId ||
+            (liveCoachNoc === "FLIX" ? liveBus?.id : ""),
+        ).trim();
+        if (liveJourneyId) {
+          vehicle = { ...vehicle, journey_id: vehicle.journey_id || liveJourneyId };
+        }
       }
 
       state.view = "vehicle";
