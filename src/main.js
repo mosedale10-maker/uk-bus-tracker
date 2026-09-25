@@ -2920,6 +2920,7 @@ const pinnedTrailAlignGen = new Map();
 const pinnedTrailAlignBusy = new Map();
 const pinnedTrailAlignWanted = new Map();
 const pinnedLiveRouteStates = new Map();
+const livePlannedProgress = new Map();
 const LIVE_ROUTE_RESET_GAP_MS = 15 * 60_000;
 const trailUploadQueue = new Map(); // key -> points[]
 let trailUploadTimer = null;
@@ -5260,6 +5261,55 @@ function clipGpsPointsAtPing(gpsPoints, ping) {
   return out;
 }
 
+function plannedPathProgressAtPing(path, ping, previous = -1) {
+  const segments = asTrailLatLngs(path);
+  const points = segments.flat();
+  if (points.length < 2 || !ping || !Number.isFinite(Number(ping.lat)) || !Number.isFinite(Number(ping.lng))) {
+    return -1;
+  }
+  const hasPrevious = Number.isFinite(Number(previous)) && Number(previous) >= 0;
+  const start = hasPrevious ? Math.max(0, Number(previous) - 80) : 0;
+  const end = hasPrevious ? Math.min(points.length - 1, Number(previous) + 180) : points.length - 1;
+  let bestIndex = -1;
+  let bestDistance = Infinity;
+  for (let i = start; i <= end; i += 1) {
+    const distance = haversineMeters(points[i][0], points[i][1], Number(ping.lat), Number(ping.lng));
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = i;
+    }
+  }
+  if (bestIndex < 0 && hasPrevious) return plannedPathProgressAtPing(path, ping, -1);
+  return bestIndex;
+}
+
+function clipTrailPathAtProgress(path, progress, ping) {
+  const segments = asTrailLatLngs(path);
+  if (!segments.length) return [];
+  const maxProgress = segments.reduce((sum, segment) => sum + Math.max(0, segment.length - 1), 0);
+  const target = Number.isFinite(Number(progress))
+    ? Math.max(0, Math.min(maxProgress, Math.round(Number(progress))))
+    : maxProgress;
+  const out = [];
+  let consumed = 0;
+  for (const segment of segments) {
+    const segmentLength = Math.max(0, segment.length - 1);
+    if (target >= consumed + segmentLength) {
+      out.push(segment.slice());
+      consumed += segmentLength;
+      continue;
+    }
+    const within = Math.max(0, Math.min(segmentLength, target - consumed));
+    const tail = segment.slice(0, within + 1);
+    if (ping && Number.isFinite(Number(ping.lat)) && Number.isFinite(Number(ping.lng))) {
+      tail.push([Number(ping.lat), Number(ping.lng)]);
+    }
+    if (tail.length >= 2) out.push(tail);
+    break;
+  }
+  return out.filter((segment) => segment.length >= 2);
+}
+
 /**
  * First Potteries publishes a dense, road-shaped track for each timetable
  * trip. Use the current trip's track as a guide for a live tail instead of
@@ -5273,8 +5323,13 @@ function liveFirstPotteriesGuidePath(filter = {}, gpsPoints = [], ping = null) {
   if (planned.length < 2 || !ping || !Number.isFinite(Number(ping.lat)) || !Number.isFinite(Number(ping.lng))) {
     return null;
   }
-  const clipped = clipTrailPathAtPing(planned, ping, { failClosed: false });
+  const progressKey = String(
+    filter.liveTrailKey || filter.trailKey || filter.liveReg || filter.reg || "fpot-live",
+  );
+  const progress = plannedPathProgressAtPing(planned, ping, livePlannedProgress.get(progressKey));
+  const clipped = clipTrailPathAtProgress(planned, progress, ping);
   if (flattenTrailLatLngs(clipped).length < 2) return null;
+  livePlannedProgress.set(progressKey, progress);
   const evidence = routeDeviationEvidence({
     plannedPath: planned,
     gpsPoints,
@@ -5408,6 +5463,12 @@ function refreshPinnedTrailLine(key) {
   }
   const existing = pinnedTrailLines.get(id);
   if (flattenTrailLatLngs(path).length < 2) {
+    if (existing && (filter.live || filter.follow)) {
+      // A poll can briefly lose the recorder/merge or arrive with a marker
+      // timestamp just ahead of the GPS. Keep the last continuous tail rather
+      // than deleting it and making the line appear to restart from zero.
+      return;
+    }
     if (existing) {
       removeTrailPair(existing, liveTrailLayer);
       pinnedTrailLines.delete(id);
@@ -5517,8 +5578,10 @@ function refreshLiveTrailLine(key) {
   const path = plannedGuidePath || pathFromGpsPoints(gpsPoints);
   if (flattenTrailLatLngs(path).length < 2) {
     if (liveTrailLine) {
-      removeTrailPair(liveTrailLine, liveTrailLayer);
-      liveTrailLine = null;
+      // Keep the last good live stroke through a sparse/misaligned poll. A
+      // real journey change is handled by the pin reset, not by a transient
+      // empty GPS window.
+      return;
     }
     liveTrailAlignGen += 1;
     liveTrailAlignWanted = null;
@@ -6502,20 +6565,27 @@ function updatePinnedLiveRouteForBus(bus, trailMeta = {}) {
   for (const [key, state] of pinnedLiveRouteStates.entries()) {
     if (!liveRouteStateMatchesBus(state, bus, reg)) continue;
     const lineChanged = Boolean(state.line && line && !sameServiceLine(state.line, line));
-    const directionChanged = Boolean(state.direction && direction && state.direction !== direction);
+    const directionFlap = Boolean(state.direction && direction && state.direction !== direction);
     const previousPlannedTrip = String(pinnedTrailFilters.get(key)?.plannedTripId || "").trim();
-    const tripChanged = Boolean(
+    const tripFlap = Boolean(
       (state.tripId && tripId && state.tripId !== tripId) ||
         (previousPlannedTrip && tripId && previousPlannedTrip !== tripId),
     );
-    const destinationChanged = Boolean(
+    const destinationFlap = Boolean(
       !state.tripId &&
       !tripId &&
       state.destination &&
       destination &&
       state.destination !== destination,
     );
-    const gapReset = Boolean(state.lastT && now - state.lastT > LIVE_ROUTE_RESET_GAP_MS);
+    const sinceLast = state.lastT ? now - state.lastT : Number.POSITIVE_INFINITY;
+    // BODS and the recorder commonly flap direction/trip metadata at stops.
+    // Only treat a sustained change as a new journey; a short flap must not
+    // discard the accumulated start-to-current tail.
+    const directionChanged = directionFlap && sinceLast >= 45_000;
+    const tripChanged = tripFlap && (sinceLast >= 45_000 || lineChanged);
+    const destinationChanged = destinationFlap && sinceLast >= 45_000;
+    const gapReset = Boolean(state.lastT && sinceLast > LIVE_ROUTE_RESET_GAP_MS);
     if (lineChanged || directionChanged || tripChanged || destinationChanged || gapReset) {
       const filter = {
         ...(pinnedTrailFilters.get(key) || {}),
@@ -6543,6 +6613,7 @@ function updatePinnedLiveRouteForBus(bus, trailMeta = {}) {
       pinnedTrailLines.delete(key);
       pinnedTrailAlignGen.set(key, (pinnedTrailAlignGen.get(key) || 0) + 1);
       pinnedTrailAlignWanted.delete(key);
+      livePlannedProgress.delete(String(key));
       state.line = line || state.line;
       state.direction = direction || state.direction;
       state.tripId = tripId || state.tripId;
@@ -6581,11 +6652,8 @@ function updatePinnedLiveRouteForBus(bus, trailMeta = {}) {
           .catch(() => {});
       }
     } else {
-      state.line = line || state.line;
-      state.direction = direction || state.direction;
-      state.tripId = tripId || state.tripId;
-      state.journeyId = journeyId || state.journeyId;
-      state.destination = destination || state.destination;
+      // Keep the last committed route identity while a short metadata flap is
+      // being ignored. A sustained change will trip the boundary check above.
       state.lastT = now;
       // A live tail must be re-clipped to the marker's newest position even
       // when this poll was too small to add a new GPS point.
@@ -6795,6 +6863,7 @@ function clearPinnedTrails() {
   pinnedTrailKeys.clear();
   pinnedTrailFilters.clear();
   pinnedLiveRouteStates.clear();
+  livePlannedProgress.clear();
   multiTailActiveGroup = null;
   updatePlaybackChrome();
 }
