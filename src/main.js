@@ -4384,7 +4384,7 @@ function distanceToTrailPath(point, path) {
  * curve can be hundreds of metres from a straight stop-to-stop chord without
  * being a diversion. Dense track geometry can use the tighter threshold.
  */
-function routeDeviationEvidence({ plannedPath, gpsPoints = [], livePing = null } = {}) {
+function routeDeviationEvidence({ plannedPath, gpsPoints = [], livePing = null, fullRun = false } = {}) {
   const path = flattenTrailLatLngs(plannedPath);
   const points = normalizeGpsTrailPoints(gpsPoints).filter(
     (point) => Number.isFinite(point.lat) && Number.isFinite(point.lng),
@@ -4415,9 +4415,11 @@ function routeDeviationEvidence({ plannedPath, gpsPoints = [], livePing = null }
     ping &&
     (!lastPoint.t || !ping.t || Math.abs(ping.t - lastPoint.t) <= 10 * 60_000);
   const anchor = usePing ? ping : lastPoint;
-  const recent = points
-    .filter((point) => !anchor.t || !point.t || point.t >= anchor.t - 20 * 60_000)
-    .slice(-6);
+  const recent = fullRun
+    ? points
+    : points
+        .filter((point) => !anchor.t || !point.t || point.t >= anchor.t - 20 * 60_000)
+        .slice(-6);
   const samples = recent.length ? recent : [lastPoint];
   const distances = samples.map((point) => distanceToTrailPath(point, path));
   const currentDistanceM = distanceToTrailPath(anchor, path);
@@ -4426,13 +4428,39 @@ function routeDeviationEvidence({ plannedPath, gpsPoints = [], livePing = null }
   const medianDistanceM = sortedDistances.length
     ? sortedDistances[Math.floor(sortedDistances.length / 2)]
     : Infinity;
-  const enoughSamples = samples.length >= 2;
-  const detected = enoughSamples
-    ? currentDistanceM >= offRouteLimitM &&
-      offRoutePoints >= Math.min(2, samples.length) &&
-      medianDistanceM >= offRouteLimitM
-    : currentDistanceM >= singlePointLimitM;
-  return { detected, currentDistanceM, offRoutePoints, medianDistanceM, sparse };
+  const maxDistanceM = distances.length ? Math.max(...distances) : Infinity;
+  let offRouteRun = 0;
+  let maxOffRouteRun = 0;
+  for (const distance of distances) {
+    if (distance >= offRouteLimitM) {
+      offRouteRun += 1;
+      maxOffRouteRun = Math.max(maxOffRouteRun, offRouteRun);
+    } else {
+      offRouteRun = 0;
+    }
+  }
+  const enoughSamples = samples.length >= (fullRun ? 3 : 2);
+  const fullRunDetected = fullRun
+    ? maxOffRouteRun >= (sparse ? 3 : 2) &&
+      offRoutePoints >= Math.max(sparse ? 3 : 2, Math.ceil(samples.length * 0.03)) &&
+      maxDistanceM >= offRouteLimitM * 1.5
+    : false;
+  const detected = fullRun
+    ? fullRunDetected
+    : enoughSamples
+      ? currentDistanceM >= offRouteLimitM &&
+        offRoutePoints >= Math.min(2, samples.length) &&
+        medianDistanceM >= offRouteLimitM
+      : currentDistanceM >= singlePointLimitM;
+  return {
+    detected,
+    currentDistanceM,
+    offRoutePoints,
+    medianDistanceM,
+    maxDistanceM,
+    maxOffRouteRun,
+    sparse,
+  };
 }
 
 /**
@@ -7130,6 +7158,7 @@ async function startRoutePlayback({
           plannedPath: tripPath,
           gpsPoints: trackedGps,
           livePing: currentLivePing,
+          fullRun: preserveRecordedRun || historicalPlayback,
         })
       : null;
   const quickSpatialDeviation = Boolean(
@@ -7174,12 +7203,16 @@ async function startRoutePlayback({
   if (
     !plannedPath.length &&
     !actualRouteRequired &&
+    !plannedPathBlocked &&
     usesPlannedRouteOverride(line, operator) &&
     !hasRecordedGps &&
     tripPath.length >= 2
   ) {
     plannedPath = tripPath;
   }
+  // An active road notice invalidates the planned alignment just like a
+  // confirmed diversion; use the recorded GPS path and road matcher instead.
+  const effectiveActualRoute = actualRouteRequired || plannedPathBlocked;
   const plannedReplayPoints = plannedPath.length >= 2
     ? plannedPathReplayPoints(plannedPath, {
         startMs: trip?.startMs || aroundMs || Date.now(),
@@ -7198,7 +7231,7 @@ async function startRoutePlayback({
   if (autoReplay && !plannedPath) usingTracked = hasRecordedGps;
   let path = plannedPath.length >= 2
     ? plannedPath
-    : actualRouteRequired
+    : effectiveActualRoute
       ? tracked
       : replayOnly
         ? tracked
@@ -7223,7 +7256,7 @@ async function startRoutePlayback({
     path = tracked;
     usingTracked = path.length >= 2;
   }
-  if (actualRouteRequired && tracked.length < 2) {
+  if (effectiveActualRoute && tracked.length < 2) {
     showMessage(
       "This journey is diverted, but no recorded GPS is available yet — the planned route will not be shown",
     );
@@ -7250,7 +7283,7 @@ async function startRoutePlayback({
     line: lineName,
     coach: coachOp || isCoachTrailOperator(operator),
     staffs: isStaffsTrailOperator(operator) || isAltonLine(lineName),
-    actualRoute: actualRouteRequired,
+    actualRoute: effectiveActualRoute,
     plannedRoute: plannedPath.length >= 2 || (usesPlannedRouteOverride(line, operator) && !usingTracked),
   };
 
@@ -7317,7 +7350,7 @@ async function startRoutePlayback({
         baseKey: liveKey || resolvedTripId || tripId || safeJourneyId || "hist",
         line: lineName,
         operator,
-        actualRoute: actualRouteRequired,
+        actualRoute: effectiveActualRoute,
       });
       multiTailActiveGroup = {
         id: `hist:${playKey}`,
@@ -7359,7 +7392,7 @@ async function startRoutePlayback({
         live: true,
         liveFocus: false,
         livePing: currentLivePing || lastPing,
-        diverted: actualRouteRequired,
+        diverted: effectiveActualRoute,
       });
       const pinned = pinnedTrailLines.get(liveKey) || pinnedTrailLines.get(String(vehicleId || ""));
       if (pinned?.line) {
@@ -7442,7 +7475,7 @@ async function startRoutePlayback({
     tracked: Boolean(usingTracked),
     showTail: Boolean(usingTracked || plannedPath.length >= 2),
     stops: tripStops,
-    diverted: actualRouteRequired,
+    diverted: effectiveActualRoute,
     operator: opName,
     headsign,
     date: journeyDate,
@@ -7461,7 +7494,7 @@ async function startRoutePlayback({
       dest,
       datetime,
       showTail: true,
-      diverted: actualRouteRequired,
+      diverted: effectiveActualRoute,
       autoReplay,
       recordedReplay: requestedRecordedReplay,
       live: !isHistorical,
@@ -7471,7 +7504,7 @@ async function startRoutePlayback({
   // Offer a true GPS replay when we recorded pings for this journey. A live
   // replay must never fall back to the un-clipped allGps window.
   const useLiveGpsReplay =
-    coachPlayback && actualRouteRequired && !preserveRecordedRun && trackedGps.length >= 2;
+    coachPlayback && effectiveActualRoute && !preserveRecordedRun && trackedGps.length >= 2;
   let replayPoints = useLiveGpsReplay
     ? trackedGps
     : plannedReplayPoints.length >= 2
@@ -7491,17 +7524,25 @@ async function startRoutePlayback({
         : tracked;
     let roadPath = [];
     let roadTimeout = 0;
+    const roadTimeoutMs =
+      effectiveActualRoute || roadBreak.staffs ? 10_000 : 5_000;
     try {
       roadPath = await Promise.race([
         prepareRoadTrail(roadSource, undefined, alignBreak),
         new Promise((resolve) => {
-          roadTimeout = setTimeout(() => resolve(null), 3500);
+          roadTimeout = setTimeout(() => resolve(null), roadTimeoutMs);
         }),
       ]) || [];
     } catch {
       roadPath = [];
     } finally {
       if (roadTimeout) clearTimeout(roadTimeout);
+    }
+    // Keep a usable road-snapped replay while a larger OSRM match is pending
+    // or unavailable. Never fall back to the raw GPS chord for an actual route.
+    if (flattenTrailLatLngs(roadPath).length < 2) {
+      const localRoadPath = alignTrailToRoadsLocal(roadSource, alignBreak);
+      if (flattenTrailLatLngs(localRoadPath).length >= 2) roadPath = localRoadPath;
     }
     const replayRoadPath = Array.isArray(roadPath?.[0]?.[0])
       ? roadPath
@@ -7577,6 +7618,7 @@ async function startRoutePlayback({
           plannedPath: deviationPath,
           gpsPoints: trackedGps,
           livePing: clipPing,
+          fullRun: preserveRecordedRun || historicalPlayback,
         });
         if (
           !actualRouteRequired &&
@@ -14321,11 +14363,20 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
       const alignOpts = { ...breakOpts, coach, staffs };
       try {
         if (actualRoute) {
-          // Diverted services: match the recorded GPS sequence itself. Do not
-          // replace a real diversion with a route inferred between sparse pings.
+          // Diverted services: preserve the recorded GPS sequence, but use the
+          // road-stitch matcher first so sparse actual routes do not become
+          // straight chords while OSRM is matching.
           const thinned = thinTrailPoints(flat, 55);
-          aligned = await matchTrailViaOsrm(thinned.length >= 2 ? thinned : flat, signal, alignOpts);
+          aligned = await stitchTrailViaOsrmRoutes(
+            thinned.length >= 2 ? thinned : flat,
+            signal,
+            { ...alignOpts, actualRoute: true },
+          );
           segs = trailSegmentsOf(aligned, alignOpts);
+          if (!segs.length) {
+            aligned = await matchTrailViaOsrm(thinned.length >= 2 ? thinned : flat, signal, alignOpts);
+            segs = trailSegmentsOf(aligned, alignOpts);
+          }
         } else if (coach) {
           // Flix / NATX: route-stitch first so sparse motorway AVL stays on roads.
           const thinned = thinTrailPoints(flat, 160);
