@@ -3106,6 +3106,18 @@ html.map-night .leaflet-control-container {
   font-weight: 650;
 }
 
+.popup-simon-note {
+  margin: 1px 0 2px !important;
+  padding: 6px 8px;
+  border: 1px solid rgba(251, 191, 36, 0.38);
+  border-radius: 7px;
+  background: rgba(251, 191, 36, 0.1);
+  color: #fde68a;
+  font-size: 0.75rem;
+  font-weight: 750;
+  line-height: 1.3;
+}
+
 .trail-arrow-icon.leaflet-div-icon {
   background: transparent !important;
   border: 0 !important;

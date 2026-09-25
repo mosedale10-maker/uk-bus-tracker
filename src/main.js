@@ -11560,6 +11560,10 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
     historyLineFilter:
       extra.historyLineFilter || (scfc ? normalizeStokeFcLine(line) : extra.line || line || ""),
   };
+  const simonNote =
+    String(line).trim().toUpperCase() === "27" && isDgBusContext({ bus }, extra)
+      ? `<p class="popup-simon-note">Behind the wheel today is the one and only Simon!!</p>`
+      : "";
   const noRegCoachReplay =
     !reg &&
     (isFlixBus(bus) || isNationalExpress(bus)) &&
@@ -11594,6 +11598,7 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
           : ""
       }
       ${nis ? (to ? `<div class="popup-meta">Shown as ${esc(to)}</div>` : "") : routeBlock(from, to)}
+      ${simonNote}
       <div class="popup-actions">
         ${followButtonHtml({ bus })}
         ${regAction}
