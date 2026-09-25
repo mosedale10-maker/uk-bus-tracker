@@ -7216,7 +7216,6 @@ async function startRoutePlayback({
   const plannedPathBlocked =
     plannedRouteOverride &&
     tripPath.length >= 2 &&
-    trackedGps.length >= 2 &&
     pathCrossesActiveRoadNotice(tripPath);
   let plannedPath =
     plannedRouteOverride &&
