@@ -2569,6 +2569,7 @@ const trailArrowMarkers = new Set();
 /** Active static route overlay (not animated playback). */
 let playback = null;
 let playbackRequestSeq = 0;
+let playbackDiversionSwitchBusy = false;
 /** Live bus / staff marker shown in the left side panel (replaces the old popup card). */
 let selectedMapMarker = null;
 
@@ -2814,6 +2815,7 @@ function clearMapMarkerSelection({ keepPlayback = false } = {}) {
 }
 
 const TRAIL_STORE_KEY = "uk-bus-trails-v3";
+const PLANNED_ROUTE_STORE_KEY = "uk-bus-planned-routes-v1";
 const TRAIL_MAX_POINTS = 8000;
 const TRAIL_MAX_VEHICLES = 60;
 /** Server + local GPS tails are always kept for this many days (independent of Plus history chips). */
@@ -2920,6 +2922,105 @@ function pruneTrailPoints(points, days = TRAIL_KEEP_DAYS) {
   const kept = start ? normalized.slice(start) : normalized;
   if (kept.length > TRAIL_MAX_POINTS) return kept.slice(kept.length - TRAIL_MAX_POINTS);
   return kept;
+}
+
+const plannedRouteMem = new Map();
+
+function plannedRouteCacheKey({ tripId = "", line = "", operator = "", date = "", destination = "" } = {}) {
+  const trip = String(tripId || "").trim();
+  if (trip) return `trip:${trip}`;
+  const raw = [operator, line, date, destination]
+    .map((value) => String(value || "").trim().toUpperCase())
+    .join("|");
+  let hash = 2166136261;
+  for (let i = 0; i < raw.length; i += 1) {
+    hash ^= raw.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `route:${(hash >>> 0).toString(16)}:${raw.slice(0, 80)}`;
+}
+
+function prunePlannedRouteMem(now = Date.now()) {
+  const cutoff = now - TRAIL_KEEP_DAYS * 86400000;
+  for (const [key, row] of plannedRouteMem) {
+    if (!row || Number(row.savedAt) < cutoff) plannedRouteMem.delete(key);
+  }
+  // Keep local storage bounded even when a user opens many coach trips.
+  while (plannedRouteMem.size > 80) {
+    const oldest = [...plannedRouteMem.entries()].sort((a, b) => a[1].savedAt - b[1].savedAt)[0];
+    if (!oldest) break;
+    plannedRouteMem.delete(oldest[0]);
+  }
+}
+
+function loadPlannedRouteStore() {
+  try {
+    const raw = localStorage.getItem(PLANNED_ROUTE_STORE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== "object") return;
+    for (const [key, row] of Object.entries(data)) {
+      if (!row || !Array.isArray(row.path) || row.path.length < 2) continue;
+      plannedRouteMem.set(String(key), {
+        ...row,
+        path: row.path
+          .map((point) => [Number(point?.[0]), Number(point?.[1])])
+          .filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng)),
+        savedAt: Number(row.savedAt) || 0,
+      });
+    }
+  } catch {
+    /* Ignore an unavailable/corrupt planned-route cache. */
+  }
+  prunePlannedRouteMem();
+}
+
+function persistPlannedRouteMem() {
+  try {
+    const data = Object.fromEntries(plannedRouteMem.entries());
+    localStorage.setItem(PLANNED_ROUTE_STORE_KEY, JSON.stringify(data));
+  } catch {
+    /* Storage is an optimisation; Bustimes remains the source of truth. */
+  }
+}
+
+function rememberPlannedRoute(path, meta = {}) {
+  const flat = flattenTrailLatLngs(path);
+  if (flat.length < 2) return "";
+  const key = plannedRouteCacheKey(meta);
+  const prior = plannedRouteMem.get(key);
+  if (prior?.roadAligned && !meta.roadAligned) return key;
+  const stored = thinTrailPoints(flat, 35).slice(0, 3500);
+  if (stored.length < 2) return "";
+  plannedRouteMem.set(key, {
+    savedAt: Date.now(),
+    roadAligned: Boolean(meta.roadAligned),
+    path: stored,
+    tripId: String(meta.tripId || ""),
+    line: String(meta.line || ""),
+    operator: String(meta.operator || "").trim().toUpperCase(),
+    date: String(meta.date || ""),
+    destination: String(meta.destination || ""),
+  });
+  prunePlannedRouteMem();
+  persistPlannedRouteMem();
+  return key;
+}
+
+function recallPlannedRoute(meta = {}) {
+  prunePlannedRouteMem();
+  const row = plannedRouteMem.get(plannedRouteCacheKey(meta));
+  if (!row || row.diverted || row.path?.length < 2) return [];
+  return row.path.map((point) => [point[0], point[1]]);
+}
+
+function markPlannedRouteDiverted(meta = {}) {
+  const key = plannedRouteCacheKey(meta);
+  const row = plannedRouteMem.get(key);
+  if (!row) return;
+  row.diverted = true;
+  plannedRouteMem.set(key, row);
+  persistPlannedRouteMem();
 }
 
 function trailPointMetaScore(p) {
@@ -4183,6 +4284,78 @@ function plannedPathNeedsRoadMatch(path, breakOpts = {}) {
   return flat.length <= 24 || averageGap > 800;
 }
 
+/** Distance from a GPS point to the nearest segment of a planned/recorded path. */
+function distanceToTrailPath(point, path) {
+  const lat = Number(Array.isArray(point) ? point[0] : point?.lat);
+  const lng = Number(Array.isArray(point) ? point[1] : point?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return Infinity;
+  const flat = flattenTrailLatLngs(path);
+  if (flat.length < 2) return Infinity;
+  let best = Infinity;
+  for (let i = 1; i < flat.length; i += 1) {
+    const distance = distPointToSegmentMeters([lat, lng], flat[i - 1], flat[i]);
+    if (distance < best) best = distance;
+  }
+  return best;
+}
+
+/**
+ * Detect a bus that has clearly left the scheduled alignment. This is
+ * deliberately conservative for sparse stop-only Bustimes paths: a motorway
+ * curve can be hundreds of metres from a straight stop-to-stop chord without
+ * being a diversion. Dense track geometry can use the tighter threshold.
+ */
+function routeDeviationEvidence({ plannedPath, gpsPoints = [], livePing = null } = {}) {
+  const path = flattenTrailLatLngs(plannedPath);
+  const points = normalizeGpsTrailPoints(gpsPoints).filter(
+    (point) => Number.isFinite(point.lat) && Number.isFinite(point.lng),
+  );
+  if (path.length < 2 || !points.length) {
+    return { detected: false, currentDistanceM: Infinity, offRoutePoints: 0, sparse: false };
+  }
+
+  const gaps = [];
+  for (let i = 1; i < path.length; i += 1) {
+    gaps.push(haversineMeters(path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]));
+  }
+  const averageGap = gaps.length ? gaps.reduce((sum, value) => sum + value, 0) / gaps.length : 0;
+  const sparse = path.length <= 24 || averageGap > 800;
+  // A dense published track can be compared tightly. A sparse stop list needs
+  // a much larger margin so an ordinary road curve is not called a diversion.
+  const offRouteLimitM = sparse ? 650 : 180;
+  const singlePointLimitM = sparse ? 1100 : 420;
+  const lastPoint = points[points.length - 1];
+  const ping = livePing && Number.isFinite(Number(livePing.lat)) && Number.isFinite(Number(livePing.lng))
+    ? {
+        lat: Number(livePing.lat),
+        lng: Number(livePing.lng),
+        t: Number(livePing.t),
+      }
+    : null;
+  const usePing =
+    ping &&
+    (!lastPoint.t || !ping.t || Math.abs(ping.t - lastPoint.t) <= 10 * 60_000);
+  const anchor = usePing ? ping : lastPoint;
+  const recent = points
+    .filter((point) => !anchor.t || !point.t || point.t >= anchor.t - 20 * 60_000)
+    .slice(-6);
+  const samples = recent.length ? recent : [lastPoint];
+  const distances = samples.map((point) => distanceToTrailPath(point, path));
+  const currentDistanceM = distanceToTrailPath(anchor, path);
+  const offRoutePoints = distances.filter((distance) => distance >= offRouteLimitM).length;
+  const sortedDistances = distances.filter(Number.isFinite).sort((a, b) => a - b);
+  const medianDistanceM = sortedDistances.length
+    ? sortedDistances[Math.floor(sortedDistances.length / 2)]
+    : Infinity;
+  const enoughSamples = samples.length >= 2;
+  const detected = enoughSamples
+    ? currentDistanceM >= offRouteLimitM &&
+      offRoutePoints >= Math.min(2, samples.length) &&
+      medianDistanceM >= offRouteLimitM
+    : currentDistanceM >= singlePointLimitM;
+  return { detected, currentDistanceM, offRoutePoints, medianDistanceM, sparse };
+}
+
 /**
  * Prefer road-matched geometry. Never draw raw GPS chords while road matching
  * is pending: a sparse GPS sample can cut across fields and look like a false
@@ -4210,25 +4383,32 @@ function gpsTimeAtPathFraction(gpsPts, frac) {
   const pts = normalizeGpsTrailPoints(gpsPts);
   if (!pts.length) return null;
   if (pts.length === 1) return Number.isFinite(pts[0].t) ? pts[0].t : null;
-  let total = 0;
-  const edges = [];
+  const cumulative = [0];
   for (let i = 1; i < pts.length; i += 1) {
-    const d = haversineMeters(pts[i - 1].lat, pts[i - 1].lng, pts[i].lat, pts[i].lng);
-    total += Math.max(d, 0);
-    edges.push({ d: Math.max(d, 0), a: pts[i - 1], b: pts[i] });
+    cumulative[i] =
+      cumulative[i - 1] +
+      Math.max(
+        0,
+        haversineMeters(pts[i - 1].lat, pts[i - 1].lng, pts[i].lat, pts[i].lng),
+      );
   }
+  const total = cumulative[cumulative.length - 1];
   if (!(total > 0)) {
     return Number.isFinite(pts[pts.length - 1].t) ? pts[pts.length - 1].t : pts[0].t;
   }
-  let target = Math.max(0, Math.min(1, frac)) * total;
-  for (const edge of edges) {
-    if (target <= edge.d) {
-      const t = edge.d > 0 ? target / edge.d : 0;
-      return interpolateTrailTime(edge.a, edge.b, t);
-    }
-    target -= edge.d;
+  const target = Math.max(0, Math.min(1, Number.isFinite(frac) ? frac : 0)) * total;
+  let lo = 1;
+  let hi = cumulative.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (cumulative[mid] < target) lo = mid + 1;
+    else hi = mid - 1;
   }
-  return Number.isFinite(pts[pts.length - 1].t) ? pts[pts.length - 1].t : null;
+  const right = Math.max(1, Math.min(cumulative.length - 1, lo));
+  const left = right - 1;
+  const edgeLength = cumulative[right] - cumulative[left];
+  const portion = edgeLength > 0 ? (target - cumulative[left]) / edgeLength : 0;
+  return interpolateTrailTime(pts[left], pts[right], portion);
 }
 
 /** Direction arrows along the drawn (road-aligned) path — never raw GPS chords across fields. */
@@ -4942,6 +5122,21 @@ function refreshLiveTrailLine(key) {
   let gpsPoints = trackedPointsFor(key, filter);
   const ping = livePingForTrailFilter(filter, gpsPoints);
   gpsPoints = clipGpsPointsAtPing(gpsPoints, ping);
+  const playbackDeviation =
+    playback &&
+    !playback.diverted &&
+    Array.isArray(playback.plannedPath) &&
+    playback.plannedPath.length >= 2 &&
+    isCoachTrailOperator(breakOpts.operator)
+      ? routeDeviationEvidence({
+          plannedPath: playback.plannedPath,
+          gpsPoints,
+          livePing: ping,
+        })
+      : null;
+  if (playbackDeviation?.detected && !playbackDeviation.sparse) {
+    switchPlaybackToActualRoute();
+  }
   const path = pathFromGpsPoints(gpsPoints);
   if (path.length < 2) {
     if (liveTrailLine) {
@@ -5101,7 +5296,16 @@ async function fetchPlannedRoutePath({
       new Promise((resolve) => setTimeout(() => resolve(null), 4500)),
     ]);
     const candidatePath = Array.isArray(trip?.path) ? thinTrailPoints(trip.path, 55) : [];
-    if (candidatePath.length >= 2) return candidatePath;
+    if (candidatePath.length >= 2) {
+       rememberPlannedRoute(candidatePath, {
+         tripId: candidateTrip,
+         line: code,
+         operator: opCode,
+         date: String(plannedDate || v.datetime || v.recordedAtTime || routeDate).slice(0, 10),
+         destination: v.destination || v.dest || "",
+       });
+       return candidatePath;
+     }
   }
   return [];
 }
@@ -5879,6 +6083,7 @@ function refreshObservedStopTimes(marker, { force = false } = {}) {
 }
 
 loadTrailStore();
+loadPlannedRouteStore();
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") {
     saveMapView();
@@ -6252,8 +6457,17 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
   restoreGpsReplayLayers();
   if (plannedAheadPath) drawPlannedRouteAhead(plannedAheadPath, playbackLayer, alignBreak);
   const flat = flattenTrailLatLngs(drawPath);
-  if (flat.length < 2) return;
-  if (!usingTracked && !replayOnly) {
+  if (flat.length < 2 && !plannedAheadPath) return;
+  // For a live coach, the green line is the recorded GPS tail rendered in
+  // liveTrailLayer. Never paint the planned Bustimes path a second time as a
+  // green "tail" — that made a diverted coach appear to stick to the schedule.
+  const plannedLiveCoachTail = Boolean(
+    plannedAheadPath &&
+    isCoachTrailOperator(alignBreak.operator) &&
+    !isHistorical &&
+    !replayOnly,
+  );
+  if (!plannedLiveCoachTail && !usingTracked && !replayOnly && flat.length >= 2) {
     const arrowGps =
       trackedGps.length >= 2
         ? normalizeGpsTrailPoints(trackedGps)
@@ -6346,6 +6560,44 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
   restoreGpsReplayLayers();
 }
 
+/**
+ * A planned route can become wrong while a coach is already being followed.
+ * Rebuild the same journey as an actual/diverted GPS route rather than leaving
+ * the scheduled line stuck to the map. The request arguments are captured on
+ * playback so direction, identity and history/replay mode are preserved.
+ */
+function switchPlaybackToActualRoute() {
+  const current = playback;
+  if (
+    !current ||
+    current.diverted ||
+    playbackDiversionSwitchBusy ||
+    !current.requestArgs
+  ) {
+    return false;
+  }
+  playbackDiversionSwitchBusy = true;
+  markPlannedRouteDiverted(current.requestArgs);
+  const args = {
+    ...current.requestArgs,
+    diverted: true,
+    autoReplay: Boolean(current.requestArgs.autoReplay),
+    recordedReplay: Boolean(current.requestArgs.recordedReplay),
+  };
+  try {
+    stopRoutePlayback("", { clearTail: true, invalidatePending: false });
+    startRoutePlayback(args)
+      .catch(() => {})
+      .finally(() => {
+        playbackDiversionSwitchBusy = false;
+      });
+  } catch {
+    playbackDiversionSwitchBusy = false;
+    return false;
+  }
+  return true;
+}
+
 async function startRoutePlayback({
   tripId,
   journeyId = "",
@@ -6382,7 +6634,7 @@ async function startRoutePlayback({
   const route36AOverride =
     sameServiceLine(line, "36A") &&
     (!operator || String(operator).trim().toUpperCase() === "FPOT");
-  const actualRouteRequired = Boolean(
+  let actualRouteRequired = Boolean(
     !route36AOverride && (diverted || isDivertedText(dest, line, operator)),
   );
   if (!playKey) {
@@ -6395,11 +6647,12 @@ async function startRoutePlayback({
     // the clipped path rather than merely restarting the full historical one.
     const sameReplayMode = Boolean(playback?.replayRecorded) === requestedRecordedReplay;
     const sameActualRoute = Boolean(playback?.diverted) === actualRouteRequired;
+    const sameInputMode = Boolean(playback?.requestArgs?.live) === Boolean(live);
     if (autoReplay && gpsReplay?.pts?.length >= 2 && sameReplayMode && sameActualRoute) {
       gpsReplayStart();
       return;
     }
-    if (!autoReplay || (sameReplayMode && sameActualRoute)) {
+    if (!autoReplay && sameReplayMode && sameActualRoute && sameInputMode) {
       stopRoutePlayback("", { clearTail: true });
       return;
     }
@@ -6679,7 +6932,42 @@ async function startRoutePlayback({
       ? await tripEnds(tripId, { date: tripDate })
       : null;
   if (requestId !== playbackRequestSeq) return;
-  const tripPath = Array.isArray(trip?.path) ? trip.path : [];
+  const fetchedTripPath = Array.isArray(trip?.path) ? trip.path : [];
+  const plannedMeta = {
+    tripId: resolvedTripId || tripId,
+    line,
+    operator,
+    date: tripDate,
+    destination: dest,
+  };
+  // Show route is the source for a coach replay. Once a route has been shown,
+  // reuse that exact five-day geometry instead of resolving a different same-
+  // numbered service on the next click. Fresh live previews still prefer the
+  // current Bustimes response until the route has been saved.
+  const cachedTripPath = requestedRecordedReplay ? recallPlannedRoute(plannedMeta) : [];
+  const tripPath = cachedTripPath.length >= 2 ? cachedTripPath : fetchedTripPath;
+  if (plannedRouteOverride && !actualRouteRequired && tripPath.length >= 2) {
+    rememberPlannedRoute(tripPath, plannedMeta);
+  }
+  // A diversion is not always present in the feed text. If the selected
+  // vehicle is already clearly away from a dense Bustimes alignment, prefer
+  // its recorded GPS before choosing the planned path. Sparse stop lists are
+  // rechecked after road matching below.
+  const quickRouteEvidence =
+    plannedRouteOverride && tripPath.length >= 2
+      ? routeDeviationEvidence({
+          plannedPath: tripPath,
+          gpsPoints: trackedGps,
+          livePing: currentLivePing,
+        })
+      : null;
+  const quickSpatialDeviation = Boolean(
+    !route36AOverride &&
+    quickRouteEvidence &&
+    !quickRouteEvidence.sparse &&
+    quickRouteEvidence.detected,
+  );
+  if (quickSpatialDeviation) actualRouteRequired = true;
   const tripStops = attachObservedStopTimes(
     Array.isArray(trip?.stops) ? trip.stops : [],
     trackedGps,
@@ -6987,12 +7275,34 @@ async function startRoutePlayback({
     headsign,
     date: journeyDate,
     lastPing,
+    plannedPath: plannedPath.slice(),
+    requestArgs: {
+      tripId: resolvedTripId || tripId,
+      journeyId,
+      vehicleId,
+      trailKey,
+      reg: compactReg(reg),
+      line: lineName,
+      operator,
+      date: tripDate,
+      direction: safeDirection,
+      dest,
+      datetime,
+      showTail: true,
+      diverted: actualRouteRequired,
+      autoReplay,
+      recordedReplay: requestedRecordedReplay,
+      live: !isHistorical,
+    },
     replayRecorded: preserveRecordedRun && plannedPath.length < 2,
   };
   // Offer a true GPS replay when we recorded pings for this journey. A live
   // replay must never fall back to the un-clipped allGps window.
-  let replayPoints =
-    plannedReplayPoints.length >= 2
+  const useLiveGpsReplay =
+    coachPlayback && actualRouteRequired && !preserveRecordedRun && trackedGps.length >= 2;
+  let replayPoints = useLiveGpsReplay
+    ? trackedGps
+    : plannedReplayPoints.length >= 2
       ? plannedReplayPoints
       : trackedGps.length >= 2
         ? trackedGps
@@ -7007,22 +7317,61 @@ async function startRoutePlayback({
       : replayPoints.length >= 2
         ? replayPoints
         : tracked;
-    const roadPath = await prepareRoadTrail(roadSource, undefined, alignBreak);
+    let roadPath = [];
+    let roadTimeout = 0;
+    try {
+      roadPath = await Promise.race([
+        prepareRoadTrail(roadSource, undefined, alignBreak),
+        new Promise((resolve) => {
+          roadTimeout = setTimeout(() => resolve(null), 3500);
+        }),
+      ]) || [];
+    } catch {
+      roadPath = [];
+    } finally {
+      if (roadTimeout) clearTimeout(roadTimeout);
+    }
+    const replayRoadPath = Array.isArray(roadPath?.[0]?.[0])
+      ? roadPath
+        .map((segment) => thinTrailPoints(segment, 35))
+        .filter((segment) => segment.length >= 2)
+      : thinTrailPoints(roadPath, 35);
     const roadReplayPoints = roadPathToReplayPoints(
-      roadPath,
+      replayRoadPath,
       plannedPath.length >= 2 ? plannedReplayPoints : replayPoints,
       alignBreak,
     );
-    if (roadReplayPoints.length < 2) {
+    if (roadReplayPoints.length >= 2) {
+      replayPoints = roadReplayPoints;
+    } else if (plannedPath.length >= 2 && plannedReplayPoints.length >= 2) {
+      // A sparse Bustimes stop list is still the correct scheduled route. Do
+      // not leave Replay stuck on a slow OSRM response; the next replay can use
+      // the road-aligned copy once the background match completes.
+      replayPoints = plannedReplayPoints;
+    } else {
       showMessage("No road-matched GPS is available for this replay yet — the planned route will not be shown");
       return;
     }
-    replayPoints = roadReplayPoints;
-    if (playback) playback.path = roadPath;
-    const roadFlat = flattenTrailLatLngs(roadPath);
+    if (playback) playback.path = roadPath.length >= 2 ? roadPath : roadSource;
+    const roadFlat = flattenTrailLatLngs(roadPath.length >= 2 ? roadPath : roadSource);
     if (roadFlat.length >= 2) {
       map.fitBounds(L.latLngBounds(roadFlat).pad(0.1), { maxZoom: 15, animate: true });
     }
+  }
+  if (replayOnly && plannedPath.length >= 2) {
+    // The replay fallback above is deliberately immediate; retain the route
+    // matching in the background so the saved five-day copy becomes road-safe.
+    prepareRoadTrail(plannedPath, undefined, alignBreak)
+      .then((aligned) => {
+        if (flattenTrailLatLngs(aligned).length >= 2) {
+          rememberPlannedRoute(aligned, { ...plannedMeta, roadAligned: true });
+        }
+      })
+      .catch(() => {});
+  }
+  if (replayPoints.length > 1200) {
+    const step = Math.ceil(replayPoints.length / 1200);
+    replayPoints = replayPoints.filter((_, index) => index % step === 0 || index === replayPoints.length - 1);
   }
   gpsReplaySetup(replayPoints);
   showJourneyPanel({
@@ -7051,6 +7400,22 @@ async function startRoutePlayback({
       .then((aligned) => {
         if (!playback || playback.requestId !== requestId || playback.playKey !== playKey) return;
         let upgraded = aligned;
+        const deviationPath = flattenTrailLatLngs(upgraded).length >= 2 ? upgraded : plannedPath;
+        const deviationEvidence = routeDeviationEvidence({
+          plannedPath: deviationPath,
+          gpsPoints: trackedGps,
+          livePing: clipPing,
+        });
+        if (
+          !actualRouteRequired &&
+          !route36AOverride &&
+          coachPlayback &&
+          deviationEvidence.detected &&
+          !deviationEvidence.sparse
+        ) {
+          switchPlaybackToActualRoute();
+          return;
+        }
         if (
           flattenTrailLatLngs(upgraded).length < 2 &&
           tripStops.length >= 2 &&
@@ -7061,7 +7426,14 @@ async function startRoutePlayback({
             .map((stop) => [stop.lat, stop.lng]);
           if (stopPath.length >= 2) upgraded = stopPath;
         }
-        const upPath = clipTrailPathAtPing(upgraded, clipPing, { failClosed: true });
+        if (
+           plannedRouteOverride &&
+           !actualRouteRequired &&
+           flattenTrailLatLngs(upgraded).length >= 2
+         ) {
+           rememberPlannedRoute(upgraded, { ...plannedMeta, roadAligned: true });
+         }
+         const upPath = clipTrailPathAtPing(upgraded, clipPing, { failClosed: true });
         const alignedAhead =
           coachPlayback && !isHistorical && !replayOnly && flattenTrailLatLngs(upgraded).length >= 2
             ? upgraded
@@ -10227,9 +10599,12 @@ function pathCrossesActiveRoadNotice(path) {
 
 function plannedPathReplayPoints(path, { startMs = Date.now(), endMs = 0, direction = "" } = {}) {
   const flat = Array.isArray(path?.[0]?.[0]) ? path.flat() : path;
-  const points = (Array.isArray(flat) ? flat : [])
-    .map((point) => [Number(point?.[0]), Number(point?.[1])])
-    .filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng));
+  const points = thinTrailPoints(
+    (Array.isArray(flat) ? flat : [])
+      .map((point) => [Number(point?.[0]), Number(point?.[1])])
+      .filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng)),
+    35,
+  ).slice(0, 1200);
   if (points.length < 2) return [];
   const start = Number.isFinite(Number(startMs)) ? Number(startMs) : Date.now();
   const end = Number.isFinite(Number(endMs)) && Number(endMs) > start ? Number(endMs) : start + Math.max(60_000, points.length * 1000);
@@ -13465,10 +13840,22 @@ async function stitchTrailViaOsrmRoutes(latlngs, signal, breakOpts = {}) {
   const inputSegs = splitLatLngsByGaps(latlngs, limits.gapM, breakOpts);
   const sourceSegs = inputSegs.length ? inputSegs : [latlngs];
   const alignedSegs = [];
+  // Sparse Bustimes stop lists are best represented by one driving route per
+  // stop pair. Matching every 180 m along a London→Blackpool alignment creates
+  // hundreds of unnecessary OSRM calls and can take minutes.
+  const plannedSparse = Boolean(breakOpts.plannedRoute) && sourceSegs.some((source) => {
+    const flatSource = Array.isArray(source?.[0]?.[0]) ? source.flat() : source;
+    if (!Array.isArray(flatSource) || flatSource.length < 2) return false;
+    let total = 0;
+    for (let i = 1; i < flatSource.length; i += 1) {
+      total += haversineMeters(flatSource[i - 1][0], flatSource[i - 1][1], flatSource[i][0], flatSource[i][1]);
+    }
+    return flatSource.length <= 24 || total / (flatSource.length - 1) > 800;
+  });
   // Coaches: wider sample spacing so long motorway legs stay fast + on-road.
   // Staffs rural: slightly wider than urban so sparse AVL still gets a road bridge.
-  const thinGap = coach ? 180 : staffs ? 140 : 28;
-  const bridgeBatch = coach ? 8 : staffs ? 6 : 4;
+  const thinGap = plannedSparse ? 5000 : coach ? 180 : staffs ? 140 : 28;
+  const bridgeBatch = plannedSparse ? 4 : coach ? 8 : staffs ? 6 : 4;
   for (const source of sourceSegs) {
     const thinned = thinTrailPoints(source, thinGap);
     if (thinned.length < 2) continue;
@@ -13688,7 +14075,7 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
     isAltonLine(breakOpts.line);
   const actualRoute = Boolean(breakOpts.actualRoute);
   const plannedRoute = Boolean(breakOpts.plannedRoute);
-  const key = `${trailPathHash(latlngs)}|${plannedRoute ? "planned" : actualRoute ? "actual" : coach ? "coach" : staffs ? "staffs" : "bus"}|v8`;
+  const key = `${trailPathHash(latlngs)}|${plannedRoute ? "planned" : actualRoute ? "actual" : coach ? "coach" : staffs ? "staffs" : "bus"}|v9`;
   if (trailAlignCache.has(key)) return trailAlignCache.get(key);
   if (plannedRoute) {
     const cleaned = Array.isArray(latlngs?.[0]?.[0])
@@ -13724,9 +14111,11 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
         const valid = trailSegmentsOf(aligned, { ...breakOpts, plannedRoute: true });
         if (valid.length) return valid.length === 1 ? valid[0] : valid;
       } catch {
-        /* keep the published stop path as a safe fallback */
+        /* A failed coach match must not turn back into an off-road chord. */
       }
-      return cleaned;
+      const fallback = coach ? [] : cleaned;
+      trailAlignCache.set(key, fallback);
+      return fallback;
     })();
     trailAlignPending.set(key, pending);
     try {
