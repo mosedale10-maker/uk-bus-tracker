@@ -10627,6 +10627,19 @@ function vehicleBboxQuery(bounds) {
   return params;
 }
 
+/**
+ * True when a row clearly belongs to a different operator. The Flix query can
+ * return other operators' vehicles (bustimes' operator filter is not strict), and
+ * stamping those as Flix made D&G buses appear twice on the map.
+ */
+function rowBelongsToOtherOperator(bus) {
+  const op = String(bus?.operator?.noc || bus?.operator?.id || "").trim().toUpperCase();
+  const url = String(bus?.vehicle?.url || bus?.service?.url || "");
+  const fromUrl = (url.match(/\/vehicles\/([a-z0-9]+)-/i) || [])[1]?.toUpperCase() || "";
+  const noc = op || fromUrl;
+  return Boolean(noc) && noc !== "FLIX";
+}
+
 async function fetchFlixBuses(signal, bounds) {
   try {
     const query = vehicleBboxQuery(bounds);
@@ -10637,6 +10650,7 @@ async function fetchFlixBuses(signal, bounds) {
     const rows = Array.isArray(data) ? data : [];
     // Tag so paint/history treat them as Flix even if upstream omits operator.noc.
     return rows
+      .filter((bus) => !rowBelongsToOtherOperator(bus) && isFlixBus(bus))
       .map((bus) => ({
         ...bus,
         _source: bus._source || "bustimes-flix",
@@ -10647,8 +10661,7 @@ async function fetchFlixBuses(signal, bounds) {
           name: bus.operator?.name || "FlixBus",
           slug: bus.operator?.slug || "flixbus",
         },
-      }))
-      .filter(isFlixBus);
+      }));
   } catch (error) {
     if (error?.name === "AbortError") throw error;
     return [];
@@ -11516,6 +11529,11 @@ function mergeBodsWithBustimes(bodsBuses, btBuses, { bodsOk = false } = {}) {
 function busesShareStableIdentity(a, b) {
   if (!a || !b || a === b) return false;
   if (a.id != null && b.id != null && String(a.id) === String(b.id)) return true;
+  // Same bustimes row reached through two feeds (BODS enriched + raw paint/Flix row).
+  const btA = String(a.btId ?? "");
+  const btB = String(b.btId ?? "");
+  if (btA && (btA === String(b.id ?? "") || btA === btB)) return true;
+  if (btB && btB === String(a.id ?? "")) return true;
   const regA = compactReg(a.vehicle?.reg || regFromVehicleName(a.vehicle?.name));
   const regB = compactReg(b.vehicle?.reg || regFromVehicleName(b.vehicle?.name));
   if (regA && regB) return regA === regB;
@@ -11531,6 +11549,12 @@ function busesShareStableIdentity(a, b) {
   const tokensB = busIdentityTokens(b);
   for (const token of tokensA) {
     if (token.length >= 4 && tokensB.has(token)) return true;
+  }
+  // D&G-style short fleet numbers (30, 102, 791) are shared by both sides, but
+  // only inside one operator — a bare number across operators is not an identity.
+  if ((opA || refA) && (opB || refB)) {
+    const sameOp = !opA || !opB || opA === opB;
+    if (sameOp && tokensOverlap(tokensA, tokensB)) return true;
   }
   return false;
 }
