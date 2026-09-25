@@ -6502,6 +6502,31 @@ function pinVehicleTrail({
   pinnedTrailKeys.add(renderKey);
   rememberTrailVehicle(renderKey);
   refreshPinnedTrailLine(renderKey);
+  // If the selected recorder journey has no exact-id points yet, keep a live
+  // Staffs tail visible from the same vehicle/line window. The normal refresh
+  // above will replace this fallback with the road-matched stroke shortly.
+  if (followLive && !pinnedTrailLines.get(renderKey)?.path?.length) {
+    const windowGps = collectTrailGpsForKeys(keys, {
+      line: String(line || "").trim(),
+      fromMs: Number(filter.fromMs) || 0,
+      toMs: Number(filter.toMs) || 0,
+    });
+    const clippedGps = livePing ? clipGpsPointsAtPing(windowGps, livePing) : windowGps;
+    const fallbackGps = clippedGps.length >= 2 ? clippedGps : windowGps;
+    const fallbackPath = pathFromGpsPoints(fallbackGps);
+    if (fallbackPath.length >= 2) {
+      const fallbackOpts = { ...filter, live: true, follow: true, gpsPoints: fallbackGps };
+      const fallbackBreak = trailBreakOptsFromFilter(fallbackOpts, renderKey);
+      const immediate = preferRoadMatchedTrail(fallbackPath, [], fallbackBreak);
+      const pair = makeTrailPair(immediate, liveTrailLayer, {
+        gpsPoints: fallbackGps,
+        ...fallbackBreak,
+      });
+      pinnedTrailLines.set(renderKey, pair);
+      pinnedTrailAlignGen.set(renderKey, (pinnedTrailAlignGen.get(renderKey) || 0) + 1);
+      runPinnedTrailAlign(renderKey);
+    }
+  }
   // History · Map pins its own stroke — skip a second liveTrailLine overlay.
   if (followLive && renderKey && liveFocus) setLiveTrailFocus(renderKey);
   updatePlaybackChrome();
