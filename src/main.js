@@ -5121,13 +5121,30 @@ function clipGpsPointsAtPing(gpsPoints, ping) {
   }
   // If the bus is spatially near an earlier point (GPS can be a little behind the
   // marker), discard any later points so the visible stroke cannot run ahead of it.
+  // Prefer the temporal endpoint: a diverted route can pass the same junction
+  // twice, so a global nearest-point search may select a later loop and draw
+  // beyond the 2D marker.
   let nearestIndex = -1;
   let nearestDistance = Infinity;
-  for (let i = 0; i < out.length; i += 1) {
-    const distance = haversineMeters(out[i].lat, out[i].lng, Number(ping.lat), Number(ping.lng));
-    if (distance <= nearestDistance) {
-      nearestDistance = distance;
-      nearestIndex = i;
+  if (out.length) {
+    const last = out[out.length - 1];
+    nearestIndex = out.length - 1;
+    nearestDistance = haversineMeters(last.lat, last.lng, Number(ping.lat), Number(ping.lng));
+    const endpointLag = Number.isFinite(pingT) && Number.isFinite(Number(last.t))
+      ? pingT - Number(last.t)
+      : 0;
+    const endpointUsable = nearestDistance <= 350 ||
+      (nearestDistance <= 2_500 && endpointLag >= 0 && endpointLag <= 5 * 60_000);
+    if (!endpointUsable) {
+      nearestIndex = -1;
+      nearestDistance = Infinity;
+      for (let i = 0; i < out.length; i += 1) {
+        const distance = haversineMeters(out[i].lat, out[i].lng, Number(ping.lat), Number(ping.lng));
+        if (distance <= nearestDistance) {
+          nearestDistance = distance;
+          nearestIndex = i;
+        }
+      }
     }
   }
   if (nearestIndex < 0 || nearestDistance > 350) {
@@ -5705,8 +5722,9 @@ async function showFleetRouteTails({
         .catch(() => {})
     : Promise.resolve();
   const plannedRoutePath = await plannedRoutePromise;
-  const plannedPathUsable =
-    plannedRoutePath.length >= 2 && !pathCrossesActiveRoadNotice(plannedRoutePath);
+  const plannedPathBlocked =
+    plannedRoutePath.length >= 2 && pathCrossesActiveRoadNotice(plannedRoutePath);
+  const plannedPathUsable = plannedRoutePath.length >= 2 && !plannedPathBlocked;
   // A route-wide coach tail is useful immediately from the published path; do
   // not make the user wait for a large/slow recorder response. If the planned
   // path is blocked by an active closure, wait for the recorded GPS fallback.
@@ -5859,6 +5877,14 @@ async function showFleetRouteTails({
       code ||
       "bus";
     if (targetIsLive && targets.length === 1 && gps.length >= 2) {
+      // Fleet's live row can carry the journey's start time rather than the
+      // current marker time. Do not pin the tail to that stale coordinate; let
+      // livePingForTrailFilter resolve the current 2D marker below.
+      const liveMarkerPing =
+        hasTargetCoordinates &&
+        (!Number.isFinite(targetWhenMs) || Date.now() - targetWhenMs <= 90_000)
+          ? targetPing
+          : null;
       liveTailTarget = {
         v,
         vLine,
@@ -5867,7 +5893,7 @@ async function showFleetRouteTails({
         vWhen,
         gps,
         base,
-        targetPing,
+        targetPing: liveMarkerPing,
       };
       continue;
     }
@@ -5904,6 +5930,7 @@ async function showFleetRouteTails({
         live: true,
         liveFocus: false,
         livePing: targetPing,
+        diverted: plannedPathBlocked,
       });
     } catch {
       showMessage("Could not load this live tail yet");
@@ -6856,26 +6883,84 @@ function clipTrailPathAtPing(path, ping, { failClosed = false } = {}) {
   if (!ping || !Number.isFinite(ping.lat) || !Number.isFinite(ping.lng)) {
     return failClosed ? [] : path;
   }
+  const rawSegments = Array.isArray(path?.[0]?.[0]) ? path : [path];
+  const cleanPoint = (point) => {
+    if (!Array.isArray(point)) return null;
+    const lat = Number(point[0]);
+    const lng = Number(point[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return [lat, lng, point[2], point[3], point[4]];
+  };
+  const timed = rawSegments.some((seg) =>
+    Array.isArray(seg) && seg.some((point) => Number.isFinite(Number(point?.[3]))),
+  );
+  const pingT = Number(ping.t);
+
+  // GPS paths retain their timestamps. Use them instead of a global nearest-point
+  // search: a diverted route can pass the same Longton junction more than once.
+  if (timed && Number.isFinite(pingT)) {
+    let best = { seg: -1, idx: -1, t: -Infinity };
+    for (let s = 0; s < rawSegments.length; s += 1) {
+      const seg = Array.isArray(rawSegments[s]) ? rawSegments[s] : [];
+      for (let i = 0; i < seg.length; i += 1) {
+        const t = Number(seg[i]?.[3]);
+        if (Number.isFinite(t) && t <= pingT + 2_000 && t > best.t) best = { seg: s, idx: i, t };
+      }
+    }
+    if (best.seg < 0) return [];
+    const out = rawSegments.slice(0, best.seg).map((seg) =>
+      (Array.isArray(seg) ? seg : []).map(cleanPoint).filter(Boolean).slice(),
+    );
+    const source = Array.isArray(rawSegments[best.seg]) ? rawSegments[best.seg] : [];
+    const tail = source.slice(0, best.idx + 1).map(cleanPoint).filter(Boolean);
+    const last = tail[tail.length - 1];
+    const next = source[best.idx + 1];
+    const nextT = Number(next?.[3]);
+    if (last && Number.isFinite(nextT) && nextT > pingT && Number(last[3]) < pingT) {
+      const fraction = (pingT - Number(last[3])) / Math.max(1, nextT - Number(last[3]));
+      tail.push([
+        Number(last[0]) + (Number(next[0]) - Number(last[0])) * fraction,
+        Number(last[1]) + (Number(next[1]) - Number(last[1])) * fraction,
+        ping?.heading ?? last[2],
+        pingT,
+        last[4],
+      ]);
+    } else {
+      tail.push([Number(ping.lat), Number(ping.lng), ping?.heading ?? last?.[2], pingT, last?.[4]]);
+    }
+    out.push(tail);
+    return out.filter((seg) => seg.length >= 2);
+  }
+
   const segs = asTrailLatLngs(path);
   if (!segs.length) return failClosed ? [] : path;
   let bestSeg = -1;
   let bestIdx = -1;
   let bestD = Infinity;
-  for (let s = 0; s < segs.length; s += 1) {
-    const seg = segs[s];
-    for (let i = 0; i < seg.length; i += 1) {
-      const d = haversineMeters(ping.lat, ping.lng, seg[i][0], seg[i][1]);
-      if (d < bestD) {
-        bestD = d;
-        bestSeg = s;
-        bestIdx = i;
+  const lastSeg = segs[segs.length - 1];
+  const lastPoint = lastSeg?.[lastSeg.length - 1];
+  if (lastPoint) {
+    bestSeg = segs.length - 1;
+    bestIdx = lastSeg.length - 1;
+    bestD = haversineMeters(ping.lat, ping.lng, lastPoint[0], lastPoint[1]);
+  }
+  if (bestD > 350) {
+    bestSeg = -1;
+    bestIdx = -1;
+    bestD = Infinity;
+    for (let s = 0; s < segs.length; s += 1) {
+      const seg = segs[s];
+      for (let i = 0; i < seg.length; i += 1) {
+        const d = haversineMeters(ping.lat, ping.lng, seg[i][0], seg[i][1]);
+        if (d < bestD) {
+          bestD = d;
+          bestSeg = s;
+          bestIdx = i;
+        }
       }
     }
   }
-  // Ping must sit on this path (±350m) — otherwise it belongs to another leg.
-  // Never fall back to the full path here: doing so lets a live coach tail run
-  // beyond the vehicle whenever identity matching briefly fails.
-  if (bestSeg < 0 || bestIdx < 1 || bestD > 350) return [];
+  if (bestSeg < 0 || bestD > 350) return [];
   const out = segs.slice(0, bestSeg).map((seg) => seg.slice());
   const tail = segs[bestSeg].slice(0, bestIdx + 1);
   tail.push([ping.lat, ping.lng]);
