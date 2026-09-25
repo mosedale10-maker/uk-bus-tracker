@@ -3937,6 +3937,15 @@ function isFirstPotteriesTrailOperator(operator) {
   return String(operator || "").trim().toUpperCase() === "FPOT";
 }
 
+/** D&G 27 is using the recorded Birch Terrace / Charles Street alignment. */
+function prefersRecordedDg27Route(line, operator, hasRecordedPoints = false) {
+  return (
+    hasRecordedPoints &&
+    sameServiceLine(line, "27") &&
+    String(operator || "").trim().toUpperCase() === "DAGC"
+  );
+}
+
 /** Canonical NOC for a Staffordshire live bus, including BODS rows with no operator field. */
 function staffsOperatorCode(bus, extra = {}) {
   const candidates = [
@@ -6311,7 +6320,8 @@ async function showFleetRouteTails({
     }
   }
 
-  if (plannedPathUsable && !isCoachTrailOperator(opCode) && !hasExplicitSelection) {
+  const keepRecordedDg27 = prefersRecordedDg27Route(code, opCode, drawn.length > 0);
+  if (plannedPathUsable && !isCoachTrailOperator(opCode) && !hasExplicitSelection && !keepRecordedDg27) {
     clearPinnedTrails();
     const plannedFlatPath = flattenTrailLatLngs(plannedRoutePath);
     const plannedStart = Date.now() - Math.max(60_000, plannedFlatPath.length * 1000);
@@ -7946,6 +7956,7 @@ async function startRoutePlayback({
   }
 
   let tracked = pathFromGpsPoints(trackedGps);
+  const hasRecordedGps = tracked.length >= 2;
   const tripDate = datetime ? String(datetime).slice(0, 10) : "";
   const trip = resolvedTripId
     ? await tripEnds(resolvedTripId, { date: tripDate })
@@ -8009,6 +8020,11 @@ async function startRoutePlayback({
     plannedRouteOverride &&
     tripPath.length >= 2 &&
     pathCrossesActiveRoadNotice(tripPath);
+  if (prefersRecordedDg27Route(line, operator, hasRecordedGps)) {
+    // D&G 27 is temporarily using Birch Terrace → Charles Street before
+    // rejoining the normal route. The recorder is the authority for this trip.
+    actualRouteRequired = true;
+  }
   const diversionFallbackPath = plannedPathBlocked ? activeDiversionReplacement(tripPath) : [];
   let plannedPath =
     plannedRouteOverride &&
@@ -8021,7 +8037,6 @@ async function startRoutePlayback({
   // including historical Fleet rows. A scheduled/timetable path is only a
   // fallback when no GPS was captured; otherwise the row can silently show a
   // planned line instead of the route the bus actually drove.
-  const hasRecordedGps = tracked.length >= 2;
   if (
     !plannedPath.length &&
     !actualRouteRequired &&
