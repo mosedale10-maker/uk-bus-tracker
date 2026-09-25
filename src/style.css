@@ -1815,11 +1815,19 @@ html.map-night .leaflet-control-container {
   }
 
   .journey-panel {
-    flex: 0 0 min(48dvh, 360px);
+    /* Let the sheet shrink to its content instead of leaving a large empty
+       black strip below a live bus card on phones. */
+    flex: 0 1 auto;
+    height: auto;
     width: 100%;
     border-right: 0;
     border-bottom: 1px solid #2a303a;
     max-height: min(52dvh, 420px);
+  }
+
+  .journey-panel-detail {
+    flex: 0 1 auto;
+    max-height: min(34dvh, 260px);
   }
 
   .journey-panel.is-timetable-minimized {
@@ -4294,7 +4302,11 @@ html.map-night .leaflet-control-container {
 
   @media (max-width: 420px) {
     .site-brand-text {
-      display: none;
+      display: block;
+      max-width: 7.5rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 0.78rem;
     }
 
     .uk-clock-date {
