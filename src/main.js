@@ -800,7 +800,7 @@ const PAINT_REFRESH_MS = 60_000;
 const PAINT_MOVE_REFRESH_MS = 4_000;
 const PAINT_STAFF_RETRY_MS = 30_000;
 /** Never let a slow /api/bt-paint hold the first render — it merges when it lands. */
-const PAINT_RENDER_DEADLINE_MS = 2500;
+const PAINT_RENDER_DEADLINE_MS = 1200;
 const BUS_POLL_MS = 6000;
 const TABLET_LIVE_POLL_MS = 10000;
 const LIVE_MARKER_BATCH_SIZE = 48;
