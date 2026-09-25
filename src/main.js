@@ -5527,6 +5527,7 @@ async function showFleetRouteTails({
   plannedTripId = "",
   plannedServiceId = "",
   plannedDate = "",
+  live = false,
 } = {}) {
   const code = String(line || "").trim();
   const opCode = String(operator || "").trim().toUpperCase();
@@ -5557,6 +5558,7 @@ async function showFleetRouteTails({
             datetime,
             line: code,
             direction,
+            live: Boolean(live),
           },
         ]
       : [];
@@ -5757,18 +5759,26 @@ async function showFleetRouteTails({
     // target still represents one current stint. Do not append that bus's older
     // journeys to the target and create a false there-and-back shape.
     const selectedRun = Boolean(vWhen);
-    if (vJourney) {
-      gps = gps.filter((point) => String(point.journeyId || "") === vJourney);
-    } else if (vTrip) {
-      gps = gps.filter((point) => String(point.tripId || "") === vTrip);
-    } else if (selectedRun) {
-      // Flix/NATX and AT employee IDs can flap or be absent. Select the one
-      // recorded stint nearest the selected row's time, never every nearby run.
+    let matchedTrip = false;
+    if (vTrip) {
+      const byTrip = gps.filter((point) => String(point.tripId || "") === vTrip);
+      if (byTrip.length >= 2) {
+        gps = byTrip;
+        matchedTrip = true;
+      }
+    }
+    if (!matchedTrip && vJourney) {
+      const byJourney = gps.filter((point) => String(point.journeyId || "") === vJourney);
+      if (byJourney.length >= 2) gps = byJourney;
+    }
+    if (gps.length < 2 && selectedRun) {
+      // Flix/NATX, BODS and recorder IDs can change during a run. Fall back to
+      // the nearest same-direction stint rather than dropping the whole tail.
       const selected = clipPointsToSingleDirectionRun(gps, {
         direction: normalizeTrailDirection(v.direction || direction || ""),
         aroundMs: new Date(vWhen).getTime(),
       });
-      gps = selected.length >= 2 ? selected : [];
+      gps = selected.length >= 2 ? selected : gps;
     }
     const staffsGap =
       isStaffsTrailOperator(opCode) ||

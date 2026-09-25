@@ -4911,7 +4911,7 @@ export function createFleetBrowser({
                 const journeyId = state.journeys?.[0]?.id || "";
                 const direction =
                   state.journeys?.[0]?.direction || v.lastRoute?.direction || "";
-                return `<button type="button" class="fleet-link-btn" data-action="show-route-tails" data-line="${esc(route)}" data-operator="${esc(v.operator?.id || v.operator?.noc || state.operator?.noc || "")}" data-vehicle-id="${esc(v.id)}" data-trail-key="${esc(v.id)}" data-reg="${esc(v.reg || "")}" data-dest="${esc(dest)}" data-datetime="${esc(when)}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(journeyId)}" data-direction="${esc(normalizeFleetDirection(direction))}">Map · this bus</button>`;
+                return `<button type="button" class="fleet-link-btn" data-action="show-route-tails" data-line="${esc(route)}" data-operator="${esc(v.operator?.id || v.operator?.noc || state.operator?.noc || "")}" data-vehicle-id="${esc(v.id)}" data-trail-key="${esc(v.id)}" data-reg="${esc(v.reg || "")}" data-dest="${esc(dest)}" data-datetime="${esc(when)}" data-trip-id="${esc(tripId)}" data-journey-id="${esc(journeyId)}" data-direction="${esc(normalizeFleetDirection(direction))}" data-live="1">Map · this bus</button>`;
               })()
             : ""
         }
@@ -6264,6 +6264,7 @@ export function createFleetBrowser({
         plannedTripId: String(state.routeTimetable?.[0]?.id || state.routeTimetable?.[0]?.trip_id || "").trim(),
         plannedServiceId: String(state.routeService?.id || state.routeServices?.[0]?.id || "").trim(),
         plannedDate: state.date || "",
+        live: btn.dataset.live === "1",
       });
       return;
     }
