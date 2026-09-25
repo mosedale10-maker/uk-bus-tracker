@@ -4758,8 +4758,9 @@ function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
     (breakOpts.staffs || isStaffsTrailOperator(breakOpts.operator) || isAltonLine(breakOpts.line));
   if (livePlannedStaffs) {
     const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
-    if (flattenTrailLatLngs(local).length >= 2) return local;
-    return flattenTrailLatLngs(gpsPath).length >= 2 ? gpsPath : [];
+    // Never paint a raw GPS chord while the road matcher is pending: a sparse
+    // fix can cut across fields/buildings. The async aligner will fill this in.
+    return flattenTrailLatLngs(local).length >= 2 ? local : [];
   }
   // Do not put a raw First Potteries GPS chord on the map while its road
   // matcher is pending. A short blank interval is preferable to a line through
@@ -4779,10 +4780,8 @@ function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
     (breakOpts.staffs || isStaffsTrailOperator(breakOpts.operator) || isAltonLine(breakOpts.line));
   if (liveStaffs) {
     const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
-    if (flattenTrailLatLngs(local).length >= 2) return local;
-    // Keep a live tail visible while the async matcher is pending. It is
-    // already clipped to the current marker and is replaced by the road path.
-    return flattenTrailLatLngs(gpsPath).length >= 2 ? gpsPath : [];
+    // Do not fall back to an unvalidated GPS chord; wait for the road match.
+    return flattenTrailLatLngs(local).length >= 2 ? local : [];
   }
   const staffsActual =
     breakOpts.actualRoute &&
@@ -4799,7 +4798,9 @@ function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
   ) return [];
   const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
   if (flattenTrailLatLngs(local).length >= 2) return local;
-  return staffsActual && flattenTrailLatLngs(gpsPath).length >= 2 ? gpsPath : [];
+  // A recorded route is only painted once it is on a road. Keep the previous
+  // road-aligned tail while the matcher is pending rather than showing a chord.
+  return [];
 }
 
 function gpsTimeAtPathFraction(gpsPts, frac) {
