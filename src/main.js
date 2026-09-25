@@ -4753,7 +4753,7 @@ function setTrailPathLayerLatLngs(layer, latlngs) {
 function trailPairNeedsRoadMatch(breakOpts = {}, opts = {}) {
   // A live Staffordshire tail must have an immediate visible fallback while
   // OSRM is pending; the validated road match replaces it as soon as it lands.
-  if ((breakOpts.live || opts.live) && breakOpts.staffs) return false;
+  if (breakOpts.staffs && (breakOpts.actualRoute || breakOpts.live || opts.live)) return false;
   // Every other visible route stroke must come from a validated road matcher.
   return true;
 }
