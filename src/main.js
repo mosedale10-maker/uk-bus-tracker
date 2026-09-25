@@ -4351,12 +4351,12 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
     isAltonLine(line) ||
     id.startsWith("staff-") ||
     id.startsWith("at:");
-  if (op) return { operator: op, coach: isCoachTrailOperator(op), staffs, actualRoute, plannedRoute };
-  if (filter?.coach) return { coach: true, operator: op || "", staffs, actualRoute, plannedRoute };
+  if (op) return { operator: op, coach: isCoachTrailOperator(op), staffs, actualRoute, plannedRoute, live: Boolean(filter?.live || filter?.follow) };
+  if (filter?.coach) return { coach: true, operator: op || "", staffs, actualRoute, plannedRoute, live: Boolean(filter?.live || filter?.follow) };
   const pts = trailMem.get(id) || [];
   for (let i = pts.length - 1; i >= 0; i -= 1) {
     const pOp = String(pts[i]?.operator || "").trim().toUpperCase();
-    if (pOp) return { operator: pOp, coach: isCoachTrailOperator(pOp), staffs: staffs || isStaffsTrailOperator(pOp), actualRoute, plannedRoute };
+    if (pOp) return { operator: pOp, coach: isCoachTrailOperator(pOp), staffs: staffs || isStaffsTrailOperator(pOp), actualRoute, plannedRoute, live: Boolean(filter?.live || filter?.follow) };
   }
   // Live Flix / NATX markers: bus.id is the trail key but points may lack operator yet.
   if (id) {
@@ -4364,11 +4364,11 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
       if (String(marker?.bus?.id) !== id) continue;
       if (isFlixBus(marker.bus) || isNationalExpress(marker.bus)) {
         const noc = trailOperatorForBus(marker.bus);
-        return { operator: noc, coach: true, staffs: false, actualRoute, plannedRoute };
+        return { operator: noc, coach: true, staffs: false, actualRoute, plannedRoute, live: Boolean(filter?.live || filter?.follow) };
       }
     }
   }
-  return { staffs, actualRoute, plannedRoute };
+  return { staffs, actualRoute, plannedRoute, live: Boolean(filter?.live || filter?.follow) };
 }
 
 /**
@@ -4503,6 +4503,16 @@ function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
   // A local nearest-road stitch can choose the opposite carriageway at a
   // motorway junction and draw a convincing-looking loop. Coaches therefore
   // wait for the validated OSRM geometry instead of showing that fallback.
+  const liveStaffs =
+    breakOpts.live &&
+    (breakOpts.staffs || isStaffsTrailOperator(breakOpts.operator) || isAltonLine(breakOpts.line));
+  if (liveStaffs) {
+    const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
+    if (flattenTrailLatLngs(local).length >= 2) return local;
+    // Keep a live tail visible while the async matcher is pending. It is
+    // already clipped to the current marker and is replaced by the road path.
+    return flattenTrailLatLngs(gpsPath).length >= 2 ? gpsPath : [];
+  }
   if (
     breakOpts.coach ||
     breakOpts.staffs ||
@@ -4645,6 +4655,7 @@ function trailPairBreakOpts(opts = {}, fallback = {}) {
     staffs: !!(opts.staffs ?? fallback.staffs),
     actualRoute: !!(opts.actualRoute ?? fallback.actualRoute),
     plannedRoute: !!(opts.plannedRoute ?? fallback.plannedRoute),
+    live: !!(opts.live ?? fallback.live),
   };
 }
 
@@ -4688,10 +4699,11 @@ function setTrailPathLayerLatLngs(layer, latlngs) {
   layer?.setLatLngs?.(latlngs);
 }
 
-function trailPairNeedsRoadMatch() {
-  // Every visible route stroke must come from a validated road matcher. This
-  // also covers feeds whose operator metadata is missing and would otherwise
-  // bypass the Staffs-specific checks above.
+function trailPairNeedsRoadMatch(breakOpts = {}, opts = {}) {
+  // A live Staffordshire tail must have an immediate visible fallback while
+  // OSRM is pending; the validated road match replaces it as soon as it lands.
+  if ((breakOpts.live || opts.live) && breakOpts.staffs) return false;
+  // Every other visible route stroke must come from a validated road matcher.
   return true;
 }
 
