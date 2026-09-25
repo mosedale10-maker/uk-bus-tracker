@@ -5524,6 +5524,7 @@ async function showFleetRouteTails({
   tripId = "",
   datetime = "",
   direction = "",
+  dest = "",
   plannedTripId = "",
   plannedServiceId = "",
   plannedDate = "",
@@ -5855,22 +5856,27 @@ async function showFleetRouteTails({
     const liveKey = String(v.trailKey || v.id || v.btId || base || reg || code || "bus");
     const firstT = Number(gps[0]?.t) || Date.now() - 60_000;
     const previousGroup = multiTailActiveGroup;
-    pinVehicleTrail({
-      vehicleId: String(v.id || v.btId || v.vehicleId || vehicleId || ""),
-      trailKey: liveKey,
-      reg: v.reg || v.regLabel || reg || "",
-      journeyId: vJourney,
-      tripId: vTrip,
-      line: vLine || code,
-      operator: opCode,
-      direction: normalizeTrailDirection(v.direction || direction || ""),
-      dest: v.destination || v.dest || dest || "",
-      datetime: vWhen,
-      liveFromMs: firstT - 30_000,
-      live: true,
-      liveFocus: false,
-      livePing: targetPing,
-    });
+    try {
+      pinVehicleTrail({
+        vehicleId: String(v.id || v.btId || v.vehicleId || vehicleId || ""),
+        trailKey: liveKey,
+        reg: v.reg || v.regLabel || reg || "",
+        journeyId: vJourney,
+        tripId: vTrip,
+        line: vLine || code,
+        operator: opCode,
+        direction: normalizeTrailDirection(v.direction || direction || ""),
+        dest: v.destination || v.dest || dest || "",
+        datetime: vWhen,
+        liveFromMs: firstT - 30_000,
+        live: true,
+        liveFocus: false,
+        livePing: targetPing,
+      });
+    } catch {
+      showMessage("Could not load this live tail yet");
+      return;
+    }
     multiTailActiveGroup = previousGroup;
     if (!seenSeg.has(liveKey)) {
       seenSeg.add(liveKey);
