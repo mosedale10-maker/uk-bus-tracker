@@ -4670,9 +4670,22 @@ function setTrailPathLayerLatLngs(layer, latlngs) {
   layer?.setLatLngs?.(latlngs);
 }
 
+function trailPairNeedsRoadMatch(breakOpts = {}) {
+  return Boolean(
+    breakOpts.staffs ||
+    isStaffsTrailOperator(breakOpts.operator) ||
+    isAltonLine(breakOpts.line) ||
+    breakOpts.coach ||
+    isCoachTrailOperator(breakOpts.operator),
+  );
+}
+
 function makeTrailPair(path, layer, opts = {}) {
   const breakOpts = trailPairBreakOpts(opts);
-  const latlngs = asTrailLatLngs(path, breakOpts);
+  const roadAligned = Boolean(opts.roadAligned);
+  const latlngs = trailPairNeedsRoadMatch(breakOpts) && !roadAligned
+    ? []
+    : asTrailLatLngs(path, breakOpts);
   // White casing + coloured centre keeps the route readable over both light
   // street maps and the dark night tiles, like the reference replay view.
   const casing = makeTrailPathLayer(latlngs, TRAIL_CASING, layer);
@@ -4682,10 +4695,11 @@ function makeTrailPair(path, layer, opts = {}) {
     layer,
   );
   const gps = opts.gpsPoints || opts.gpsPath || null;
+  const arrowPath = latlngs.length >= 2 ? path : [];
   const arrows = opts.deferArrows
     ? []
-    : buildTrailArrowsAlongRoad(path, layer, { gpsPoints: gps, breakOpts });
-  return { casing, line, arrows, layer, gpsPoints: gps || null, breakOpts, path };
+    : buildTrailArrowsAlongRoad(arrowPath, layer, { gpsPoints: gps, breakOpts });
+  return { casing, line, arrows, layer, gpsPoints: gps || null, breakOpts, path, roadAligned };
 }
 
 function setTrailPairPath(pair, path, opts = {}) {
@@ -4706,6 +4720,20 @@ function setTrailPairPath(pair, path, opts = {}) {
     pair.breakOpts || {},
   );
   pair.breakOpts = breakOpts;
+  const roadAligned = Boolean(opts.roadAligned);
+  if (trailPairNeedsRoadMatch(breakOpts) && !roadAligned) {
+    // Never replace a validated road with a raw GPS/chord update. A newly
+    // selected route starts with an empty stroke until its OSRM match arrives.
+    if (pair.roadAligned) return;
+    pair.roadAligned = false;
+    pair.path = [];
+    setTrailPathLayerLatLngs(pair.casing, []);
+    setTrailPathLayerLatLngs(pair.line, []);
+    clearTrailArrows(pair, pair.layer);
+    pair.arrows = [];
+    return;
+  }
+  pair.roadAligned = roadAligned || Boolean(pair.roadAligned);
   pair.path = path;
   const latlngs = asTrailLatLngs(path, breakOpts);
   setTrailPathLayerLatLngs(pair.casing, latlngs);
@@ -5298,7 +5326,7 @@ async function runPinnedTrailAlign(id) {
       if (!pair) continue;
       const drawn = preferRoadMatchedTrail(safePath, aligned, job.breakOpts || {});
       if (flattenTrailLatLngs(drawn).length < 2) continue;
-      setTrailPairPath(pair, drawn, { gpsPoints: safeGps, ...job.breakOpts });
+      setTrailPairPath(pair, drawn, { gpsPoints: safeGps, roadAligned: true, ...job.breakOpts });
     }
   } finally {
     pinnedTrailAlignBusy.set(key, false);
@@ -5386,7 +5414,7 @@ async function runLiveTrailAlign() {
       if (String(liveTrailKey) !== String(job.key) || !liveTrailLine) continue;
       const drawn = preferRoadMatchedTrail(safePath, aligned, job.breakOpts || {});
       if (flattenTrailLatLngs(drawn).length < 2) continue;
-      setTrailPairPath(liveTrailLine, drawn, { gpsPoints: safeGps });
+      setTrailPairPath(liveTrailLine, drawn, { gpsPoints: safeGps, roadAligned: true });
     }
   } finally {
     liveTrailAlignBusy = false;
@@ -6883,6 +6911,7 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
     datetime = "",
     tripStops = [],
     plannedAheadPath = null,
+    roadAligned = false,
   } = opts;
   const plannedLiveCoachTail = Boolean(
     plannedAheadPath &&
@@ -6913,6 +6942,7 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
     const pair = makeTrailPair(drawPath, playbackLayer, {
       gpsPoints: arrowGps.length ? arrowGps : lastPing ? [lastPing] : [],
       ...alignBreak,
+      roadAligned,
     });
     try {
       pair.line.setStyle({
@@ -6926,7 +6956,7 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
       /* ignore */
     }
     if (!pair?.arrows?.length) {
-      pair.arrows = buildTrailArrowsAlongRoad(drawPath, playbackLayer, {
+      pair.arrows = buildTrailArrowsAlongRoad(roadAligned ? drawPath : [], playbackLayer, {
         gpsPoints: arrowGps.length ? arrowGps : lastPing ? [lastPing] : [],
         breakOpts: alignBreak,
       });
@@ -7921,7 +7951,7 @@ async function startRoutePlayback({
         if (flattenTrailLatLngs(upPath).length >= 2 || alignedAhead) {
           drawPlaybackScene(
             upPath,
-            { ...scene, plannedAheadPath: alignedAhead },
+            { ...scene, plannedAheadPath: alignedAhead, roadAligned: true },
             { fit: false },
           );
           if (flattenTrailLatLngs(upPath).length >= 2) playback.path = upPath;
