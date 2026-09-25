@@ -4189,6 +4189,7 @@ html.map-night .leaflet-control-container {
 
   .topbar-end {
     grid-column: 3;
+    grid-row: 1;
     margin-left: 0;
     justify-self: end;
   }
@@ -4199,6 +4200,7 @@ html.map-night .leaflet-control-container {
 
   .search {
     grid-column: 1 / -1;
+    grid-row: 2;
     max-width: none;
     flex: none;
   }
