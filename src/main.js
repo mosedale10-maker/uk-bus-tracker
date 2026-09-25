@@ -6017,7 +6017,11 @@ async function showFleetRouteTails({
       reg ||
       code ||
       "bus";
-    if (targetIsLive && targets.length === 1 && gps.length >= 2) {
+    if (
+      targetIsLive &&
+      targets.length === 1 &&
+      (gps.length >= 2 || v.id || v.trailKey || v.reg || v.regLabel)
+    ) {
       // Fleet's live row can carry the journey's start time rather than the
       // current marker time. Do not pin the tail to that stale coordinate; let
       // livePingForTrailFilter resolve the current 2D marker below.
