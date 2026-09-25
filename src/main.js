@@ -5667,6 +5667,11 @@ async function showFleetRouteTails({
       target.dest = currentBus.destination || "";
       target.coordinates = currentBus.coordinates;
       target.live = true;
+      journeyId = target.journey_id;
+      tripId = target.trip_id;
+      direction = target.direction;
+      datetime = target.datetime;
+      dest = target.dest;
       plannedTripId = target.trip_id;
       plannedDate = String(target.datetime || plannedDate || "").slice(0, 10);
     }
