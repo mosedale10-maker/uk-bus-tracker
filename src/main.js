@@ -5705,6 +5705,7 @@ async function showFleetRouteTails({
   };
   const drawn = [];
   const seenSeg = new Set();
+  let liveTailTarget = null;
 
   // One tail polyline per trip — never glue Hanley→Newcastle with Newcastle→Hanley.
   for (const v of targets) {
@@ -5757,16 +5758,23 @@ async function showFleetRouteTails({
     const targetIsLive =
       v.live === true ||
       (Number.isFinite(targetWhenMs) && Date.now() - targetWhenMs <= 90_000);
+    let targetLat = Number(v.coordinates?.[1] ?? v.lat);
+    let targetLng = Number(v.coordinates?.[0] ?? v.lng);
+    let targetPing = null;
     if (targetIsLive) {
-      const targetLat = Number(v.coordinates?.[1] ?? v.lat);
-      const targetLng = Number(v.coordinates?.[0] ?? v.lng);
+      if (!Number.isFinite(targetLat) || !Number.isFinite(targetLng)) {
+        const latest = gps[gps.length - 1];
+        targetLat = Number(latest?.lat);
+        targetLng = Number(latest?.lng);
+      }
       if (Number.isFinite(targetLat) && Number.isFinite(targetLng)) {
-        gps = clipGpsPointsAtPing(gps, {
+        targetPing = {
           lat: targetLat,
           lng: targetLng,
-          t: Number.isFinite(targetWhenMs) ? targetWhenMs : Date.now(),
+          t: Number.isFinite(targetWhenMs) ? targetWhenMs : Number(gps[gps.length - 1]?.t) || Date.now(),
           source: "fleet-target",
-        });
+        };
+        gps = clipGpsPointsAtPing(gps, targetPing);
       }
     }
     const segments = selectedRun && gps.length >= 2
@@ -5784,6 +5792,19 @@ async function showFleetRouteTails({
       reg ||
       code ||
       "bus";
+    if (targetIsLive && targets.length === 1 && gps.length >= 2) {
+      liveTailTarget = {
+        v,
+        vLine,
+        vJourney,
+        vTrip,
+        vWhen,
+        gps,
+        base,
+        targetPing,
+      };
+      continue;
+    }
     const pinned = pinSeparateTripTails(segments, {
       baseKey: base,
       line: vLine || code,
@@ -5793,6 +5814,34 @@ async function showFleetRouteTails({
       if (seenSeg.has(key)) continue;
       seenSeg.add(key);
       drawn.push(key);
+    }
+  }
+
+  if (liveTailTarget) {
+    const { v, vLine, vJourney, vTrip, vWhen, gps, base, targetPing } = liveTailTarget;
+    const liveKey = String(v.trailKey || v.id || v.btId || base || reg || code || "bus");
+    const firstT = Number(gps[0]?.t) || Date.now() - 60_000;
+    const previousGroup = multiTailActiveGroup;
+    pinVehicleTrail({
+      vehicleId: String(v.id || v.btId || v.vehicleId || vehicleId || ""),
+      trailKey: liveKey,
+      reg: v.reg || v.regLabel || reg || "",
+      journeyId: vJourney,
+      tripId: vTrip,
+      line: vLine || code,
+      operator: opCode,
+      direction: normalizeTrailDirection(v.direction || direction || ""),
+      dest: v.destination || v.dest || dest || "",
+      datetime: vWhen,
+      liveFromMs: firstT - 30_000,
+      live: true,
+      liveFocus: false,
+      livePing: targetPing,
+    });
+    multiTailActiveGroup = previousGroup;
+    if (!seenSeg.has(liveKey)) {
+      seenSeg.add(liveKey);
+      drawn.push(liveKey);
     }
   }
 
