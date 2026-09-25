@@ -5242,7 +5242,15 @@ function refreshPinnedTrailLine(key) {
     }
     if (merged.length) trailMem.set(id, merged);
   }
-  let gpsPoints = trackedPointsFor(id, filter);
+  const liveFilter = Boolean(filter.live || filter.follow);
+  let gpsPoints = trackedPointsFor(id, {
+    ...filter,
+    // Recorder journey ids can differ from the Bustimes id on the selected
+    // row. For a live tail, use the time/line window first and only narrow to
+    // an exact journey below when that subset actually exists.
+    journeyId: liveFilter ? "" : filter.journeyId,
+    tripId: liveFilter ? "" : filter.tripId,
+  });
   // Alias feeds can contribute points with no journey ID. Once a live
   // selection has a real journey/trip identity, do not let those unrelated
   // points extend a NatEx/Flix tail beyond the selected coach.
@@ -5388,7 +5396,11 @@ function refreshLiveTrailLine(key) {
     liveTrailKey: String(key),
   };
   const breakOpts = trailBreakOptsFromFilter(filter, key);
-  let gpsPoints = trackedPointsFor(key, filter);
+  let gpsPoints = trackedPointsFor(key, {
+    ...filter,
+    journeyId: filter.live ? "" : filter.journeyId,
+    tripId: filter.live ? "" : filter.tripId,
+  });
   const ping = livePingForTrailFilter(filter, gpsPoints);
   gpsPoints = clipGpsPointsAtPing(gpsPoints, ping);
   const playbackDeviation =
@@ -6340,6 +6352,9 @@ function updatePinnedLiveRouteForBus(bus, trailMeta = {}) {
       state.journeyId = journeyId || state.journeyId;
       state.destination = destination || state.destination;
       state.lastT = now;
+      // A live tail must be re-clipped to the marker's newest position even
+      // when this poll was too small to add a new GPS point.
+      schedulePinnedTrailRefresh(key);
     }
   }
 }
