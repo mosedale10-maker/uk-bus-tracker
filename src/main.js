@@ -5627,7 +5627,11 @@ async function showFleetRouteTails({
     for (const key of expanded) keys.add(key);
   }
   const trailsPromise = keys.size
-    ? fetchServerTrailsChunked([...keys], { force: true }).catch(() => {})
+    ? fetchServerTrailsChunked([...keys], { force: true })
+        .then(() => {
+          refreshAllPinnedTrails();
+        })
+        .catch(() => {})
     : Promise.resolve();
   const plannedRoutePath = await plannedRoutePromise;
   const plannedPathUsable =
@@ -5637,7 +5641,13 @@ async function showFleetRouteTails({
   // path is blocked by an active closure, wait for the recorded GPS fallback.
   // Explicit bus selections still wait for their recorded run so GPS can remain authoritative.
   if (keys.size && !(isCoachTrailOperator(opCode) && !hasExplicitSelection && plannedPathUsable)) {
-    await trailsPromise;
+    // A single recorder request can occasionally remain open after its
+    // response headers. Do not leave the Fleet action on “Loading…” forever;
+    // use any points already merged and let the background fetch finish.
+    await Promise.race([
+      trailsPromise,
+      new Promise((resolve) => setTimeout(resolve, hasExplicitSelection ? 8_000 : 6_000)),
+    ]);
   } else if (keys.size) {
     await Promise.race([
       trailsPromise,
@@ -5770,10 +5780,11 @@ async function showFleetRouteTails({
     }
   }
 
-  if (plannedPathUsable && !isCoachTrailOperator(opCode)) {
+  if (plannedPathUsable && !isCoachTrailOperator(opCode) && !hasExplicitSelection) {
     clearPinnedTrails();
-    const plannedStart = Date.now() - Math.max(60_000, plannedRoutePath.length * 1000);
-    const plannedGps = plannedRoutePath.map((point, index) => ({
+    const plannedFlatPath = flattenTrailLatLngs(plannedRoutePath);
+    const plannedStart = Date.now() - Math.max(60_000, plannedFlatPath.length * 1000);
+    const plannedGps = plannedFlatPath.map((point, index) => ({
       t: plannedStart + index * 1000,
       lat: Number(point[0]),
       lng: Number(point[1]),
@@ -5819,8 +5830,19 @@ async function showFleetRouteTails({
     const pts = trackedPathLatLngs(key, filter);
     if (pts.length >= 2) boundsPath.push(...pts);
   }
-  if (boundsPath.length >= 2) {
-    map.fitBounds(L.latLngBounds(boundsPath).pad(0.12), { maxZoom: 15, animate: true });
+  const validBoundsPath = boundsPath.filter(
+    (point) =>
+      Array.isArray(point) &&
+      Number.isFinite(Number(point[0])) &&
+      Number.isFinite(Number(point[1])),
+  );
+  if (validBoundsPath.length >= 2) {
+    try {
+      map.invalidateSize({ animate: false });
+      map.fitBounds(L.latLngBounds(validBoundsPath).pad(0.12), { maxZoom: 15, animate: true });
+    } catch {
+      /* A stale/partial road match must not abort the live tail action. */
+    }
   }
 
   if (!drawn.length) {
