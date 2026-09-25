@@ -3970,6 +3970,37 @@ html.map-night .leaflet-control-container {
   color: #0f172a;
 }
 
+.alerts-audio-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.alerts-audio-row .announce-toggle {
+  margin: 0;
+  padding: 3px 9px;
+}
+
+.alerts-audio-hint {
+  margin: 0;
+  flex: 1 1 140px;
+  font-size: 0.7rem;
+  color: #64748b;
+}
+
+.alerts-item.is-diversion {
+  border-color: rgba(249, 115, 22, 0.45);
+  background: rgba(124, 45, 18, 0.28);
+}
+
+.alerts-item-kind.is-diversion {
+  background: #f97316;
+  color: #1c1917;
+}
+
 .alerts-item-title {
   margin: 0 0 4px;
   font-size: 0.9rem;

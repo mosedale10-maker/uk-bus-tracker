@@ -675,13 +675,35 @@ function setAlertsPanelOpen(open) {
   alertsBtnEl.setAttribute("aria-pressed", open ? "true" : "false");
 }
 
+function activeDiversionAlerts() {
+  const now = Date.now();
+  return [...diversionAlerts.values()]
+    .filter((alert) => now - (alert.lastAt || 0) <= DIVERSION_EXPIRE_MS)
+    .sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
+}
+
 function renderAlertsPanel() {
   if (!alertsListEl) return;
-  if (!liveNotices.length) {
+  const diversions = activeDiversionAlerts();
+  if (!liveNotices.length && !diversions.length) {
     alertsListEl.innerHTML = `<p class="alerts-empty">No active Stoke-on-Trent alerts</p>`;
     return;
   }
-  alertsListEl.innerHTML = liveNotices
+  const diversionHtml = diversions
+    .map((n) => {
+      const meta = [n.line ? `route ${n.line}` : "", n.reg, n.operator, n.place]
+        .filter(Boolean)
+        .join(" · ");
+      const ago = timeAgo(new Date(n.lastAt || Date.now()).toISOString());
+      return `<article class="alerts-item is-diversion">
+        <span class="alerts-item-kind is-diversion">Bus on diversion</span>
+        <p class="alerts-item-title">${esc(n.title || "Bus on diversion")}</p>
+        <p class="alerts-item-body">${esc(n.body || "")}</p>
+        ${meta ? `<p class="alerts-item-meta">${esc(meta)} · ${esc(ago)}</p>` : ""}
+      </article>`;
+    })
+    .join("");
+  const noticeHtml = liveNotices
     .map((n) => {
       const kind =
         n.kind === "control_room"
@@ -700,11 +722,12 @@ function renderAlertsPanel() {
       </article>`;
     })
     .join("");
+  alertsListEl.innerHTML = `${diversionHtml}${noticeHtml}`;
 }
 
 function updateAlertsBadge() {
   if (!alertsBadgeEl) return;
-  const n = liveNotices.length;
+  const n = liveNotices.length + activeDiversionAlerts().length;
   if (!n) {
     alertsBadgeEl.hidden = true;
     alertsBadgeEl.textContent = "0";
@@ -756,6 +779,263 @@ async function loadServiceNotices() {
   }
 }
 
+/* ── Bus on diversion: live announcements + audio ────────────────────────────
+ * Two signals feed the same alert:
+ *   1. an active road notice whose operator/geometry the bus is inside
+ *   2. the bus sitting well off its published trip alignment
+ * Alerts are spoken once per bus, repeated only after a long cool-off, and are
+ * dropped as soon as the bus is back on route. */
+const DIVERSION_AUDIO_KEY = "uk-bus-diversion-audio";
+let diversionAudioOn = localStorage.getItem(DIVERSION_AUDIO_KEY) !== "0";
+const diversionAlerts = new Map();
+const DIVERSION_SCAN_MS = 20_000;
+const DIVERSION_REPEAT_MS = 12 * 60_000;
+const DIVERSION_EXPIRE_MS = 45 * 60_000;
+/** Two consecutive scans before we call it — one bad GPS fix is not a diversion. */
+const DIVERSION_HITS_TO_ALERT = 2;
+const DIVERSION_ROUTE_FETCHES_PER_SCAN = 2;
+let diversionScanBusy = false;
+let lastDiversionScanAt = 0;
+let diversionScanTick = 0;
+
+/** Named places so an audio alert says where, not just "somewhere near you". */
+const DIVERSION_PLACE_NAMES = [
+  { name: "Hanley", lat: 53.0028, lng: -2.1317 },
+  { name: "Longton", lat: 52.9889, lng: -2.1344 },
+  { name: "Stoke", lat: 53.0027, lng: -2.1794 },
+  { name: "Burslem", lat: 53.0435, lng: -2.1827 },
+  { name: "Tunstall", lat: 53.0637, lng: -2.1808 },
+  { name: "Kidsgrove", lat: 53.0827, lng: -2.2295 },
+  { name: "Newcastle-under-Lyme", lat: 53.0125, lng: -2.2168 },
+  { name: "Fenton", lat: 52.9886, lng: -2.1148 },
+  { name: "Meir", lat: 53.0089, lng: -2.1503 },
+  { name: "Bentilee", lat: 53.0228, lng: -2.1028 },
+  { name: "Smallthorne", lat: 53.0622, lng: -2.1503 },
+  { name: "Chell", lat: 52.9789, lng: -2.1706 },
+  { name: "Milton", lat: 53.0208, lng: -2.1422 },
+  { name: "Adderley Green", lat: 52.9994, lng: -2.1186 },
+  { name: "Stone", lat: 52.9997, lng: -2.0936 },
+  { name: "Leek", lat: 53.1572, lng: -2.0183 },
+  { name: "Nantwich", lat: 53.0668, lng: -2.5231 },
+];
+
+function busOperatorCode(bus) {
+  return String(bus?._bods?.operator || bus?.operator?.noc || bus?.operator || "")
+    .trim()
+    .toUpperCase();
+}
+
+function busRegLabel(bus) {
+  return String(bus?.vehicle?.reg || bus?.vehicle?.name || "").trim();
+}
+
+function placeNameFor(lng, lat) {
+  let best = null;
+  let bestD = Infinity;
+  for (const place of DIVERSION_PLACE_NAMES) {
+    const d = haversineMeters(lat, lng, place.lat, place.lng);
+    if (d < bestD) {
+      bestD = d;
+      best = place;
+    }
+  }
+  return bestD <= 900 ? best?.name || "" : "";
+}
+
+/** Active road notice this bus is driving through, if any. */
+function diversionNoticeForBus(bus, ll) {
+  const op = busOperatorCode(bus);
+  const now = Date.now();
+  for (const notice of ROAD_NOTICES || []) {
+    if (!roadNoticeIsActive(notice, now)) continue;
+    const ops = Array.isArray(notice.operators) ? notice.operators.map((v) => String(v).toUpperCase()) : [];
+    if (ops.length && op && !ops.includes(op)) continue;
+    // Inside the closure, or already on the published replacement alignment.
+    const limit = notice.operators?.length ? 400 : 250;
+    const nearClosure =
+      Array.isArray(notice.path) && notice.path.length >= 2
+        ? distanceToTrailPath([ll.lat, ll.lng], notice.path) <= limit
+        : haversineMeters(ll.lat, ll.lng, notice.lat, notice.lng) <= limit;
+    if (nearClosure) return notice;
+    if (Array.isArray(notice.diversionPath) && notice.diversionPath.length >= 2) {
+      if (distanceToTrailPath([ll.lat, ll.lng], notice.diversionPath) <= 350) return notice;
+    }
+  }
+  return null;
+}
+
+/** Published trip alignment for a bus, from cache when we already have it. */
+async function plannedPathForBus(bus) {
+  const tripId = String(bus?.trip_id || "").trim();
+  const date = String(bus?.datetime || "").slice(0, 10);
+  const meta = {
+    tripId,
+    line: bus?.service?.line_name || "",
+    operator: busOperatorCode(bus),
+    date,
+    destination: bus?.destination || "",
+  };
+  const cached = recallPlannedRoute(meta);
+  if (cached.length >= 2) return cached;
+  if (!tripId) return [];
+  try {
+    const trip = await tripEnds(tripId, { date });
+    const path = Array.isArray(trip?.path) ? trip.path : [];
+    if (path.length >= 2) rememberPlannedRoute(path, meta);
+    return path;
+  } catch {
+    return [];
+  }
+}
+
+function diversionAlertLine(bus, { reason, notice, distanceM, place }) {
+  const line = String(bus?.service?.line_name || "").trim();
+  const reg = busRegLabel(bus);
+  const opName = String(bus?.operator?.name || busOperatorCode(bus) || "").trim();
+  const who = [line ? `route ${line}` : "", reg || opName].filter(Boolean).join(" · ");
+  if (reason === "notice" && notice) {
+    return `${who} is on the ${notice.title.replace(/^Road closed\s*·\s*/i, "")} diversion near ${place || "the closure"}.`;
+  }
+  const metres = Number.isFinite(distanceM) ? ` about ${Math.round(distanceM / 10) * 10} metres` : "";
+  return `${who} is off its normal route${metres}${place ? ` near ${place}` : ""}.`;
+}
+
+function flagDiversion(bus, info) {
+  const id = String(bus?.id || "");
+  if (!id) return;
+  const now = Date.now();
+  const key = `${info.reason}:${info.place || ""}:${Math.round((info.distanceM || 0) / 100)}`;
+  const existing = diversionAlerts.get(id);
+  if (existing?.key === key) {
+    existing.hits += 1;
+    existing.lastAt = now;
+  } else {
+    diversionAlerts.set(id, {
+      id: `diversion-${id}-${now}`,
+      key,
+      hits: 1,
+      firstAt: existing?.firstAt || now,
+      lastAt: now,
+      announcedAt: existing?.announcedAt || 0,
+      line: String(bus?.service?.line_name || ""),
+      reg: busRegLabel(bus),
+      operator: busOperatorCode(bus),
+      reason: info.reason,
+      place: info.place || "",
+      distanceM: info.distanceM,
+      noticeId: info.notice?.id || "",
+      title: info.reason === "notice" ? "Bus on diversion" : "Bus off its normal route",
+      body: diversionAlertLine(bus, info),
+    });
+  }
+  const alert = diversionAlerts.get(id);
+  if (!alert) return;
+  if (alert.hits < DIVERSION_HITS_TO_ALERT) return;
+  alert.body = diversionAlertLine(bus, info);
+  alert.lastAt = now;
+  const repeat = alert.announcedAt && now - alert.announcedAt < DIVERSION_REPEAT_MS;
+  if (!repeat) {
+    alert.announcedAt = now;
+    if (diversionAudioOn) {
+      // `unannounced` so this speaks without needing the Plus announcements toggle.
+      speak(alert.body, { force: true, unannounced: true });
+    }
+  }
+  updateAlertsBadge();
+  renderAlertsPanel();
+}
+
+function clearDiversion(busId) {
+  const id = String(busId || "");
+  if (!diversionAlerts.has(id)) return;
+  diversionAlerts.delete(id);
+  updateAlertsBadge();
+  renderAlertsPanel();
+}
+
+function pruneDiversionAlerts(now = Date.now()) {
+  let changed = false;
+  for (const [id, alert] of diversionAlerts) {
+    if (now - (alert.lastAt || 0) > DIVERSION_EXPIRE_MS) {
+      diversionAlerts.delete(id);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** Look for buses driving a diversion or clearly off their published alignment. */
+async function runDiversionScan({ force = false } = {}) {
+  if (diversionScanBusy || !liveMapActive()) return;
+  const now = Date.now();
+  if (!force && now - lastDiversionScanAt < DIVERSION_SCAN_MS) return;
+  lastDiversionScanAt = now;
+  if (pruneDiversionAlerts(now)) renderAlertsPanel();
+  diversionScanBusy = true;
+  try {
+    const bounds = map.getBounds();
+    const candidates = [];
+    for (const marker of markers.values()) {
+      const bus = marker.bus;
+      if (!bus || isNotInService(bus)) continue;
+      const ll = marker.getLatLng();
+      if (!ll || !bounds.contains(ll)) continue;
+      candidates.push({ marker, bus, ll });
+    }
+    if (!candidates.length) return;
+    candidates.sort((a, b) => a.ll.lat - b.ll.lat || a.ll.lng - b.ll.lng);
+
+    // 1. Road notices — cheap and deterministic.
+    const remaining = [];
+    for (const item of candidates) {
+      const notice = diversionNoticeForBus(item.bus, item.ll);
+      if (!notice) {
+        remaining.push(item);
+        continue;
+      }
+      flagDiversion(item.bus, {
+        reason: "notice",
+        notice,
+        place: placeNameFor(item.ll.lng, item.ll.lat),
+      });
+    }
+    if (!remaining.length) return;
+
+    // 2. Off published route — needs a trip lookup, so only a couple per scan.
+    const budget = DIVERSION_ROUTE_FETCHES_PER_SCAN;
+    const start = diversionScanTick % Math.max(1, remaining.length);
+    const ordered = [...remaining.slice(start), ...remaining.slice(0, start)];
+    let checked = 0;
+    for (const item of ordered) {
+      if (checked >= budget) break;
+      const tripId = String(item.bus?.trip_id || "").trim();
+      if (!tripId) continue;
+      checked += 1;
+      const path = await plannedPathForBus(item.bus);
+      if (path.length < 2) continue;
+      const evidence = routeDeviationEvidence({
+        plannedPath: path,
+        gpsPoints: [{ lat: item.ll.lat, lng: item.ll.lng, t: now }],
+        livePing: { lat: item.ll.lat, lng: item.ll.lng, t: now },
+      });
+      const speed = Number(item.bus?.speedMph);
+      // Parked buses sit off the alignment all the time; only moving buses divert.
+      if (!evidence.detected || (Number.isFinite(speed) && speed < 3)) {
+        clearDiversion(item.bus.id);
+        continue;
+      }
+      flagDiversion(item.bus, {
+        reason: "off-route",
+        distanceM: evidence.currentDistanceM,
+        place: placeNameFor(item.ll.lng, item.ll.lat),
+      });
+    }
+    diversionScanTick += budget;
+  } finally {
+    diversionScanBusy = false;
+  }
+}
+
 function setupServiceAlerts() {
   alertsBtnEl?.addEventListener("click", () => {
     const open = alertsPanelEl?.hidden !== false;
@@ -773,8 +1053,20 @@ function setupServiceAlerts() {
     setAlertsPanelOpen(true);
     renderAlertsPanel();
   });
+  const diversionAudioEl = document.getElementById("diversion-audio-toggle");
+  if (diversionAudioEl) {
+    diversionAudioEl.checked = diversionAudioOn;
+    diversionAudioEl.addEventListener("change", () => {
+      diversionAudioOn = diversionAudioEl.checked;
+      localStorage.setItem(DIVERSION_AUDIO_KEY, diversionAudioOn ? "1" : "0");
+      if (!diversionAudioOn) clearSpeech();
+    });
+  }
   loadServiceNotices();
   setInterval(loadServiceNotices, 5 * 60_000);
+  setInterval(() => {
+    runDiversionScan();
+  }, DIVERSION_SCAN_MS);
 }
 
 setupServiceAlerts();
@@ -1913,13 +2205,17 @@ function clearSpeech() {
 }
 
 function pumpSpeech() {
-  if (speakBusy || !announceOn || !window.speechSynthesis) return;
+  if (speakBusy || !window.speechSynthesis) return;
   const next = speakQueue.shift();
   if (!next) return;
+  const { text, unannounced = false } = next;
+  // Alert audio (diversions) speaks without the Plus announcement toggle;
+  // follow-mode speech still needs announceOn.
+  if (!announceOn && !unannounced) return;
   speakBusy = true;
-  lastSpokenText = next;
+  lastSpokenText = text;
   lastSpokenAt = Date.now();
-  const utter = new SpeechSynthesisUtterance(next);
+  const utter = new SpeechSynthesisUtterance(text);
   utter.lang = "en-GB";
   utter.rate = 0.95;
   const voice = pickUkVoice();
@@ -1933,15 +2229,16 @@ function pumpSpeech() {
   window.speechSynthesis.speak(utter);
 }
 
-function speak(text, { force = false, append = false } = {}) {
-  if (!announceOn || !text || !window.speechSynthesis) return;
+function speak(text, { force = false, append = false, unannounced = false } = {}) {
+  if (!text || !window.speechSynthesis) return;
+  if (!announceOn && !unannounced) return;
   if (!force && text === lastSpokenText) return;
   if (!force && !append && Date.now() - lastSpokenAt < 8000) return;
   if (append) {
-    speakQueue.push(text);
+    speakQueue.push({ text, unannounced });
   } else {
     clearSpeech();
-    speakQueue = [text];
+    speakQueue = [{ text, unannounced }];
   }
   pumpSpeech();
 }
@@ -2022,7 +2319,7 @@ function announceJourney(marker, { intro = false } = {}) {
   lastStopIndex = index;
   lastStopKey = stop;
   clearSpeech();
-  speakQueue = lines;
+  speakQueue = lines.map((text) => ({ text, unannounced: false }));
   pumpSpeech();
 }
 
@@ -13942,6 +14239,7 @@ function schedule() {
   liveScheduleRunning = true;
   loadBuses({ replace: true }).catch(() => {});
   refreshAltonIfRelevant();
+  runDiversionScan({ force: true });
   timer = setInterval(() => {
     if (!liveMapActive()) {
       stopLiveSchedule();
@@ -13950,6 +14248,7 @@ function schedule() {
     pruneStaleMarkers();
     loadBuses().catch(() => {});
     refreshAltonIfRelevant();
+    runDiversionScan();
   }, livePollMs());
   // Coasting is currently disabled because replacing feed objects discarded its
   // state and caused marker snap-back. Do not pay for a no-op 1 Hz loop.
