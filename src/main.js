@@ -22,6 +22,7 @@ import {
 import { setupAuth } from "./auth.js";
 import { brandLiveryForBus, brandColourForBus, brandLiveryForLine } from "./operator-liveries.js";
 import { fleetLiveryForBus } from "./fleet-liveries.js";
+import { LIVERY_SEED } from "./livery-seed.generated.js";
 import "./style.css";
 
 window.L = L;
@@ -9432,6 +9433,11 @@ const STAFF_COLOURS = {
 
 const liveryCache = new Map();
 const liveryById = new Map();
+// Bundled CSS for the fleets the map shows by default: the first frame can paint
+// real liveries with no /api/bt-liveries round trip (run scripts/sync-livery-seed.mjs).
+for (const [id, row] of Object.entries(LIVERY_SEED)) {
+  if (row?.left_css) liveryById.set(String(id), row);
+}
 const btRegCache = new Map();
 const LIVERY_CACHE_KEY = "uk-bus-livery-css-v1";
 const LIVERY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
