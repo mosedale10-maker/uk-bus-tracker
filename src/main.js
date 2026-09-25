@@ -4670,20 +4670,17 @@ function setTrailPathLayerLatLngs(layer, latlngs) {
   layer?.setLatLngs?.(latlngs);
 }
 
-function trailPairNeedsRoadMatch(breakOpts = {}) {
-  return Boolean(
-    breakOpts.staffs ||
-    isStaffsTrailOperator(breakOpts.operator) ||
-    isAltonLine(breakOpts.line) ||
-    breakOpts.coach ||
-    isCoachTrailOperator(breakOpts.operator),
-  );
+function trailPairNeedsRoadMatch() {
+  // Every visible route stroke must come from a validated road matcher. This
+  // also covers feeds whose operator metadata is missing and would otherwise
+  // bypass the Staffs-specific checks above.
+  return true;
 }
 
 function makeTrailPair(path, layer, opts = {}) {
   const breakOpts = trailPairBreakOpts(opts);
   const roadAligned = Boolean(opts.roadAligned);
-  const latlngs = trailPairNeedsRoadMatch(breakOpts) && !roadAligned
+  const latlngs = trailPairNeedsRoadMatch(breakOpts, opts) && !roadAligned
     ? []
     : asTrailLatLngs(path, breakOpts);
   // White casing + coloured centre keeps the route readable over both light
@@ -4721,7 +4718,7 @@ function setTrailPairPath(pair, path, opts = {}) {
   );
   pair.breakOpts = breakOpts;
   const roadAligned = Boolean(opts.roadAligned);
-  if (trailPairNeedsRoadMatch(breakOpts) && !roadAligned) {
+  if (trailPairNeedsRoadMatch(breakOpts, opts) && !roadAligned) {
     // Never replace a validated road with a raw GPS/chord update. A newly
     // selected route starts with an empty stroke until its OSRM match arrives.
     if (pair.roadAligned) return;
