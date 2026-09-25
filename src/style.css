@@ -5726,3 +5726,120 @@ button.fleet-route:hover {
 .about-version a:hover {
   text-decoration: underline;
 }
+
+/* ─── Final phone overrides ───────────────────────────────────────────────
+   Keep these after the component defaults above. Several Fleet rules are
+   intentionally shared with tablet/desktop, so putting the phone values at
+   the end prevents a later base rule from undoing the compact layout. */
+@media (max-width: 700px) {
+  .fleet-panel {
+    padding-top: 14px;
+    padding-left: max(12px, env(safe-area-inset-left, 0px));
+    padding-right: max(12px, env(safe-area-inset-right, 0px));
+  }
+
+  .fleet-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+
+  .fleet-search,
+  .fleet-route-form,
+  .fleet-vehicle-form {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+    flex: none;
+  }
+
+  .fleet-scope {
+    font-size: 0.74rem;
+    line-height: 1.3;
+  }
+
+  .fleet-title {
+    font-size: 1.35rem;
+    line-height: 1.15;
+  }
+
+  .fleet-lead {
+    font-size: 0.88rem;
+    line-height: 1.4;
+  }
+
+  .fleet-meta-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .fleet-meta-grid > * {
+    min-width: 0;
+  }
+
+  .fleet-meta-label {
+    overflow-wrap: anywhere;
+  }
+
+  .fleet-table {
+    font-size: 0.82rem;
+  }
+
+  .fleet-table th,
+  .fleet-table td {
+    padding: 8px;
+    font-size: 0.78rem;
+  }
+
+  .fleet-section,
+  .fleet-route-trips {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .fleet-list-btn {
+    min-height: 48px;
+  }
+
+  .fleet-list-map,
+  .fleet-list-replay {
+    margin-right: 6px;
+  }
+
+  .fleet-tt-row {
+    grid-template-columns: 5.5rem minmax(0, 1fr);
+  }
+
+  .fleet-bottom-tabs {
+    margin-left: -12px;
+    margin-right: -12px;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* Keep the photo feature available without dedicating a full extra row to
+     the optional uploader name on a narrow phone. */
+  .popup-photo {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 8px;
+  }
+
+  .popup-photo-note,
+  .popup-photo-credit,
+  .popup-bus-photo {
+    grid-column: 1 / -1;
+  }
+
+  .popup-photo .bus-photo-name {
+    min-height: 40px;
+    font-size: 16px;
+  }
+
+  .popup-photo .bus-photo-btn {
+    min-height: 40px;
+    padding: 8px 12px;
+  }
+}
