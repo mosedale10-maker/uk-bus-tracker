@@ -3942,6 +3942,145 @@ function prefersRecordedStaffsRoute(operator, hasRecordedPoints = false) {
   return hasRecordedPoints && isStaffsTrailOperator(operator);
 }
 
+/*
+ * Hanley diversion used by the Staffordshire local services.  The recorder can
+ * briefly report the A5008/A50 Potteries Way loop while the bus is leaving the
+ * station.  Keep the recorded journey everywhere else, but replace that one
+ * urban loop with the signed local alignment: Lichfield Street -> Birch Terrace
+ * -> Charles Street -> the onward main route.
+ *
+ * These are OSM road vertices (not straight-line guesses), so the fallback is
+ * still road-shaped when OSRM is unavailable.  The function is deliberately
+ * limited to Staffordshire operators and the Hanley corridor; other routes and
+ * genuinely different buses are untouched.
+ */
+const STAFFS_HANLEY_BIRCH_CHARLES_PATH = Object.freeze([
+  [53.022336, -2.174618], // Hanley bus station approach
+  [53.0222507, -2.1739669], // Lichfield Street
+  [53.0225391, -2.1739475],
+  [53.0226307, -2.1738953],
+  [53.022752, -2.1738912],
+  [53.0229223, -2.1739168], // Birch Terrace
+  [53.0230572, -2.1735544],
+  [53.0234931, -2.17242],
+  [53.0235389, -2.1722974],
+  [53.0236147, -2.1720941],
+  [53.023664, -2.1720047],
+  [53.0236837, -2.1719753],
+  [53.0237074, -2.1719525],
+  [53.0237378, -2.1719266],
+  [53.0237854, -2.1719124],
+  [53.0238157, -2.1719056], // Charles Street
+  [53.023862, -2.1719138],
+  [53.0239635, -2.1719989],
+  [53.0245025, -2.1728393],
+  [53.0249142, -2.1734388],
+  [53.0249411, -2.173478],
+]);
+
+function staffsHanleyDiversionEnabled(operatorOrOpts) {
+  const opts =
+    typeof operatorOrOpts === "string"
+      ? { operator: operatorOrOpts }
+      : operatorOrOpts && typeof operatorOrOpts === "object"
+        ? operatorOrOpts
+        : {};
+  const operator = String(opts.operator || "").trim().toUpperCase();
+  const key = String(opts.key || opts.trailKey || "").trim();
+  return Boolean(
+    opts.staffs ||
+      isStaffsTrailOperator(operator) ||
+      /^staff-/i.test(key) ||
+      /^at:/i.test(key),
+  );
+}
+
+function staffsPointIsPotteriesWay(point) {
+  const lat = Number(point?.[0]);
+  const lng = Number(point?.[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  if (lat < 53.0195 || lat > 53.0285 || lng < -2.192 || lng > -2.168) return false;
+  // A5008 west loop and the short A50 section beside the station.
+  return lng < -2.1748 || (lat >= 53.0238 && lng >= -2.1722 && lng <= -2.1705);
+}
+
+function staffsPointNearHanley(point) {
+  const lat = Number(point?.[0]);
+  const lng = Number(point?.[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  return haversineMeters(lat, lng, 53.022336, -2.174618) <= 550;
+}
+
+function staffsDiversionBridgePoints(entry, exit, reverse = false) {
+  const middle = STAFFS_HANLEY_BIRCH_CHARLES_PATH.slice(1, -1);
+  const points = reverse ? [entry, ...middle.reverse(), exit] : [entry, ...middle, exit];
+  return points.filter((point, index) => {
+    if (!index) return true;
+    return haversineMeters(
+      Number(point[0]),
+      Number(point[1]),
+      Number(points[index - 1][0]),
+      Number(points[index - 1][1]),
+    ) > 1;
+  });
+}
+
+/** Replace only the Potteries Way loop in a Staffordshire Hanley tail. */
+function applyStaffsHanleyDiversion(path, operatorOrOpts = {}) {
+  if (!Array.isArray(path) || path.length < 2 || !staffsHanleyDiversionEnabled(operatorOrOpts)) {
+    return path;
+  }
+  const multi = Array.isArray(path[0]) && Array.isArray(path[0][0]);
+  const segments = multi ? path : [path];
+  let changed = false;
+  const corrected = segments.map((segment) => {
+    const flat = flattenTrailLatLngs(segment);
+    if (flat.length < 4) return segment;
+    const potteries = flat
+      .map((point, index) => (staffsPointIsPotteriesWay(point) ? index : -1))
+      .filter((index) => index >= 0);
+    if (!potteries.length) return segment;
+    const firstPotteries = potteries[0];
+    const lastPotteries = potteries[potteries.length - 1];
+    const outbound = staffsPointNearHanley(flat[0]) && !staffsPointNearHanley(flat[flat.length - 1]);
+    const inbound = staffsPointNearHanley(flat[flat.length - 1]) && !staffsPointNearHanley(flat[0]);
+    if (!outbound && !inbound) return segment;
+
+    const fixedEnd = STAFFS_HANLEY_BIRCH_CHARLES_PATH[STAFFS_HANLEY_BIRCH_CHARLES_PATH.length - 1];
+    const endCandidates = flat
+      .map((point, index) => (haversineMeters(point[0], point[1], fixedEnd[0], fixedEnd[1]) <= 65 ? index : -1))
+      .filter((index) => index >= 0);
+    const inboundEndCandidates = endCandidates.filter((index) => index < lastPotteries);
+    const charlesIndex = outbound
+      ? endCandidates.find((index) => index > firstPotteries)
+      : inboundEndCandidates[inboundEndCandidates.length - 1];
+    if (!Number.isInteger(charlesIndex)) return segment;
+
+    const localShape = flat.some((point, index) => {
+      if (outbound ? index <= firstPotteries || index >= charlesIndex : index <= charlesIndex || index >= lastPotteries) {
+        return false;
+      }
+      return distanceToTrailPath(point, STAFFS_HANLEY_BIRCH_CHARLES_PATH) <= 85;
+    });
+    if (!localShape) return segment;
+
+    if (outbound) {
+      const entry = flat[0];
+      const exit = flat[charlesIndex];
+      const bridge = staffsDiversionBridgePoints(entry, exit, false);
+      changed = true;
+      return [...bridge, ...flat.slice(charlesIndex + 1)];
+    }
+    const entry = flat[charlesIndex];
+    const exit = flat[flat.length - 1];
+    const bridge = staffsDiversionBridgePoints(entry, exit, true);
+    changed = true;
+    return [...flat.slice(0, charlesIndex), ...bridge];
+  });
+  if (!changed) return path;
+  return multi ? corrected : corrected[0];
+}
+
 /** Canonical NOC for a Staffordshire live bus, including BODS rows with no operator field. */
 function staffsOperatorCode(bus, extra = {}) {
   const candidates = [
@@ -4523,8 +4662,14 @@ function routeDeviationEvidence({ plannedPath, gpsPoints = [], livePing = null, 
  * route. The async aligner will paint the on-road version when it is ready.
  */
 function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
-  const roadFlat = flattenTrailLatLngs(roadPath);
-  if (roadFlat.length >= 2) return roadPath;
+  // Apply the Hanley local-road correction after any road matcher as well as
+  // before it.  OSRM can otherwise choose Potteries Way again for the short
+  // connector even though the recorded journey is the diversion.
+  const correctedGpsPath = applyStaffsHanleyDiversion(gpsPath, breakOpts);
+  const correctedRoadPath = applyStaffsHanleyDiversion(roadPath, breakOpts);
+  const roadFlat = flattenTrailLatLngs(correctedRoadPath);
+  if (roadFlat.length >= 2) return correctedRoadPath;
+  gpsPath = correctedGpsPath;
   // A live First Potteries guide is already Bustimes road geometry. Keep that
   // geometry visible while the asynchronous OSRM pass validates/straightens
   // sparse pieces; unlike raw GPS it cannot cut across fields or buildings.
@@ -5472,6 +5617,7 @@ function refreshPinnedTrailLine(key) {
       path = pathFromGpsPoints(gpsPoints);
     }
   }
+  path = applyStaffsHanleyDiversion(path, { ...breakOpts, key: id });
   const existing = pinnedTrailLines.get(id);
   if (flattenTrailLatLngs(path).length < 2) {
     if (existing && (filter.live || filter.follow)) {
@@ -5586,7 +5732,10 @@ function refreshLiveTrailLine(key) {
   if (playbackDeviation?.detected && !playbackDeviation.sparse) {
     switchPlaybackToActualRoute();
   }
-  const path = plannedGuidePath || pathFromGpsPoints(gpsPoints);
+  const path = applyStaffsHanleyDiversion(
+    plannedGuidePath || pathFromGpsPoints(gpsPoints),
+    { ...breakOpts, key },
+  );
   if (flattenTrailLatLngs(path).length < 2) {
     if (liveTrailLine) {
       // Keep the last good live stroke through a sparse/misaligned poll. A
@@ -7515,11 +7664,14 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
     plannedLiveCoachTail &&
     String(alignBreak.operator || "").trim().toUpperCase() === "FLIX",
   );
-  const visiblePlannedAheadPath = suppressFlixPlannedAhead ? null : plannedAheadPath;
+  const visiblePlannedAheadPath = suppressFlixPlannedAhead
+    ? null
+    : applyStaffsHanleyDiversion(plannedAheadPath, alignBreak);
+  const renderPath = applyStaffsHanleyDiversion(drawPath, alignBreak);
   playbackLayer.clearLayers();
   restoreGpsReplayLayers();
   if (visiblePlannedAheadPath) drawPlannedRouteAhead(visiblePlannedAheadPath, playbackLayer, alignBreak);
-  const flat = flattenTrailLatLngs(drawPath);
+  const flat = flattenTrailLatLngs(renderPath);
   if (flat.length < 2 && !visiblePlannedAheadPath) return;
   // For a live coach, the green line is the recorded GPS tail rendered in
   // liveTrailLayer. Never paint the planned Bustimes path a second time as a
@@ -7528,8 +7680,8 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
     const arrowGps =
       trackedGps.length >= 2
         ? normalizeGpsTrailPoints(trackedGps)
-        : gpsPointsForJourneyArrows(drawPath, lastPing, trackedGps, datetime);
-    const pair = makeTrailPair(drawPath, playbackLayer, {
+        : gpsPointsForJourneyArrows(renderPath, lastPing, trackedGps, datetime);
+    const pair = makeTrailPair(renderPath, playbackLayer, {
       gpsPoints: arrowGps.length ? arrowGps : lastPing ? [lastPing] : [],
       ...alignBreak,
       roadAligned,
@@ -7546,7 +7698,7 @@ function drawPlaybackScene(drawPath, opts = {}, { fit = true } = {}) {
       /* ignore */
     }
     if (!pair?.arrows?.length) {
-      pair.arrows = buildTrailArrowsAlongRoad(roadAligned ? drawPath : [], playbackLayer, {
+      pair.arrows = buildTrailArrowsAlongRoad(roadAligned ? renderPath : [], playbackLayer, {
         gpsPoints: arrowGps.length ? arrowGps : lastPing ? [lastPing] : [],
         breakOpts: alignBreak,
       });
@@ -8120,6 +8272,10 @@ async function startRoutePlayback({
     path = tracked;
     usingTracked = path.length >= 2;
   }
+  const recordedPathSelected = usingTracked;
+  path = applyStaffsHanleyDiversion(path, { operator, line, staffs: isStaffsTrailOperator(operator) });
+  // The correction changes the geometry, not the source-selection decision.
+  usingTracked = recordedPathSelected && tracked.length >= 2;
   if (effectiveActualRoute && tracked.length < 2 && diversionFallbackPath.length < 2) {
     showMessage(
       "This journey is diverted, but no recorded GPS is available yet — the planned route will not be shown",
@@ -8380,13 +8536,14 @@ async function startRoutePlayback({
             ? clipGpsPointsAtPing(allGps, currentLivePing)
             : [];
   if (replayOnly) {
-    const roadSource = plannedPath.length >= 2
+    const rawRoadSource = plannedPath.length >= 2
       ? plannedPath
       : replayPoints.length >= 2
         ? Array.isArray(replayPoints[0])
           ? replayPoints
           : pathFromGpsPoints(replayPoints)
         : tracked;
+    const roadSource = applyStaffsHanleyDiversion(rawRoadSource, alignBreak);
     let roadPath = [];
     let roadTimeout = 0;
     const roadTimeoutMs =
@@ -8417,6 +8574,7 @@ async function startRoutePlayback({
       const localRoadPath = alignTrailToRoadsLocal(roadSource, alignBreak);
       if (flattenTrailLatLngs(localRoadPath).length >= 2) roadPath = localRoadPath;
     }
+    roadPath = applyStaffsHanleyDiversion(roadPath, alignBreak);
     const replayRoadPath = Array.isArray(roadPath?.[0]?.[0])
       ? roadPath
         .map((segment) => thinTrailPoints(segment, 35))
@@ -8500,8 +8658,8 @@ async function startRoutePlayback({
     prepareRoadTrail(path, undefined, alignBreak)
       .then((aligned) => {
         if (!playback || playback.requestId !== requestId || playback.playKey !== playKey) return;
-        let upgraded = aligned;
-        const matchedRoadPath = flattenTrailLatLngs(aligned).length >= 2;
+        let upgraded = applyStaffsHanleyDiversion(aligned, alignBreak);
+        const matchedRoadPath = flattenTrailLatLngs(upgraded).length >= 2;
         const deviationPath = flattenTrailLatLngs(upgraded).length >= 2 ? upgraded : plannedPath;
         const deviationEvidence = routeDeviationEvidence({
           plannedPath: deviationPath,
