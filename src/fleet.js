@@ -1,7 +1,7 @@
 /** Staffordshire fleet browser (bustimes-backed). */
 
 import { scfcTimetableHtml } from "./scfc-stops.js";
-import { normalizeUkFeedTimestamp } from "./time.js";
+import { normalizeUkFeedTimestamp, isSimonNoteActive } from "./time.js";
 
 export const STAFFS_OPERATORS = [
   { name: "Aimee's", slug: "aimees", noc: "TXCO" },
@@ -4480,7 +4480,7 @@ export function createFleetBrowser({
     const isDgRoute27 =
       String(line).trim().toUpperCase() === "27" &&
       routeOperatorValues.some((value) => isDagcOperatorValue(value));
-    const simonNote = isDgRoute27
+    const simonNote = isDgRoute27 && isSimonNoteActive()
       ? `<p class="fleet-route-personal-note">Behind the wheel today is the one and only Simon!!</p>`
       : "";
     const dates = [];

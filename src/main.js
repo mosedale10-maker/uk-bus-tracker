@@ -3,7 +3,7 @@ import "leaflet/dist/leaflet.css";
 import { VectorTile } from "@mapbox/vector-tile";
 import { PbfReader } from "pbf";
 import { createFleetBrowser, isSchoolBusLive, isStokeFcShuttleLive, isStokeFcLine, sameServiceLine, normalizeStokeFcLine, extractRouteFromVehicle, enrichJourneyRow, liveVehicleAsHistoryRow, mergeLiveHistoryRow, fetchAtHistoryFromTrails, mergeAtHistoryRows, fetchCoachHistoryFromTrails, isDivertedText, STAFFS_SCHOOL_ROUTES, STOKE_FC_SHUTTLE_ROUTES } from "./fleet.js";
-import { normalizeUkFeedTimestamp } from "./time.js";
+import { normalizeUkFeedTimestamp, isSimonNoteActive } from "./time.js";
 import { setupPlus, isPlus, requirePlus, syncPlusFromAccount } from "./plus.js";
 import { getUser } from "./auth.js";
 import {
@@ -11663,7 +11663,7 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
       `${from} ${to} ${bus.origin || ""} ${bus.destination || ""} ${bus.service?.url || ""}`,
     );
   const simonNote =
-    isRoute27 && (isDgBusContext({ bus }, extra) || is27ToBentilee)
+    isRoute27 && isSimonNoteActive() && (isDgBusContext({ bus }, extra) || is27ToBentilee)
       ? `<p class="popup-simon-note">Behind the wheel today is the one and only Simon!!</p>`
       : "";
   const noRegCoachReplay =

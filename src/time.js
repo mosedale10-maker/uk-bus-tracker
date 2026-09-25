@@ -2,6 +2,14 @@ const UK_TZ = "Europe/London";
 const NAIVE_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
 const HAS_TIMEZONE = /(?:Z|[+-]\d{2}:?\d{2})$/i;
 
+// One-day D&G Route 27 message: hide it from 3pm UK time on 25 September 2026.
+const SIMON_NOTE_END = Date.parse("2026-09-25T15:00:00+01:00");
+
+export function isSimonNoteActive(now = Date.now()) {
+  const at = Number(now);
+  return !Number.isFinite(at) || at < SIMON_NOTE_END;
+}
+
 let ukPartsFormatter;
 function ukTimeZoneOffsetMs(date) {
   try {
