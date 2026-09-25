@@ -7808,6 +7808,21 @@ async function startRoutePlayback({
     toMs: toMs ? toMs + 30 * 60_000 : 0,
     force: true,
   });
+  if (prefersRecordedDg27Route(line, operator, true)) {
+    const recordedKeys = await fetchTrailKeysForGroup(
+      { operators: ["DAGC"], lines: [line] },
+      { days: TRAIL_KEEP_DAYS },
+    );
+    const extraKeys = recordedKeys.filter((key) => !keys.includes(key));
+    if (extraKeys.length) {
+      keys.push(...extraKeys);
+      await fetchServerTrailsChunked(extraKeys, {
+        fromMs: fromMs ? fromMs - 30 * 60_000 : 0,
+        toMs: toMs ? toMs + 30 * 60_000 : 0,
+        force: true,
+      });
+    }
+  }
   if (requestId !== playbackRequestSeq) return;
 
   // If Map didn't say in/out, infer from GPS near this run — never draw both legs.
