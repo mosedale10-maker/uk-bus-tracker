@@ -4997,20 +4997,25 @@ function livePingForTrailFilter(filter = {}, fallbackPoints = []) {
   };
   const hasIdentity = vehicleId || trailKey || reg;
   const explicitLivePing = filter.livePing;
-  if (
-    explicitLivePing &&
-    Number.isFinite(Number(explicitLivePing.lat)) &&
-    Number.isFinite(Number(explicitLivePing.lng))
-  ) {
-    return { ...explicitLivePing, source: explicitLivePing.source || "playback" };
-  }
   const candidates = [];
 
   for (const marker of markers.values()) {
     const bus = marker?.bus;
     if (!bus) continue;
-    if (journeyId && bus.journey_id && String(bus.journey_id) !== journeyId) continue;
-    if (tripId && bus.trip_id && String(bus.trip_id) !== tripId) continue;
+    const markerId = String(bus.id || "").trim();
+    const markerTrailKey = String(marker.extra?.trailKey || markerId).trim();
+    const markerBtId = String(bus.btId ?? bus.vehicle?.id ?? "").trim();
+    const markerReg = compactReg(busRegistration(bus, marker.extra || {}));
+    const strongIdentity = Boolean(
+      (trailKey && (markerId === trailKey || markerTrailKey === trailKey)) ||
+        (vehicleId && (markerId === vehicleId || markerBtId === vehicleId || markerTrailKey === vehicleId)) ||
+        (reg && markerReg && markerReg === reg),
+    );
+    // Bustimes journey/trip ids can differ from the live BODS id. Once the
+    // physical vehicle/trail identity matches, do not reject its current marker
+    // merely because the feed changed journey ids — that leaves the tail behind.
+    if (journeyId && bus.journey_id && String(bus.journey_id) !== journeyId && !strongIdentity) continue;
+    if (tripId && bus.trip_id && String(bus.trip_id) !== tripId && !strongIdentity) continue;
     let markerKeys = [];
     if (hasIdentity) {
       markerKeys = trailKeysForVehicle({
@@ -5023,7 +5028,7 @@ function livePingForTrailFilter(filter = {}, fallbackPoints = []) {
         reg: busRegistration(bus, marker.extra || {}),
       });
       const keyMatch = trailKey && markerKeys.includes(trailKey);
-      if (!keyMatch && !busMatchesHistoryFocus(bus, marker.extra || {}, focus)) continue;
+      if (!keyMatch && !strongIdentity && !busMatchesHistoryFocus(bus, marker.extra || {}, focus)) continue;
     }
     let ll = null;
     try {
@@ -5073,6 +5078,16 @@ function livePingForTrailFilter(filter = {}, fallbackPoints = []) {
   }
   candidates.sort((a, b) => b.score - a.score || b.t - a.t);
   if (candidates.length) return candidates[0];
+
+  // Only use the stored ping when no live marker is available. Prefer the
+  // current 2D marker above so a live tail keeps advancing with the bus.
+  if (
+    explicitLivePing &&
+    Number.isFinite(Number(explicitLivePing.lat)) &&
+    Number.isFinite(Number(explicitLivePing.lng))
+  ) {
+    return { ...explicitLivePing, source: explicitLivePing.source || "playback" };
+  }
 
   const points = normalizeGpsTrailPoints(fallbackPoints);
   const last = points[points.length - 1];
