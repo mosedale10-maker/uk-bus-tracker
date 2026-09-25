@@ -297,6 +297,10 @@ function keysForBus(bus, point = null) {
   }
 
   if (AT_LINES.has(line) && primary) {
+    // Also store the journey under the plate. Bus markers, Fleet and replay all
+    // look vehicles up by reg:*, so without this the Alton Towers tail was only
+    // reachable from the staff-AVL view.
+    if (hasPlate && reg) keys.push(`reg:${reg}`);
     keys.push(
       direction
         ? `at:${line}:${direction}:${primary}:${runDay}`
@@ -599,7 +603,13 @@ async function fetchDgAtVehicles() {
     const t = parseFeedTimestamp(item?.recordedAtTime, Date.now());
     if (!Number.isFinite(t)) continue;
     const heading = Number(item?.positioning?.bearing);
-    const reg = compactReg(ref);
+    const refCompact = compactReg(ref);
+    // NextStop refs look like "6005_-_BU74_YSF". Compact first, then take the
+    // trailing plate, so the points are also stored under a `reg:` key — without
+    // it the Alton Towers journey only existed under the opaque `staff-…` key and
+    // no other view (bus marker, Fleet, replay) could find the tail.
+    const plate = (refCompact.match(/([A-Z]{1,2}\d{1,2}[A-Z]{3})$/) || [])[1] || "";
+    const reg = plate || (!/^\d+$/.test(refCompact) ? refCompact : "");
     const journeyId = String(item?.currentJourney?.id || item?.currentJourney?.journeyId || "").trim();
     const direction = String(item?.currentJourney?.directionRef || "").trim();
     const destName = String(item?.currentJourney?.destination?.name || "").trim();
@@ -613,6 +623,9 @@ async function fetchDgAtVehicles() {
       destination: destName || atDestinationFor(line, direction),
       service: { line_name: line },
       vehicle: { reg: /^[A-Z]{1,2}\d{1,2}[A-Z]{3}$/.test(reg) ? reg : "", name: ref },
+      // Keep the Alton Towers staff identity so a bus-marker view can still find
+      // the `staff-…` trail for this vehicle.
+      _trailStaffRef: ref,
       _trailOperator: "DAGC",
       _direction: direction,
       operator: { noc: "DAGC", id: "DAGC", name: "D & G Bus" },
