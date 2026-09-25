@@ -34,6 +34,51 @@ const COACH_MIN_GAP_MS = 25_000;
 const MIN_MOVE_M = 6;
 const COACH_MIN_MOVE_M = 40;
 const UA = "uk-bus-tracker/1.0 (+https://ukbustracker.up.railway.app; trail recorder)";
+const UK_TZ = "Europe/London";
+const NAIVE_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
+const HAS_TIMEZONE = /(?:Z|[+-]\d{2}:?\d{2})$/i;
+let ukPartsFormatter;
+function ukTimeZoneOffsetMs(date) {
+  try {
+    ukPartsFormatter ||= new Intl.DateTimeFormat("en-US", {
+      timeZone: UK_TZ,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    });
+    const parts = Object.fromEntries(
+      ukPartsFormatter
+        .formatToParts(date)
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, Number(part.value)]),
+    );
+    return Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day,
+      parts.hour,
+      parts.minute,
+      parts.second,
+    ) - date.getTime();
+  } catch {
+    return 0;
+  }
+}
+/** NextStop AT timestamps are UK wall-clock strings with no timezone suffix. */
+function parseFeedTimestamp(raw, fallback = Date.now()) {
+  const text = String(raw ?? "").trim();
+  if (!text) return fallback;
+  const direct = Date.parse(text);
+  if (!Number.isFinite(direct)) return fallback;
+  if (!NAIVE_DATE_TIME.test(text) || HAS_TIMEZONE.test(text)) return direct;
+  const wallAsUtc = Date.parse(`${text}Z`);
+  if (!Number.isFinite(wallAsUtc)) return direct;
+  return wallAsUtc - ukTimeZoneOffsetMs(new Date(wallAsUtc));
+}
 const DG_HEADERS = {
   "User-Agent": UA,
   Accept: "application/json",
@@ -170,7 +215,7 @@ function atDestinationFor(line, direction = "", fallback = "") {
 function pointFromBus(bus) {
   const [lng, lat] = bus?.coordinates || [];
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-  const t = bus.datetime ? new Date(bus.datetime).getTime() : Date.now();
+  const t = parseFeedTimestamp(bus.datetime, Date.now());
   if (!Number.isFinite(t)) return null;
   const heading = Number(bus.heading);
   const line = String(bus.service?.line_name || bus._bods?.line || "").trim();
@@ -551,7 +596,7 @@ async function fetchDgAtVehicles() {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
     const ref = String(item?.vehicle?.ref || item?.vehicle?.vehicleUniqueId || "").trim();
     if (!ref) continue;
-    const t = item?.recordedAtTime ? new Date(item.recordedAtTime).getTime() : Date.now();
+    const t = parseFeedTimestamp(item?.recordedAtTime, Date.now());
     if (!Number.isFinite(t)) continue;
     const heading = Number(item?.positioning?.bearing);
     const reg = compactReg(ref);

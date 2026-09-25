@@ -3,6 +3,7 @@ import "leaflet/dist/leaflet.css";
 import { VectorTile } from "@mapbox/vector-tile";
 import { PbfReader } from "pbf";
 import { createFleetBrowser, isSchoolBusLive, isStokeFcShuttleLive, isStokeFcLine, sameServiceLine, normalizeStokeFcLine, extractRouteFromVehicle, enrichJourneyRow, liveVehicleAsHistoryRow, mergeLiveHistoryRow, fetchAtHistoryFromTrails, mergeAtHistoryRows, fetchCoachHistoryFromTrails, isDivertedText, STAFFS_SCHOOL_ROUTES, STOKE_FC_SHUTTLE_ROUTES } from "./fleet.js";
+import { normalizeUkFeedTimestamp } from "./time.js";
 import { setupPlus, isPlus, requirePlus, syncPlusFromAccount } from "./plus.js";
 import { getUser } from "./auth.js";
 import {
@@ -12059,7 +12060,12 @@ async function loadAltonTowers() {
       const lat = Number(item.positioning?.latitude);
       const lng = Number(item.positioning?.longitude);
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
-      if (isStalePing(item.recordedAtTime)) continue;
+      // NextStop sends AT timestamps as UK local wall-clock values without a
+      // timezone suffix. Normalize them before stale checks, throttling, and
+      // trail ordering; otherwise BST points look one hour in the future and
+      // the tail is split/reset on the next poll.
+      item.recordedAtTime = normalizeUkFeedTimestamp(item.recordedAtTime, Date.now());
+      if (!item.recordedAtTime || isStalePing(item.recordedAtTime)) continue;
       const id = item.vehicle?.ref || item.vehicle?.vehicleUniqueId;
       if (!id) continue;
       if (dgIsNotInService(item)) continue;

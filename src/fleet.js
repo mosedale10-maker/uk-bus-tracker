@@ -1,6 +1,7 @@
 /** Staffordshire fleet browser (bustimes-backed). */
 
 import { scfcTimetableHtml } from "./scfc-stops.js";
+import { normalizeUkFeedTimestamp } from "./time.js";
 
 export const STAFFS_OPERATORS = [
   { name: "Aimee's", slug: "aimees", noc: "TXCO" },
@@ -619,6 +620,8 @@ async function refreshAtLive() {
           item.currentJourney?.destination?.name ||
           meta.get(line)?.destination ||
           "Alton Towers";
+        const recordedAtTime = normalizeUkFeedTimestamp(item.recordedAtTime, Date.now());
+        item.recordedAtTime = recordedAtTime;
         const entry = {
           line,
           dest,
@@ -626,7 +629,7 @@ async function refreshAtLive() {
           reg: compactQuery(parsed.reg),
           regLabel: parsed.reg,
           ref: item.vehicle?.ref || "",
-          recordedAtTime: item.recordedAtTime || "",
+          recordedAtTime,
           direction: item.currentJourney?.directionRef || "",
           item,
         };
