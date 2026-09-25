@@ -798,6 +798,8 @@ let lastPaintViewKey = "";
 const PAINT_REFRESH_MS = 60_000;
 const PAINT_MOVE_REFRESH_MS = 15_000;
 const PAINT_STAFF_RETRY_MS = 30_000;
+/** Never let a slow /api/bt-paint hold the first render — it merges when it lands. */
+const PAINT_RENDER_DEADLINE_MS = 2500;
 const BUS_POLL_MS = 6000;
 const TABLET_LIVE_POLL_MS = 10000;
 const LIVE_MARKER_BATCH_SIZE = 48;
@@ -9472,13 +9474,18 @@ function scheduleLiveryCachePersist() {
 
 restoreLiveryCache();
 
-const PAINT_CACHE_KEY = "uk-bus-paint-v2";
+const PAINT_CACHE_KEY = "uk-bus-paint-v3";
 const PAINT_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 let paintCachePersistTimer = null;
 
+/**
+ * Keep `service.url` and `vehicle.url`: bustimes omits `operator` on paint rows,
+ * so the operator NOC (and Flix/NATX detection) is recovered from /vehicles/{noc}-…
+ * URLs. Dropping them made cached paint rows match the wrong buses.
+ */
 function compactPaintRow(row) {
   if (!row || typeof row !== "object") return null;
-  const slim = {
+  return {
     id: row.id,
     journey_id: row.journey_id,
     trip_id: row.trip_id,
@@ -9489,24 +9496,33 @@ function compactPaintRow(row) {
     destination: row.destination,
     block: row.block,
     date: row.date,
-    service: row.service,
-    vehicle: row.vehicle,
+    service: row.service
+      ? {
+          url: row.service.url,
+          line_name: row.service.line_name,
+          operator: row.service.operator,
+        }
+      : row.service,
+    vehicle: row.vehicle
+      ? {
+          url: row.vehicle.url,
+          name: row.vehicle.name,
+          reg: row.vehicle.reg,
+          livery: row.vehicle.livery,
+          colour: row.vehicle.colour,
+          fleet_code: row.vehicle.fleet_code,
+          fleet_number: row.vehicle.fleet_number,
+        }
+      : row.vehicle,
     operator: row.operator,
   };
-  if (slim.service && typeof slim.service === "object") {
-    slim.service = { ...slim.service };
-    delete slim.service.url;
-  }
-  if (slim.vehicle && typeof slim.vehicle === "object") {
-    slim.vehicle = { ...slim.vehicle };
-    delete slim.vehicle.url;
-  }
-  return slim;
 }
 
 function restorePaintCache() {
   if (typeof localStorage === "undefined") return;
   try {
+    // v2 rows lost the /vehicles/{noc}-… URLs and mis-paired liveries. Drop them.
+    localStorage.removeItem("uk-bus-paint-v2");
     const raw = localStorage.getItem(PAINT_CACHE_KEY);
     const data = raw ? JSON.parse(raw) : null;
     if (!data || !Array.isArray(data.rows)) return;
@@ -9574,6 +9590,73 @@ function resolveBusLivery(bus) {
   return fleet || brand || null;
 }
 
+/** Merge freshly fetched paint rows into the cached snapshot, keyed by row id. */
+function mergePaintRows(existing, incoming) {
+  if (!Array.isArray(incoming) || !incoming.length) return Array.isArray(existing) ? existing : [];
+  const byId = new Map();
+  for (const row of existing || []) if (row?.id != null) byId.set(row.id, row);
+  for (const row of incoming) if (row?.id != null) byId.set(row.id, row);
+  return [...byId.values()];
+}
+
+async function absorbPaintResponse(res) {
+  if (!res?.ok) return [];
+  try {
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+    return data.filter((row) => row && row.id != null);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Repaint just the markers waiting on one livery id. Livery CSS is fetched per
+ * id, so a bus has to change the moment its own row lands — otherwise the exact
+ * livery only appeared on a later poll cycle, many seconds after the map opened.
+ */
+function repaintMarkersForLivery(liveryKey) {
+  const key = String(liveryKey || "");
+  if (!key) return;
+  for (const marker of markers.values()) {
+    const bus = marker.bus;
+    if (!bus) continue;
+    if (liveryIdOf(bus) !== key) continue;
+    const heading = Number(bus.heading);
+    marker._iconKey = busIconKey(bus, heading, bus.speedMph);
+    marker.setIcon(busIcon(bus, heading));
+  }
+}
+
+/**
+ * Re-apply the newest paint snapshot to buses already on the map. Paint can land
+ * after the first render (slow /api/bt-paint), and without this the wrong brand
+ * stripes stayed on screen until the next poll.
+ */
+function refreshMarkersFromPaintSnapshot() {
+  for (const marker of markers.values()) {
+    const bus = marker.bus;
+    if (!bus) continue;
+    const isCoach = isFlixBus(bus) || isNationalExpress(bus);
+    const source = isCoach ? lastCoachPaintBuses : lastPaintBuses;
+    if (!source.length) continue;
+    const painted = paintBodsWithBustimesLiveries([bus], source)[0];
+    if (!painted || painted === bus) continue;
+    const liv = painted.vehicle?.livery;
+    if (liv == null || String(liv) === liveryIdOf(bus)) continue;
+    bus.vehicle = {
+      ...(bus.vehicle || {}),
+      livery: liv,
+      colour: painted.vehicle?.colour || bus.vehicle?.colour,
+      name: bus.vehicle?.name || painted.vehicle?.name,
+      reg: bus.vehicle?.reg || painted.vehicle?.reg,
+    };
+    const heading = Number(bus.heading);
+    marker._iconKey = busIconKey(bus, heading, bus.speedMph);
+    marker.setIcon(busIcon(bus, heading));
+  }
+}
+
 async function ensureLiveries(idsOrBuses) {
   const list = Array.isArray(idsOrBuses) ? idsOrBuses : [];
   const bustimesIds = new Set();
@@ -9589,44 +9672,50 @@ async function ensureLiveries(idsOrBuses) {
 
   const ids = [...bustimesIds].filter((id) => !liveryCss(liveryById.get(id)));
   if (!ids.length) return;
-  // Bustimes flakes under a flood — few at a time; drop misses so the next poll retries.
+  // Bustimes flakes under a flood, so keep the fan-out chunked — but do not await
+  // a chunk: one slow id must never hold up the rest of the map's liveries.
   const concurrency = isTabletPerformanceDevice() ? 32 : 16;
   for (let i = 0; i < ids.length; i += concurrency) {
-    const chunk = ids.slice(i, i + concurrency);
-    await Promise.all(
-      chunk.map(async (id) => {
-        if (liveryCss(liveryById.get(id))) return;
-        if (!liveryCache.has(id)) {
-          liveryCache.set(
-            id,
-            fetch(`/api/bt-liveries/${encodeURIComponent(id)}/`, {
-              signal: AbortSignal.timeout(8_000),
-            })
-              .then(async (res) => {
-                if (!res.ok) {
-                  liveryCache.delete(id);
-                  return null;
-                }
-                try {
-                  return await res.json();
-                } catch {
-                  liveryCache.delete(id);
-                  return null;
-                }
-              })
-              .catch(() => {
+    for (const id of ids.slice(i, i + concurrency)) {
+      if (liveryCss(liveryById.get(id))) continue;
+      if (!liveryCache.has(id)) {
+        liveryCache.set(
+          id,
+          fetch(`/api/bt-liveries/${encodeURIComponent(id)}/`, {
+            signal: AbortSignal.timeout(6_000),
+          })
+            .then(async (res) => {
+              if (!res.ok) {
                 liveryCache.delete(id);
                 return null;
-              }),
-          );
-        }
-        const row = await liveryCache.get(id);
-        if (row?.left_css || row?.left) {
+              }
+              try {
+                return await res.json();
+              } catch {
+                liveryCache.delete(id);
+                return null;
+              }
+            })
+            .catch(() => {
+              liveryCache.delete(id);
+              return null;
+            }),
+        );
+      }
+      liveryCache
+        .get(id)
+        .then((row) => {
+          if (!row || (!row.left_css && !row.left)) {
+            liveryCache.delete(id);
+            return;
+          }
           liveryById.set(id, row);
           scheduleLiveryCachePersist();
-        } else liveryCache.delete(id);
-      }),
-    );
+          // Show the real livery now, not on the next poll.
+          repaintMarkersForLivery(id);
+        })
+        .catch(() => {});
+    }
   }
 }
 
@@ -13444,6 +13533,24 @@ async function loadBuses({ replace = false } = {}) {
     // or bustimes.org liveries never finish loading (Staffs stayed on brand stripes).
     const safeFetch = (url) => fetch(url, { signal }).catch(() => null);
     const paintFetch = (url) => fetch(url).catch(() => null);
+    /**
+     * Paint is supplementary data and bustimes can be slow. Never hold the first
+     * render hostage to it: past the deadline we carry on with the cached
+     * snapshot, and the late response is merged and repainted when it arrives.
+     */
+    const latePaint = [];
+    const paintFetchForRender = (url, target) => {
+      const req = paintFetch(url);
+      return Promise.race([
+        req,
+        new Promise((resolve) => {
+          setTimeout(() => {
+            latePaint.push({ req, target });
+            resolve(null);
+          }, PAINT_RENDER_DEADLINE_MS);
+        }),
+      ]);
+    };
 
     const [localRes, flixBuses, natxBuses, staffsOpFeeds, paintRes, ...extraPaintRes] =
       await Promise.all([
@@ -13458,11 +13565,11 @@ async function loadBuses({ replace = false } = {}) {
             )
           : Promise.resolve([]),
         wantPaint && showLocal
-          ? paintFetch(`/api/bt-paint?${params}`)
+          ? paintFetchForRender(`/api/bt-paint?${params}`, "local")
           : Promise.resolve(null),
         ...(wantPaint && overStaffs && staffsPaintOps.length
           ? staffsPaintOps.map((op) =>
-              paintFetch(`/api/bt-paint?operator=${encodeURIComponent(op)}`),
+              paintFetchForRender(`/api/bt-paint?operator=${encodeURIComponent(op)}`, "local"),
             )
           : []),
         // Coach paint fetched separately below — not mixed into local paintById.
@@ -13472,7 +13579,7 @@ async function loadBuses({ replace = false } = {}) {
     if (wantPaint && showCoach) {
       coachPaintRes = await Promise.all(
         coachPaintOps.map((op) =>
-          paintFetch(`/api/bt-paint?operator=${encodeURIComponent(op)}`),
+          paintFetchForRender(`/api/bt-paint?operator=${encodeURIComponent(op)}`, "coach"),
         ),
       );
     }
@@ -13535,6 +13642,26 @@ async function loadBuses({ replace = false } = {}) {
         lastCoachPaintBuses = nextCoachPaint;
       }
       coachPaintBuses = lastCoachPaintBuses;
+    }
+
+    // Paint that missed the render deadline still counts: merge it and repaint so
+    // the exact livery lands without waiting for the next poll cycle.
+    for (const { req, target } of latePaint) {
+      req
+        .then(async (res) => {
+          const rows = await absorbPaintResponse(res);
+          if (!rows.length) return;
+          if (target === "coach") {
+            lastCoachPaintBuses = mergePaintRows(lastCoachPaintBuses, rows);
+          } else {
+            lastPaintBuses = mergePaintRows(lastPaintBuses, rows);
+            lastPaintAt = Date.now();
+            schedulePaintCachePersist();
+            ensureLiveries(rows).catch(() => {});
+          }
+          refreshMarkersFromPaintSnapshot();
+        })
+        .catch(() => {});
     }
 
     const byId = new Map();
