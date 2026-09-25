@@ -9472,6 +9472,76 @@ function scheduleLiveryCachePersist() {
 
 restoreLiveryCache();
 
+const PAINT_CACHE_KEY = "uk-bus-paint-v2";
+const PAINT_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+let paintCachePersistTimer = null;
+
+function compactPaintRow(row) {
+  if (!row || typeof row !== "object") return null;
+  const slim = {
+    id: row.id,
+    journey_id: row.journey_id,
+    trip_id: row.trip_id,
+    service_id: row.service_id,
+    coordinates: row.coordinates,
+    heading: row.heading,
+    datetime: row.datetime,
+    destination: row.destination,
+    block: row.block,
+    date: row.date,
+    service: row.service,
+    vehicle: row.vehicle,
+    operator: row.operator,
+  };
+  if (slim.service && typeof slim.service === "object") {
+    slim.service = { ...slim.service };
+    delete slim.service.url;
+  }
+  if (slim.vehicle && typeof slim.vehicle === "object") {
+    slim.vehicle = { ...slim.vehicle };
+    delete slim.vehicle.url;
+  }
+  return slim;
+}
+
+function restorePaintCache() {
+  if (typeof localStorage === "undefined") return;
+  try {
+    const raw = localStorage.getItem(PAINT_CACHE_KEY);
+    const data = raw ? JSON.parse(raw) : null;
+    if (!data || !Array.isArray(data.rows)) return;
+    const at = Number(data.at || 0);
+    if (!at || Date.now() - at > PAINT_CACHE_TTL_MS) return;
+    const rows = data.rows.map(compactPaintRow).filter(Boolean).slice(0, 2500);
+    if (rows.length) {
+      lastPaintBuses = rows;
+      lastPaintAt = at;
+    }
+  } catch {
+    /* storage is optional */
+  }
+}
+
+function schedulePaintCachePersist() {
+  if (typeof localStorage === "undefined" || paintCachePersistTimer) return;
+  paintCachePersistTimer = setTimeout(() => {
+    paintCachePersistTimer = null;
+    try {
+      localStorage.setItem(
+        PAINT_CACHE_KEY,
+        JSON.stringify({
+          at: Date.now(),
+          rows: lastPaintBuses.slice(0, 2500).map(compactPaintRow).filter(Boolean),
+        }),
+      );
+    } catch {
+      /* storage is optional */
+    }
+  }, 1000);
+}
+
+restorePaintCache();
+
 /** Resolve paint: bustimes.org livery CSS first, then photo/fleet, then local brand. */
 function resolveBusLivery(bus) {
   if (!bus) return null;
@@ -9520,7 +9590,7 @@ async function ensureLiveries(idsOrBuses) {
   const ids = [...bustimesIds].filter((id) => !liveryCss(liveryById.get(id)));
   if (!ids.length) return;
   // Bustimes flakes under a flood — few at a time; drop misses so the next poll retries.
-  const concurrency = isTabletPerformanceDevice() ? 20 : 8;
+  const concurrency = isTabletPerformanceDevice() ? 32 : 16;
   for (let i = 0; i < ids.length; i += concurrency) {
     const chunk = ids.slice(i, i + concurrency);
     await Promise.all(
@@ -13302,6 +13372,9 @@ async function loadBuses({ replace = false } = {}) {
   }
 
   pruneStaleMarkers();
+  // Warm CSS for the cached paint snapshot before the position/paint fan-out.
+  // On a warm start this makes the exact bus paints available on first paint.
+  if (lastPaintBuses.length) ensureLiveries(lastPaintBuses).catch(() => {});
 
   if (busesBusy && !replace) return;
   const gen = ++busesGen;
@@ -13435,6 +13508,10 @@ async function loadBuses({ replace = false } = {}) {
       if (paintBuses.length) {
         lastPaintBuses = paintBuses;
         lastPaintAt = Date.now();
+        schedulePaintCachePersist();
+        // Start CSS fetches as soon as the paint rows arrive; do not make the
+        // marker batch wait for the slower position/notice fan-out.
+        ensureLiveries(paintBuses).catch(() => {});
       }
 
       const coachById = new Map();
