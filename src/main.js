@@ -4572,7 +4572,7 @@ function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
   ) return [];
   const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
   if (flattenTrailLatLngs(local).length >= 2) return local;
-  return [];
+  return staffsActual && flattenTrailLatLngs(gpsPath).length >= 2 ? gpsPath : [];
 }
 
 function gpsTimeAtPathFraction(gpsPts, frac) {
