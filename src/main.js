@@ -14110,6 +14110,28 @@ function staffWhere(item) {
   return applyLiveCoast(item, lat, lng, heading, age, speed, String(item.recordedAtTime || ""));
 }
 
+function scheduleMarkerTailRefresh(marker) {
+  const bus = marker?.bus;
+  if (!bus) return;
+  const markerId = String(bus.id || "").trim();
+  const markerBtId = String(bus.btId ?? bus.vehicle?.id ?? "").trim();
+  const markerReg = compactReg(busRegistration(bus, marker.extra || {}));
+  for (const [key, filter] of pinnedTrailFilters.entries()) {
+    if (!filter?.live && !filter?.follow) continue;
+    const state = pinnedLiveRouteStates.get(key);
+    const matches =
+      key === markerId ||
+      String(filter.liveTrailKey || "") === markerId ||
+      String(filter.liveBusId || "") === markerId ||
+      (markerBtId && String(filter.liveVehicleId || "") === markerBtId) ||
+      (markerReg && compactReg(filter.liveReg || "") === markerReg) ||
+      (state && liveRouteStateMatchesBus(state, bus, markerReg));
+    if (matches) schedulePinnedTrailRefresh(key);
+  }
+  const focusKey = liveTrailKeyForMarker(marker);
+  if (focusKey && String(liveTrailKey) === focusKey) scheduleLiveTrailRefresh(focusKey);
+}
+
 function advanceLiveMarkers() {
   for (const marker of markers.values()) {
     const bus = marker.bus;
@@ -14138,6 +14160,7 @@ function advanceLiveMarkers() {
 
 function placeOnRoad(marker, snapped) {
   moveMarkerTo(marker, snapped.lat, snapped.lng);
+  if (marker.bus && snapped.coasting) scheduleMarkerTailRefresh(marker);
   if (marker.bus && !snapped.stalled && !snapped.coasting) {
     recordVehicleTrail(marker.bus.id, snapped.lat, snapped.lng, snapped.heading, {
       journeyId: marker.bus.journey_id,
