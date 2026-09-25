@@ -316,6 +316,8 @@ const ROAD_NOTICES = [
     // First's published Longton diversion: King Street → Baths Road /
     // Longton Interchange → Wood Street → Upper Cross Street → Anchor Road.
     // Market Street is not part of the replacement geometry.
+    // First Potteries' published diversion only; other operators keep their own alignment.
+    operators: ["FPOT"],
     diversionPath: [
       [52.989817, -2.136028],
       [52.989750, -2.135928],
@@ -6324,7 +6326,8 @@ async function showFleetRouteTails({
         : Promise.resolve([]);
   const plannedRoutePath = await plannedRoutePromise;
   const plannedPathBlocked =
-    plannedRoutePath.length >= 2 && pathCrossesActiveRoadNotice(plannedRoutePath);
+    plannedRoutePath.length >= 2 &&
+    pathCrossesActiveRoadNotice(plannedRoutePath, { operator: opCode, line: code });
   const plannedPathUsable = plannedRoutePath.length >= 2 && !plannedPathBlocked;
   // A route-wide coach tail is useful immediately from the published path; do
   // not make the user wait for a large/slow recorder response. If the planned
@@ -6904,7 +6907,7 @@ function updatePinnedLiveRouteForBus(bus, trailMeta = {}) {
               String(current.tripId || "") !== requestedTripId ||
               !Array.isArray(plannedPath) ||
               plannedPath.length < 2 ||
-              pathCrossesActiveRoadNotice(plannedPath)
+              pathCrossesActiveRoadNotice(plannedPath, { operator: "FPOT", line })
             ) return;
             pinnedTrailFilters.set(key, {
               ...current,
@@ -8278,13 +8281,15 @@ async function startRoutePlayback({
   const plannedPathBlocked =
     plannedRouteOverride &&
     tripPath.length >= 2 &&
-    pathCrossesActiveRoadNotice(tripPath);
+    pathCrossesActiveRoadNotice(tripPath, { operator, line: line || trip?.line || "" });
   const staffsRecordedRoute = prefersRecordedStaffsRoute(operator, true, line || trip?.line || "");
   if (staffsRecordedRoute && hasRecordedGps) {
     // The recorded GPS is the authority for the current diverted stint.
     actualRouteRequired = true;
   }
-  const diversionFallbackPath = plannedPathBlocked ? activeDiversionReplacement(tripPath) : [];
+  const diversionFallbackPath = plannedPathBlocked
+    ? activeDiversionReplacement(tripPath, { operator, line: line || trip?.line || "" })
+    : [];
   let plannedPath =
     plannedRouteOverride &&
     !actualRouteRequired &&
@@ -11991,12 +11996,26 @@ function tripPathFromTimes(times) {
   return path;
 }
 
-function pathCrossesActiveRoadNotice(path) {
+function roadNoticeAppliesToService(notice, { operator = "", line = "" } = {}) {
+  const noc = String(operator || "").trim().toUpperCase();
+  const operators = Array.isArray(notice?.operators) ? notice.operators : [];
+  if (operators.length && !operators.includes(noc)) return false;
+  const routes = Array.isArray(notice?.routes) ? notice.routes : [];
+  if (routes.length && !routes.some((value) => sameServiceLine(line, value))) return false;
+  return true;
+}
+
+function pathCrossesActiveRoadNotice(path, context = {}) {
   const flat = Array.isArray(path?.[0]?.[0]) ? path.flat() : path;
   if (!Array.isArray(flat) || flat.length < 2) return false;
   const now = Date.now();
   for (const notice of ROAD_NOTICES || []) {
-    if (!roadNoticeIsActive(notice, now) || !Array.isArray(notice.path) || notice.path.length < 2) continue;
+    if (
+      !roadNoticeIsActive(notice, now) ||
+      !roadNoticeAppliesToService(notice, context) ||
+      !Array.isArray(notice.path) ||
+      notice.path.length < 2
+    ) continue;
     for (let i = 0; i < flat.length; i += 1) {
       const point = flat[i];
       if (!Array.isArray(point) || !Number.isFinite(point[0]) || !Number.isFinite(point[1])) continue;
@@ -12008,12 +12027,17 @@ function pathCrossesActiveRoadNotice(path) {
   return false;
 }
 
-function activeDiversionReplacement(path) {
+function activeDiversionReplacement(path, context = {}) {
   const flat = Array.isArray(path?.[0]?.[0]) ? path.flat() : path;
   if (!Array.isArray(flat) || flat.length < 2) return [];
   const now = Date.now();
   for (const notice of ROAD_NOTICES || []) {
-    if (!roadNoticeIsActive(notice, now) || !Array.isArray(notice.diversionPath) || notice.diversionPath.length < 2) continue;
+    if (
+      !roadNoticeIsActive(notice, now) ||
+      !roadNoticeAppliesToService(notice, context) ||
+      !Array.isArray(notice.diversionPath) ||
+      notice.diversionPath.length < 2
+    ) continue;
     const closedPath = Array.isArray(notice.path) ? notice.path : [];
     if (closedPath.length < 2) continue;
     let first = -1;
@@ -12029,10 +12053,25 @@ function activeDiversionReplacement(path) {
       }
     }
     if (first < 0 || last <= first) continue;
+    const diversionHits = flat.filter((point) =>
+      notice.diversionPath.some((diversionPoint, index) => {
+        if (index === 0) {
+          return haversineMeters(point[0], point[1], diversionPoint[0], diversionPoint[1]) <= 25;
+        }
+        return (
+          distPointToSegmentMeters(
+            point,
+            notice.diversionPath[index - 1],
+            diversionPoint,
+          ) <= 25
+        );
+      }),
+    ).length;
+    if (diversionHits >= 3) continue;
     return [
-      ...flat.slice(0, first + 1),
+      ...flat.slice(0, first),
       ...notice.diversionPath,
-      ...flat.slice(last),
+      ...flat.slice(last + 1),
     ];
   }
   return [];
@@ -15360,7 +15399,9 @@ async function osrmRoadBridge(a, b, signal, breakOpts = {}) {
 async function preserveRecordedGpsShape(latlngs, signal, breakOpts = {}) {
   const flat = Array.isArray(latlngs?.[0]?.[0]) ? latlngs.flat() : latlngs;
   if (!Array.isArray(flat) || flat.length < 2) return [];
-  const nearNotice = Boolean(breakOpts.actualRoute && pathCrossesActiveRoadNotice(flat));
+  const nearNotice = Boolean(
+    breakOpts.actualRoute && pathCrossesActiveRoadNotice(flat, breakOpts),
+  );
   const directGapM = nearNotice ? 600 : breakOpts.actualRoute ? 220 : 120;
   const inputSegs = trailSegmentsOf(flat, breakOpts);
   const output = [];
