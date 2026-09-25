@@ -6352,11 +6352,17 @@ async function startRoutePlayback({
         Number.isFinite(new Date(datetime).getTime()) &&
         Date.now() - new Date(datetime).getTime() > 12 * 60_000,
     );
-  // Staffordshire buses use the matching Bustimes trip alignment when one is
-  // available; the current marker still clips live playback to the bus.
+  // Staffordshire buses and coaches use the matching Bustimes trip alignment
+  // when one is available; the current marker still clips live playback to the
+  // bus. A real diversion is different: keep the recorded GPS route instead of
+  // substituting the scheduled alignment. 36A retains its explicit A50 override;
+  // its active Longton closure is handled by the road-notice check below.
   const plannedRouteOverride = usesPlannedRouteOverride(line, operator);
+  const route36AOverride =
+    sameServiceLine(line, "36A") &&
+    (!operator || String(operator).trim().toUpperCase() === "FPOT");
   const actualRouteRequired = Boolean(
-    !plannedRouteOverride && (diverted || isDivertedText(dest, line, operator)),
+    !route36AOverride && (diverted || isDivertedText(dest, line, operator)),
   );
   if (!playKey) {
     showMessage("No route to show");
@@ -6673,13 +6679,25 @@ async function startRoutePlayback({
     tripPath.length >= 2 &&
     trackedGps.length >= 2 &&
     pathCrossesActiveRoadNotice(tripPath);
-  let plannedPath = plannedRouteOverride && tripPath.length >= 2 && !plannedPathBlocked ? tripPath : [];
+  let plannedPath =
+    plannedRouteOverride &&
+    !actualRouteRequired &&
+    tripPath.length >= 2 &&
+    !plannedPathBlocked
+      ? tripPath
+      : [];
   // Prefer the recorded GPS whenever this journey has a usable recorded run,
   // including historical Fleet rows. A scheduled/timetable path is only a
   // fallback when no GPS was captured; otherwise the row can silently show a
   // planned line instead of the route the bus actually drove.
   const hasRecordedGps = tracked.length >= 2;
-  if (!plannedPath.length && usesPlannedRouteOverride(line, operator) && !hasRecordedGps && tripPath.length >= 2) {
+  if (
+    !plannedPath.length &&
+    !actualRouteRequired &&
+    usesPlannedRouteOverride(line, operator) &&
+    !hasRecordedGps &&
+    tripPath.length >= 2
+  ) {
     plannedPath = tripPath;
   }
   const plannedReplayPoints = plannedPath.length >= 2
