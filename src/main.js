@@ -7908,6 +7908,7 @@ async function startRoutePlayback({
       .then((aligned) => {
         if (!playback || playback.requestId !== requestId || playback.playKey !== playKey) return;
         let upgraded = aligned;
+        const matchedRoadPath = flattenTrailLatLngs(aligned).length >= 2;
         const deviationPath = flattenTrailLatLngs(upgraded).length >= 2 ? upgraded : plannedPath;
         const deviationEvidence = routeDeviationEvidence({
           plannedPath: deviationPath,
@@ -7935,29 +7936,29 @@ async function startRoutePlayback({
             .map((stop) => [stop.lat, stop.lng]);
           if (stopPath.length >= 2) upgraded = stopPath;
         }
-        if (
-           plannedRouteOverride &&
-           !actualRouteRequired &&
-           flattenTrailLatLngs(upgraded).length >= 2
-         ) {
-           rememberPlannedRoute(upgraded, { ...plannedMeta, roadAligned: true });
-         }
-         const upPath = clipTrailPathAtPing(upgraded, clipPing, { failClosed: true });
+        if (plannedRouteOverride && !actualRouteRequired && matchedRoadPath) {
+          rememberPlannedRoute(aligned, { ...plannedMeta, roadAligned: true });
+        }
+        const upPath = clipTrailPathAtPing(upgraded, clipPing, { failClosed: true });
         const alignedAhead =
           coachPlayback &&
           String(operator || "").trim().toUpperCase() !== "FLIX" &&
           !isHistorical &&
           !replayOnly &&
-          flattenTrailLatLngs(upgraded).length >= 2
+          matchedRoadPath
             ? upgraded
-            : plannedAheadPath;
+            : null;
         if (flattenTrailLatLngs(upPath).length >= 2 || alignedAhead) {
           drawPlaybackScene(
             upPath,
-            { ...scene, plannedAheadPath: alignedAhead, roadAligned: true },
+            {
+              ...scene,
+              plannedAheadPath: alignedAhead,
+              roadAligned: matchedRoadPath,
+            },
             { fit: false },
           );
-          if (flattenTrailLatLngs(upPath).length >= 2) playback.path = upPath;
+          if (matchedRoadPath && flattenTrailLatLngs(upPath).length >= 2) playback.path = upPath;
         }
       })
       .catch(() => {});
