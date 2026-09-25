@@ -11560,8 +11560,18 @@ function popupHtml(bus, extra = {}, { omitStops = false, sidePanel = false } = {
     historyLineFilter:
       extra.historyLineFilter || (scfc ? normalizeStokeFcLine(line) : extra.line || line || ""),
   };
+  const routeCode = String(line).trim().split(/\s+/)[0] || "";
+  const isRoute27 =
+    routeCode.toUpperCase() === "27" ||
+    sameServiceLine(routeCode, "27") ||
+    sameServiceLine(extractRouteFromVehicle(bus), "27");
+  const is27ToBentilee =
+    isRoute27 &&
+    /\bbentilee\b/i.test(
+      `${from} ${to} ${bus.origin || ""} ${bus.destination || ""} ${bus.service?.url || ""}`,
+    );
   const simonNote =
-    String(line).trim().toUpperCase() === "27" && isDgBusContext({ bus }, extra)
+    isRoute27 && (isDgBusContext({ bus }, extra) || is27ToBentilee)
       ? `<p class="popup-simon-note">Behind the wheel today is the one and only Simon!!</p>`
       : "";
   const noRegCoachReplay =
