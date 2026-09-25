@@ -943,6 +943,38 @@ const liveryCssCache = new Map();
 const liveryCssInflight = new Map();
 const LIVERY_CSS_TTL_MS = 6 * 60 * 60 * 1000;
 
+async function fetchLiveryUpstream(id) {
+  const response = await fetch(`https://bustimes.org/api/liveries/${id}/`, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "uk-bus-tracker/1.0 (marker livery css)",
+    },
+    signal: AbortSignal.timeout(8_000),
+  });
+  const body = Buffer.from(await response.arrayBuffer());
+  return { status: response.status, body, contentType: response.headers.get("content-type") };
+}
+
+function rememberLiveryCss(id, body) {
+  liveryCssCache.set(id, { at: Date.now(), body });
+  if (liveryCssCache.size > 400) {
+    liveryCssCache.delete(liveryCssCache.keys().next().value);
+  }
+}
+
+/** Pre-pull one livery's CSS off the request path (used by the startup warmer). */
+function revalidateLiveryInBackground(id) {
+  const key = String(id || "");
+  if (!/^\d+$/.test(key) || liveryCssCache.has(key) || liveryCssInflight.has(key)) return;
+  const pending = fetchLiveryUpstream(key)
+    .then((result) => {
+      if (result.status >= 200 && result.status < 300) rememberLiveryCss(key, result.body);
+    })
+    .catch(() => {})
+    .finally(() => liveryCssInflight.delete(key));
+  liveryCssInflight.set(key, pending);
+}
+
 app.get("/api/bt-liveries/:id/", async (req, res, next) => {
   try {
     const id = String(req.params.id || "").replace(/\/+$/, "");
@@ -960,26 +992,13 @@ app.get("/api/bt-liveries/:id/", async (req, res, next) => {
     }
     let pending = liveryCssInflight.get(id);
     if (!pending) {
-      pending = (async () => {
-        const response = await fetch(`https://bustimes.org/api/liveries/${id}/`, {
-          headers: {
-            Accept: "application/json",
-            "User-Agent": "uk-bus-tracker/1.0 (marker livery css)",
-          },
-          signal: AbortSignal.timeout(8_000),
-        });
-        const body = Buffer.from(await response.arrayBuffer());
-        return { status: response.status, body, contentType: response.headers.get("content-type") };
-      })();
+      pending = fetchLiveryUpstream(id);
       liveryCssInflight.set(id, pending);
       pending.finally(() => liveryCssInflight.delete(id));
     }
     const result = await pending;
     if (result.status >= 200 && result.status < 300) {
-      liveryCssCache.set(id, { at: Date.now(), body: result.body });
-      if (liveryCssCache.size > 400) {
-        liveryCssCache.delete(liveryCssCache.keys().next().value);
-      }
+      rememberLiveryCss(id, result.body);
     } else if (hit) {
       res.setHeader("Cache-Control", "public, max-age=60");
       res.setHeader("X-Cache", "STALE");
@@ -999,7 +1018,44 @@ app.get("/api/bt-liveries/:id/", async (req, res, next) => {
 /** Bustimes vehicles.json for colour/livery ids only (positions stay BODS). */
 const paintVehiclesCache = new Map();
 const paintVehiclesInflight = new Map();
-const PAINT_TTL_MS = 12_000;
+/** Paint (vehicle + livery id) changes slowly: refresh often, but never wait. */
+const PAINT_TTL_MS = 60_000;
+const PAINT_STALE_MS = 30 * 60_000;
+
+async function fetchPaintUpstream(cacheKey) {
+  const upstream = `https://bustimes.org/vehicles.json${cacheKey === "?" ? "" : cacheKey}`;
+  const response = await fetch(upstream, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "uk-bus-tracker/1.0 (marker livery paint only)",
+    },
+  });
+  const body = Buffer.from(await response.arrayBuffer());
+  return {
+    status: response.status,
+    body,
+    contentType: response.headers.get("content-type"),
+  };
+}
+
+function rememberPaint(cacheKey, body) {
+  paintVehiclesCache.set(cacheKey, { at: Date.now(), body });
+  if (paintVehiclesCache.size > 64) {
+    paintVehiclesCache.delete(paintVehiclesCache.keys().next().value);
+  }
+}
+
+/** Refresh a paint query off the request path so nobody waits on bustimes.org. */
+function revalidatePaintInBackground(cacheKey) {
+  if (paintVehiclesInflight.has(cacheKey)) return;
+  const pending = fetchPaintUpstream(cacheKey)
+    .then((result) => {
+      if (result.status >= 200 && result.status < 300) rememberPaint(cacheKey, result.body);
+    })
+    .catch(() => {})
+    .finally(() => paintVehiclesInflight.delete(cacheKey));
+  paintVehiclesInflight.set(cacheKey, pending);
+}
 
 app.get("/api/bt-paint", async (req, res, next) => {
   try {
@@ -1015,32 +1071,25 @@ app.get("/api/bt-paint", async (req, res, next) => {
       res.type("json").send(hit.body);
       return;
     }
+    // Stale-while-revalidate: paint is minutes-fresh at worst, which beats a
+    // multi-second upstream wait that left buses on brand stripes.
+    if (hit && now - hit.at < PAINT_STALE_MS) {
+      revalidatePaintInBackground(cacheKey);
+      res.setHeader("Cache-Control", "public, max-age=8");
+      res.setHeader("X-Cache", "STALE");
+      res.setHeader("X-Data-Source", "bustimes-paint");
+      res.type("json").send(hit.body);
+      return;
+    }
     let pending = paintVehiclesInflight.get(cacheKey);
     if (!pending) {
-      pending = (async () => {
-        const upstream = `https://bustimes.org/vehicles.json${cacheKey === "?" ? "" : cacheKey}`;
-        const response = await fetch(upstream, {
-          headers: {
-            Accept: "application/json",
-            "User-Agent": "uk-bus-tracker/1.0 (marker livery paint only)",
-          },
-        });
-        const body = Buffer.from(await response.arrayBuffer());
-        return {
-          status: response.status,
-          body,
-          contentType: response.headers.get("content-type"),
-        };
-      })();
+      pending = fetchPaintUpstream(cacheKey);
       paintVehiclesInflight.set(cacheKey, pending);
       pending.finally(() => paintVehiclesInflight.delete(cacheKey));
     }
     const result = await pending;
     if (result.status >= 200 && result.status < 300) {
-      paintVehiclesCache.set(cacheKey, { at: Date.now(), body: result.body });
-      if (paintVehiclesCache.size > 48) {
-        paintVehiclesCache.delete(paintVehiclesCache.keys().next().value);
-      }
+      rememberPaint(cacheKey, result.body);
     } else if (hit) {
       res.setHeader("Cache-Control", "public, max-age=8");
       res.setHeader("X-Cache", "STALE");
@@ -2233,6 +2282,61 @@ const server = app.listen(port, "0.0.0.0", () => {
   ]) {
     revalidateVehiclesInBackground(quantizeVehiclesQuery(qs));
   }
+  startPaintWarmer();
 });
+
+/**
+ * Keep paint (and the livery CSS it points at) hot. Without this the first
+ * visitor after a restart waited on bustimes.org for seconds and every bus fell
+ * back to brand stripes; the loop means the cache is never cold for a user.
+ */
+const PAINT_WARM_QUERIES = [
+  "?operator=FPOT",
+  "?operator=DAGC",
+  "?operator=CRDR",
+  "?operator=SLBS",
+  "?operator=NATX",
+  "?operator=FLIX",
+  "?xmin=-2.30&ymin=52.80&xmax=-1.90&ymax=53.15",
+  "?xmin=-2.20&ymin=52.90&xmax=-1.95&ymax=53.08",
+  "?xmin=-2.15&ymin=52.97&xmax=-2.08&ymax=53.02",
+  "?xmin=-2.50&ymin=52.50&xmax=-1.50&ymax=53.20",
+];
+const PAINT_WARM_INTERVAL_MS = 3 * 60_000;
+
+async function warmPaintOnce() {
+  for (const qs of PAINT_WARM_QUERIES) {
+    const cacheKey = quantizeVehiclesQuery(qs);
+    revalidatePaintInBackground(cacheKey);
+    // Stagger: bustimes.org rate-limits bursts of vehicles.json calls.
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  }
+  // Pull the livery CSS for every id we just cached so /api/bt-liveries is a hit.
+  const ids = new Set();
+  for (const entry of paintVehiclesCache.values()) {
+    try {
+      const rows = JSON.parse(Buffer.isBuffer(entry.body) ? entry.body.toString("utf8") : String(entry.body || ""));
+      for (const row of Array.isArray(rows) ? rows : []) {
+        if (typeof row?.vehicle?.livery === "number") ids.add(String(row.vehicle.livery));
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  for (const id of ids) {
+    if (liveryCssCache.has(id)) continue;
+    revalidateLiveryInBackground(id);
+  }
+  console.log(`[paint] warmed ${PAINT_WARM_QUERIES.length} queries, ${ids.size} livery ids`);
+}
+
+function startPaintWarmer() {
+  const run = () => {
+    warmPaintOnce().catch(() => {});
+  };
+  setTimeout(run, 2_000).unref?.();
+  const timer = setInterval(run, PAINT_WARM_INTERVAL_MS);
+  timer.unref?.();
+}
 // Many http-proxy-middleware mounts each attach a close listener.
 server.setMaxListeners(32);
