@@ -7541,6 +7541,14 @@ async function startRoutePlayback({
     // Keep a usable road-snapped replay while a larger OSRM match is pending
     // or unavailable. Never fall back to the raw GPS chord for an actual route.
     if (flattenTrailLatLngs(roadPath).length < 2) {
+      try {
+        await Promise.race([
+          ensureSnapRoadsForPath(roadSource),
+          new Promise((resolve) => setTimeout(resolve, 2500)),
+        ]);
+      } catch {
+        /* local snap is only a fallback */
+      }
       const localRoadPath = alignTrailToRoadsLocal(roadSource, alignBreak);
       if (flattenTrailLatLngs(localRoadPath).length >= 2) roadPath = localRoadPath;
     }
@@ -14073,8 +14081,28 @@ async function stitchTrailViaOsrmRoutes(latlngs, signal, breakOpts = {}) {
   });
   // Coaches: wider sample spacing so long motorway legs stay fast + on-road.
   // Staffs rural: slightly wider than urban so sparse AVL still gets a road bridge.
-  const thinGap = plannedSparse ? 5000 : coach ? 180 : staffs ? 140 : 28;
-  const bridgeBatch = plannedSparse ? 4 : coach ? 8 : staffs ? 6 : 4;
+  const thinGap = plannedSparse
+    ? 5000
+    : breakOpts.actualRoute
+      ? coach
+        ? 220
+        : 250
+      : coach
+        ? 180
+        : staffs
+          ? 140
+          : 28;
+  const bridgeBatch = plannedSparse
+    ? 4
+    : breakOpts.actualRoute
+      ? coach
+        ? 10
+        : 12
+      : coach
+        ? 8
+        : staffs
+          ? 6
+          : 4;
   for (const source of sourceSegs) {
     const thinned = thinTrailPoints(source, thinGap);
     if (thinned.length < 2) continue;
