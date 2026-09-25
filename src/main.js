@@ -2884,6 +2884,8 @@ const pinnedTrailLines = new Map();
 const pinnedTrailAlignGen = new Map();
 const pinnedTrailAlignBusy = new Map();
 const pinnedTrailAlignWanted = new Map();
+const pinnedLiveRouteStates = new Map();
+const LIVE_ROUTE_RESET_GAP_MS = 15 * 60_000;
 const trailUploadQueue = new Map(); // key -> points[]
 let trailUploadTimer = null;
 const trailServerFetched = new Map(); // key -> last fetch ms
@@ -3431,8 +3433,15 @@ function trackedPointsFor(key, { journeyId = "", tripId = "", fromMs = 0, toMs =
   return points.filter((p) => {
     if (fromMs && Number(p.t) < fromMs) return false;
     if (toMs && Number(p.t) > toMs) return false;
-    if (jid && p.journeyId && String(p.journeyId) !== jid) return false;
-    if (tid && p.tripId && String(p.tripId) !== tid) return false;
+    const pointJourneyId = String(p.journeyId || "");
+    const pointTripId = String(p.tripId || "");
+    const journeyMatches = !jid || !pointJourneyId || pointJourneyId === jid;
+    const tripMatches = !tid || !pointTripId || pointTripId === tid;
+    // BODS and the recorder often expose different IDs for the same run
+    // (e.g. `0737` vs `940661803`). Either strong identity is enough; requiring
+    // both made a live tail disappear or fall back to the scheduled alignment.
+    if (jid && pointJourneyId && !journeyMatches && !(tid && tripMatches)) return false;
+    if (tid && pointTripId && !tripMatches && !(jid && journeyMatches)) return false;
     if (wantLine && p.line && !sameServiceLine(p.line, wantLine)) return false;
     // When a direction is requested, drop the opposite leg — but keep undirected
     // pings so sparse AVL (common on Staffs routes) does not freeze the live tail.
@@ -4345,22 +4354,21 @@ function trailBreakOptsFromFilter(filter = {}, key = "") {
 }
 
 /**
- * Sparse Bustimes stop lists are timetable geometry, not a road track. For a
- * coach, keep them hidden until the OSRM/road matcher validates the geometry;
- * otherwise the first paint can briefly draw a straight line between stops.
+ * Planned Staffs/coach geometry must be road-validated before it is painted.
+ * Bustimes tracks can contain straight or floating segments even when they are
+ * dense, so they are treated the same as sparse stop-to-stop geometry.
  */
 function plannedPathNeedsRoadMatch(path, breakOpts = {}) {
-  if (!breakOpts.plannedRoute || !isCoachTrailOperator(breakOpts.operator)) return false;
+  if (!breakOpts.plannedRoute) return false;
+  const mustMatch =
+    breakOpts.staffs ||
+    isStaffsTrailOperator(breakOpts.operator) ||
+    isAltonLine(breakOpts.line) ||
+    isCoachTrailOperator(breakOpts.operator);
+  if (!mustMatch) return false;
   const flat = Array.isArray(path?.[0]?.[0]) ? path.flat() : path;
   if (!Array.isArray(flat) || flat.length < 2) return false;
-  const gaps = [];
-  for (let i = 1; i < flat.length; i += 1) {
-    const a = flat[i - 1];
-    const b = flat[i];
-    if (Array.isArray(a) && Array.isArray(b)) gaps.push(haversineMeters(a[0], a[1], b[0], b[1]));
-  }
-  const averageGap = gaps.length ? gaps.reduce((sum, value) => sum + value, 0) / gaps.length : 0;
-  return flat.length <= 24 || averageGap > 800;
+  return true;
 }
 
 /** Distance from a GPS point to the nearest segment of a planned/recorded path. */
@@ -4479,7 +4487,10 @@ function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
   // wait for the validated OSRM geometry instead of showing that fallback.
   if (
     breakOpts.coach ||
-    isCoachTrailOperator(breakOpts.operator)
+    breakOpts.staffs ||
+    isCoachTrailOperator(breakOpts.operator) ||
+    isStaffsTrailOperator(breakOpts.operator) ||
+    isAltonLine(breakOpts.line)
   ) return [];
   const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
   if (flattenTrailLatLngs(local).length >= 2) return local;
@@ -5140,12 +5151,17 @@ function refreshPinnedTrailLine(key) {
   // Alias feeds can contribute points with no journey ID. Once a live
   // selection has a real journey/trip identity, do not let those unrelated
   // points extend a NatEx/Flix tail beyond the selected coach.
+  if (filter.live && filter.tripId) {
+    const exactTrip = gpsPoints.filter(
+      (point) => String(point.tripId || "") === String(filter.tripId),
+    );
+    if (exactTrip.length >= 2) gpsPoints = exactTrip;
+  }
   if (filter.live && filter.journeyId) {
-    const exact = gpsPoints.filter((point) => String(point.journeyId || "") === String(filter.journeyId));
-    if (exact.length >= 2) gpsPoints = exact;
-  } else if (filter.live && filter.tripId) {
-    const exact = gpsPoints.filter((point) => String(point.tripId || "") === String(filter.tripId));
-    if (exact.length >= 2) gpsPoints = exact;
+    const exactJourney = gpsPoints.filter(
+      (point) => String(point.journeyId || "") === String(filter.journeyId),
+    );
+    if (exactJourney.length >= 2) gpsPoints = exactJourney;
   }
   let livePing = null;
   if (filter.live || filter.follow) {
@@ -6002,6 +6018,84 @@ function pinTrailKey(key) {
   refreshPinnedTrailLine(id);
 }
 
+function liveRouteStateMatchesBus(state, bus, reg = "") {
+  if (!state) return false;
+  const ids = new Set(
+    [state.busId, state.vehicleId, state.trailKey]
+      .map((value) => String(value || ""))
+      .filter(Boolean),
+  );
+  const busIds = [bus?.id, bus?.btId, bus?.vehicle?.id]
+    .map((value) => String(value || ""))
+    .filter(Boolean);
+  if (busIds.some((id) => ids.has(id))) return true;
+  const stateReg = compactReg(state.reg || "");
+  const currentReg = compactReg(reg || bus?.vehicle?.reg || "");
+  return Boolean(stateReg && currentReg && stateReg === currentReg);
+}
+
+function updatePinnedLiveRouteForBus(bus, trailMeta = {}) {
+  const now = Number(trailMeta.t) || Date.now();
+  const line = String(trailMeta.line || bus?.service?.line_name || "").trim();
+  const direction = normalizeTrailDirection(trailMeta.direction || bus?.direction || bus?.directionRef || "");
+  const tripId = String(trailMeta.tripId || bus?.trip_id || "").trim();
+  const journeyId = String(trailMeta.journeyId || bus?.journey_id || "").trim();
+  const destination = normalizeTrailDestination(trailMeta.destination || bus?.destination || "");
+  const reg = compactReg(trailMeta.reg || bus?.vehicle?.reg || "");
+  for (const [key, state] of pinnedLiveRouteStates.entries()) {
+    if (!liveRouteStateMatchesBus(state, bus, reg)) continue;
+    const lineChanged = Boolean(state.line && line && !sameServiceLine(state.line, line));
+    const directionChanged = Boolean(state.direction && direction && state.direction !== direction);
+    const tripChanged = Boolean(state.tripId && tripId && state.tripId !== tripId);
+    const destinationChanged = Boolean(
+      !state.tripId &&
+      !tripId &&
+      state.destination &&
+      destination &&
+      state.destination !== destination,
+    );
+    const gapReset = Boolean(state.lastT && now - state.lastT > LIVE_ROUTE_RESET_GAP_MS);
+    if (lineChanged || directionChanged || tripChanged || destinationChanged || gapReset) {
+      const filter = {
+        ...(pinnedTrailFilters.get(key) || {}),
+        line,
+        direction,
+        tripId,
+        journeyId,
+        fromMs: Math.max(0, (state.lastT || now) - 1_000),
+        toMs: 0,
+        live: true,
+        follow: true,
+        liveBusId: String(state.busId || key),
+        liveTrailKey: String(state.trailKey || key),
+        liveReg: reg || state.reg || "",
+        liveJourneyId: journeyId,
+        liveTripId: tripId,
+      };
+      pinnedTrailFilters.set(key, filter);
+      const oldPair = pinnedTrailLines.get(key);
+      if (oldPair) removeTrailPair(oldPair, liveTrailLayer);
+      pinnedTrailLines.delete(key);
+      pinnedTrailAlignGen.set(key, (pinnedTrailAlignGen.get(key) || 0) + 1);
+      pinnedTrailAlignWanted.delete(key);
+      state.line = line || state.line;
+      state.direction = direction || state.direction;
+      state.tripId = tripId || state.tripId;
+      state.journeyId = journeyId || state.journeyId;
+      state.destination = destination || state.destination;
+      state.lastT = now;
+      refreshPinnedTrailLine(key);
+    } else {
+      state.line = line || state.line;
+      state.direction = direction || state.direction;
+      state.tripId = tripId || state.tripId;
+      state.journeyId = journeyId || state.journeyId;
+      state.destination = destination || state.destination;
+      state.lastT = now;
+    }
+  }
+}
+
 function pinVehicleTrail({
   vehicleId = "",
   trailKey = "",
@@ -6011,6 +6105,7 @@ function pinVehicleTrail({
   line = "",
   operator = "",
   direction = "",
+  dest = "",
   datetime = "",
   liveFromMs = 0,
   liveToMs = 0,
@@ -6062,6 +6157,7 @@ function pinVehicleTrail({
     live: followLive,
     follow: followLive,
     liveVehicleId: followLive ? String(vehicleId || "") : "",
+    liveBusId: followLive ? String(trailKey || vehicleId || "") : "",
     liveTrailKey: followLive ? String(trailKey || "") : "",
     liveReg: followLive ? compactReg(reg) : "",
     liveJourneyId: followLive ? String(journeyId || "") : "",
@@ -6085,6 +6181,23 @@ function pinVehicleTrail({
     pinnedTrailFilters.set(renderKey, filter);
   } else {
     pinnedTrailFilters.delete(renderKey);
+  }
+  if (followLive) {
+    const priorState = pinnedLiveRouteStates.get(renderKey);
+    pinnedLiveRouteStates.set(renderKey, {
+      busId: String(trailKey || vehicleId || ""),
+      vehicleId: String(vehicleId || ""),
+      trailKey: String(trailKey || ""),
+      reg: compactReg(reg),
+      line: String(line || "").trim(),
+      direction: safeDirection,
+      tripId: String(tripId || "").trim(),
+      journeyId: String(journeyId || "").trim(),
+      destination: normalizeTrailDestination(dest || ""),
+      lastT: priorState?.lastT || Date.now(),
+    });
+  } else {
+    pinnedLiveRouteStates.delete(renderKey);
   }
   pinnedTrailKeys.add(renderKey);
   rememberTrailVehicle(renderKey);
@@ -6139,6 +6252,7 @@ function clearPinnedTrails() {
   pinnedTrailLines.clear();
   pinnedTrailKeys.clear();
   pinnedTrailFilters.clear();
+  pinnedLiveRouteStates.clear();
   multiTailActiveGroup = null;
   updatePlaybackChrome();
 }
@@ -7423,6 +7537,7 @@ async function startRoutePlayback({
         line: lineName,
         operator,
         direction: safeDirection,
+        dest: headsign,
         datetime,
         liveFromMs: Number(trackedGps[0]?.t) > 0 ? Number(trackedGps[0]?.t) - 30_000 : 0,
         live: true,
@@ -7451,9 +7566,7 @@ async function startRoutePlayback({
   // position — no OSRM wait, so the route paints immediately.
   const fastBase = preferRoadMatchedTrail(path, [], alignBreak);
   const plannedNeedsRoadMatch =
-    coachPlayback &&
-    plannedPath.length >= 2 &&
-    plannedPathNeedsRoadMatch(fastBase, alignBreak);
+    plannedPath.length >= 2 && plannedPathNeedsRoadMatch(fastBase, alignBreak);
   const fastPath =
     flattenTrailLatLngs(fastBase).length >= 2 && !plannedNeedsRoadMatch
       ? isHistorical
@@ -7602,7 +7715,12 @@ async function startRoutePlayback({
     );
     if (roadReplayPoints.length >= 2) {
       replayPoints = roadReplayPoints;
-    } else if (plannedPath.length >= 2 && plannedReplayPoints.length >= 2) {
+    } else if (
+      plannedPath.length >= 2 &&
+      plannedReplayPoints.length >= 2 &&
+      !roadBreak.staffs &&
+      !roadBreak.coach
+    ) {
       // A sparse Bustimes stop list is still the correct scheduled route. Do
       // not leave Replay stuck on a slow OSRM response; the next replay can use
       // the road-aligned copy once the background match completes.
@@ -11963,6 +12081,7 @@ function upsertLiveBus(bus, snapped) {
     t: bus.datetime ? new Date(bus.datetime).getTime() || Date.now() : Date.now(),
     reg,
   };
+  updatePinnedLiveRouteForBus(bus, trailMeta);
   const [rawLng, rawLat] = bus.coordinates || [];
   const recordLat = Number.isFinite(Number(rawLat)) ? Number(rawLat) : snapped.lat;
   const recordLng = Number.isFinite(Number(rawLng)) ? Number(rawLng) : snapped.lng;
@@ -14400,22 +14519,11 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
     const cleaned = Array.isArray(latlngs?.[0]?.[0])
       ? latlngs.map((seg) => dedupeNearTrailPoints(seg, 2)).filter((seg) => seg.length >= 2)
       : dedupeNearTrailPoints(latlngs, 2);
-    const flat = Array.isArray(cleaned?.[0]?.[0]) ? cleaned.flat() : cleaned;
-    // Bustimes sometimes returns only stop locations (no track points). Those
-    // sparse stop-to-stop chords are fine for a timetable, but a live coach
-    // can be tens of kilometres from the next vertex and the strict 350 m clip
-    // then correctly hides the whole tail. Align sparse planned geometry to
-    // the driving road first; the live clip still uses the real bus ping.
-    const gaps = [];
-    for (let i = 1; i < flat.length; i += 1) {
-      gaps.push(haversineMeters(flat[i - 1][0], flat[i - 1][1], flat[i][0], flat[i][1]));
-    }
-    const averageGap = gaps.length ? gaps.reduce((sum, value) => sum + value, 0) / gaps.length : 0;
-    const sparsePlannedPath =
-      (coach || isCoachTrailOperator(breakOpts.operator)) &&
-      flat.length >= 2 &&
-      (flat.length <= 24 || averageGap > 800);
-    if (!sparsePlannedPath) {
+    // Bustimes tracks and stop lists are both validated through OSRM for
+    // Staffs/coach routes before they are allowed onto the map.
+    const plannedRoadOperator =
+      coach || isCoachTrailOperator(breakOpts.operator) || staffs;
+    if (!plannedRoadOperator) {
       trailAlignCache.set(key, cleaned);
       return cleaned;
     }
@@ -14432,7 +14540,7 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
       } catch {
         /* A failed coach match must not turn back into an off-road chord. */
       }
-      const fallback = coach ? [] : cleaned;
+      const fallback = [];
       trailAlignCache.set(key, fallback);
       return fallback;
     })();
@@ -14521,7 +14629,7 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
         // Local OFM snap is useful for ordinary bus/staff roads, but its
         // nearest-road bridge can pick the wrong motorway carriageway. Keep
         // failed coach alignment hidden until a validated road path exists.
-        if (!coach && !plannedRoute) {
+        if (!coach && !plannedRoute && !staffs) {
           segs = trailSegmentsOf(alignTrailToRoadsLocal(latlngs, alignOpts), alignOpts);
         }
       } else {
