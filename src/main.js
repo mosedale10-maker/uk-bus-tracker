@@ -13512,7 +13512,9 @@ async function loadBuses({ replace = false } = {}) {
     const viewSouth = bounds.getSouth();
     const viewEast = bounds.getEast();
     const viewNorth = bounds.getNorth();
+    const paintSnapshotAgeMs = lastPaintAt ? Date.now() - lastPaintAt : Infinity;
     const paintCoversView =
+      paintSnapshotAgeMs < 30_000 &&
       lastPaintBuses.length > 0 &&
       lastPaintBuses.some((row) => {
         const [lng, lat] = row?.coordinates || [];
