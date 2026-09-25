@@ -3579,8 +3579,11 @@ function normalizeTrailDestination(raw) {
     .trim();
 }
 
-/** Ordinary live follow remains marker-only; coach follows opt into a clipped live tail below. */
-const SHOW_LIVE_TAIL_WHILE_FOLLOWING = false;
+/**
+ * Show the growing road-matched tail while following any bus, not just coaches.
+ * The renderer clips it at the live ping, so it can never run ahead of the bus.
+ */
+const SHOW_LIVE_TAIL_WHILE_FOLLOWING = true;
 
 function trailKeysForVehicle({
   vehicleId = "",
