@@ -5045,6 +5045,33 @@ function refreshPinnedTrailLine(key) {
     livePing = livePingForTrailFilter(filter, gpsPoints);
     gpsPoints = clipGpsPointsAtPing(gpsPoints, livePing);
   }
+  // Overview coach previews are stored as pinned trails rather than the focused
+  // live trail. Check those pings too, so a diversion detected after Show route
+  // was opened still replaces the scheduled path with the recorded GPS route.
+  const playbackArgs = playback?.requestArgs || {};
+  const playbackMatchesFilter =
+    !playbackArgs.trailKey ||
+    !filter.liveTrailKey ||
+    String(playbackArgs.trailKey) === String(filter.liveTrailKey);
+  const playbackDeviation =
+    filter.live &&
+    playback &&
+    !playback.diverted &&
+    !playback.replayRecorded &&
+    playbackMatchesFilter &&
+    Array.isArray(playback.plannedPath) &&
+    playback.plannedPath.length >= 2 &&
+    isCoachTrailOperator(breakOpts.operator)
+      ? routeDeviationEvidence({
+          plannedPath: playback.plannedPath,
+          gpsPoints,
+          livePing,
+        })
+      : null;
+  if (playbackDeviation?.detected && !playbackDeviation.sparse) {
+    switchPlaybackToActualRoute();
+    return;
+  }
   // Split there-and-back / multi-route GPS into separate strokes (never one continuous line).
   // tripseg: keys are already one trip from pinSeparateTripTails.
   let path;
@@ -5593,6 +5620,22 @@ async function showFleetRouteTails({
       isStaffsTrailOperator(opCode) ||
       isAltonLine(vLine || code) ||
       String(v.trailKey || trailKey || "").startsWith("staff-");
+    const targetWhenMs = vWhen ? new Date(vWhen).getTime() : NaN;
+    const targetIsLive =
+      v.live === true ||
+      (Number.isFinite(targetWhenMs) && Date.now() - targetWhenMs <= 90_000);
+    if (targetIsLive) {
+      const targetLat = Number(v.coordinates?.[1] ?? v.lat);
+      const targetLng = Number(v.coordinates?.[0] ?? v.lng);
+      if (Number.isFinite(targetLat) && Number.isFinite(targetLng)) {
+        gps = clipGpsPointsAtPing(gps, {
+          lat: targetLat,
+          lng: targetLng,
+          t: Number.isFinite(targetWhenMs) ? targetWhenMs : Date.now(),
+          source: "fleet-target",
+        });
+      }
+    }
     const segments = selectedRun && gps.length >= 2
       ? [gps]
       : segmentTrailIntoTrips(gps, {
@@ -5620,7 +5663,7 @@ async function showFleetRouteTails({
     }
   }
 
-  if (plannedPathUsable) {
+  if (plannedPathUsable && !isCoachTrailOperator(opCode)) {
     clearPinnedTrails();
     const plannedStart = Date.now() - Math.max(60_000, plannedRoutePath.length * 1000);
     const plannedGps = plannedRoutePath.map((point, index) => ({
