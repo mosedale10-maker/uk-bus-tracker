@@ -31,7 +31,12 @@ def main() -> int:
     ap.add_argument(
         "--only",
         default="",
-        help="check just this registration, and print 'coach detected' when it is found",
+        help="check just this registration, and print 'VERDICT coach' when it is found",
+    )
+    ap.add_argument(
+        "--keys",
+        default="",
+        help="comma separated registrations to check; one model load for the lot",
     )
     args = ap.parse_args()
 
@@ -42,6 +47,9 @@ def main() -> int:
     if args.only:
         want = args.only.strip().upper()
         sidecars = [p for p in sidecars if p.stem.upper() == want]
+    if args.keys:
+        want = {k.strip().upper() for k in args.keys.split(",") if k.strip()}
+        sidecars = [p for p in sidecars if p.stem.upper() in want]
     if args.limit:
         sidecars = sidecars[-args.limit :]
 
@@ -102,7 +110,9 @@ def main() -> int:
             print(f"  no coach in view: {reg} ({detections} objects in frame)")
 
     if args.only:
-        print("coach detected" if coaches else "no coach detected")
+        # An unambiguous token: a substring test for "coach detected" also matches
+        # "no coach detected", which made every miss look like a hit.
+        print("VERDICT coach" if coaches else "VERDICT none")
         return 0
     print(f"\nchecked {checked} frames, coach detected in {coaches}")
     return 0

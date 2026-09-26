@@ -447,7 +447,7 @@ app.get("/api/bods-vehicles", (req, res) => handleBodsVehicles(req, res, bodsKey
  * someone else's service.
  */
 app.get("/api/camera-snapshot", (req, res) => {
-  const snap = cameraSnapshotFor(req.query?.reg);
+  const snap = cameraSnapshotFor(req.query?.reg || req.query?.key);
   if (!snap) {
     res.status(404).json({ snapshot: null });
     return;
@@ -466,8 +466,9 @@ app.get("/api/camera-snapshot", (req, res) => {
 
 app.get("/api/camera-snapshot/:file", (req, res) => {
   const file = String(req.params?.file || "");
-  // Registration keys are [A-Z0-9]{1,12}, optionally the ".b" second frame.
-  const match = /^([A-Z0-9]{1,12})(\.b)?\.jpg$/.exec(file);
+  // Keys are [A-Z0-9]{1,16} - a plate, or an id for the FlixBus coaches that
+  // arrive from bustimes without one - optionally the ".b" second frame.
+  const match = /^([A-Z0-9]{1,16})(\.b)?\.jpg$/.exec(file);
   if (!match) {
     res.status(400).end();
     return;

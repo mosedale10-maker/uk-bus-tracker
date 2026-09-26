@@ -12527,9 +12527,11 @@ function cameraSnapBlock(snap) {
    * nothing is invented.
    */
   const coachSeen = Boolean(snap.busDetected) && Array.isArray(snap.busBox) && snap.busBox.length === 4;
+  // FlixBus coaches arrive without a plate, so show the service instead.
+  const who = snap.plate ? snap.operatorLabel || "" : snap.label || snap.operatorLabel || "";
   const crop = coachSeen
     ? `<div class="popup-camera-crop" data-camera-frames="${esc(frames.join(" "))}" data-camera-snap='${esc(
-        JSON.stringify({ busBox: snap.busBox, busConfidence: snap.busConfidence }),
+        JSON.stringify({ busBox: snap.busBox, busConfidence: snap.busConfidence, operator: snap.operator }),
       )}'>
          <p class="popup-camera-crop-note" hidden></p>
        </div>`
@@ -12541,7 +12543,9 @@ function cameraSnapBlock(snap) {
       <p class="popup-camera-where">${esc(where)}${km ? ` &middot; ${esc(km)} km from this coach` : ""}${when ? ` &middot; ${esc(when)}` : ""}</p>
       <p class="popup-camera-note">${frames.length > 1 && gap ? `${esc(gap)}s apart &middot; ` : ""}${near ? "close pass" : "coach was nearby when these were taken"}${
         coachSeen
-          ? ` &middot; <strong>coach detected</strong> at ${Number(snap.busConfidence || 0).toFixed(2)} confidence`
+          ? ` &middot; <strong>coach detected</strong> at ${Number(snap.busConfidence || 0).toFixed(2)} confidence${
+              who ? ` &middot; ${esc(who)}` : ""
+            }`
           : ""
       }</p>
       <p class="popup-camera-credit">${esc(snap.attribution || "Camera imagery © National Highways (Crown copyright)")}</p>
@@ -12615,6 +12619,21 @@ async function fetchCameraSnapshot(reg) {
 }
 
 /**
+ * The key the camera watcher files a coach under. National Express vehicles have
+ * a plate, so that is the key. FlixBus vehicles come from bustimes with no
+ * plate at all, only a journey id, so the id is the key - the watcher uses the
+ * same rule, which is why it prefixes with F.
+ */
+function cameraSnapKeyFor(marker) {
+  const plate = compactReg(vehicleRegForPhoto(marker));
+  if (plate) return plate;
+  const id = String(marker?.bus?.id ?? marker?.bus?.journey_id ?? "")
+    .replace(/[^A-Za-z0-9]/g, "")
+    .slice(0, 16);
+  return id ? `F${id}` : "";
+}
+
+/**
  * Only the coach operators the watcher follows can ever have a camera shot.
  * `marker.bus` is the feed object the popup renders from, and the same
  * predicates the popup uses to title a coach decide this.
@@ -12640,10 +12659,11 @@ async function loadPhotoIntoMarker(marker) {
   }
   // Asking for every bus would be one pointless request per marker on the map.
   const wantCamera = mayHaveCameraSnapshot(marker);
-  if (!wantCamera) cameraSnapCache.delete(compactReg(reg));
+  const camKey = wantCamera ? cameraSnapKeyFor(marker) : "";
+  if (!wantCamera && reg) cameraSnapCache.delete(compactReg(reg));
   const [photo, cameraSnap] = await Promise.all([
     fetchApprovedPhoto(reg),
-    wantCamera ? fetchCameraSnapshot(reg) : null,
+    camKey ? fetchCameraSnapshot(camKey) : null,
   ]);
   if (vehicleRegForPhoto(marker) !== reg) return;
   marker.extra.photo = photo;

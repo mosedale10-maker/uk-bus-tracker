@@ -21,6 +21,7 @@
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import sharp from "sharp";
 
 const CAMERA_IMAGE_BASE =
   "https://public.highwaystrafficcameras.co.uk/cctvpublicaccess/images/";
@@ -42,7 +43,7 @@ const CLOSE_M = 150;
  * motion". Thirty seconds is also long enough for a coach at 60mph to cover
  * 500m, which is what makes the movement check work at all.
  */
-const FRAME_GAP_MS = 30_000;
+const FRAME_GAP_MS = 0;
 /** Ignore a coach that is clearly driving away from the camera. */
 const RECEDING_M = 30;
 /** Never re-capture the same coach more often than this. */
@@ -56,6 +57,14 @@ const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 const PRUNE_EVERY = 40;
 
 const COACH_OPERATORS = ["NATX", "FLIX"];
+
+/**
+ * FlixBus is not in the BODS feed at all - it arrives on our own bustimes proxy
+ * as `bustimes-flix`, and those vehicles carry no registration, only a journey
+ * id. So a coach here is keyed by id, and the card is labelled with the service
+ * and destination instead of a plate.
+ */
+const FLIX_FEED_URL = `http://127.0.0.1:${process.env.PORT || 4173}/api/vehicles?operator=FLIX`;
 
 const R = 6371000;
 const rad = (d) => (d * Math.PI) / 180;
@@ -75,6 +84,10 @@ const snapshots = new Map();
 /** reg -> { cameraId, distanceM, at } from the previous poll, to spot a coach
  *  driving away from the camera rather than towards or past it. */
 const lastSeen = new Map();
+/** cameraId -> when we next try it, after it served an "unavailable" card. */
+const deadCameras = new Map();
+/** How long a camera that is offline is left alone. */
+const CAMERA_RETRY_MS = 30 * 60 * 1000;
 let dataDir = "";
 let lastPruneAt = 0;
 let cycles = 0;
@@ -85,7 +98,7 @@ function compactReg(value) {
   return String(value || "")
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "")
-    .slice(0, 12);
+    .slice(0, 16);
 }
 
 /** Read the committed camera list once; it only changes on a deliberate refresh. */
@@ -143,6 +156,20 @@ async function fetchFrame(camId, takenAt) {
   if (!type.startsWith("image/")) throw new Error(`camera ${camId} not an image`);
   const buf = Buffer.from(await res.arrayBuffer());
   if (!buf.length || buf.length > MAX_IMAGE_BYTES) throw new Error("camera image size");
+  /*
+   * Some cameras serve a "CAMERA UNAVAILABLE" placeholder - a small pale-blue
+   * card with a red cross - instead of a view. Storing one of those produced
+   * frames with a single detected "object" and no coach, every time, and the
+   * FlixBus captures were almost all placeholders. Real frames are 720x576.
+   */
+  const meta = await sharp(buf).metadata().catch(() => null);
+  const w = meta?.width || 0;
+  const h = meta?.height || 0;
+  if (w < 640 || h < 480) {
+    const err = new Error(`camera ${camId} unavailable (${w}x${h})`);
+    err.unavailable = true;
+    throw err;
+  }
   return buf;
 }
 
@@ -191,24 +218,33 @@ export function cameraSnapshotFor(reg, now = Date.now()) {
 }
 
 /**
- * Grab two frames a few seconds apart. One picture of a motorway cannot show
- * whether the coach we are tracking is the coach in it; two frames can, because
- * a vehicle in the frame will have moved between them. We still do not claim to
- * have identified it — the card says so — but this is evidence rather than a
- * picture of the same road.
+ * Grab the camera's current frame.
+ *
+ * This used to take two frames 30s apart so a motion diff could show that a
+ * vehicle had moved. Real detection replaced that test, and keeping the pair
+ * cost 30 seconds of sleep per capture - long enough that a poll with dozens of
+ * coaches in range never got past the first of them, so the FlixBus coaches at
+ * the end of the list were never photographed at all.
  */
-async function capture(reg, cam, takenAt) {
+async function capture(reg, cam, takenAt, vehicle = {}) {
   const first = await fetchFrame(cam.id, takenAt);
-  await sleep(FRAME_GAP_MS);
-  let second = null;
-  try {
-    second = await fetchFrame(cam.id, takenAt + FRAME_GAP_MS);
-  } catch {
-    /* one good frame still beats none; the card will show what we have */
-  }
   mkdirSync(snapshotDir(), { recursive: true });
+  const noc = String(
+    vehicle?.operator?.noc || vehicle?.service?.operator?.noc || vehicle?.operator?.id || "",
+  )
+    .trim()
+    .toUpperCase();
   const snap = {
     reg,
+    // FlixBus vehicles arrive from bustimes with no plate, only a journey id, so
+    // the key is an id and the card is labelled with the service instead.
+    plate: coachRegOf(vehicle) || "",
+    label: coachLabelOf(vehicle, reg),
+    // Which operator this coach belongs to. The camera frames themselves are
+    // operator-agnostic - the detector only finds "a bus" - so without this the
+    // card cannot say whether it photographed a FlixBus or National Express one.
+    operator: noc,
+    operatorLabel: noc === "FLIX" ? "FlixBus" : noc === "NATX" ? "National Express" : noc,
     cameraId: cam.id,
     road: cam.road,
     desc: cam.desc,
@@ -226,13 +262,11 @@ async function capture(reg, cam, takenAt) {
     attribution: ATTRIBUTION,
   };
   writeFileSync(regFile(reg, "jpg"), first);
-  if (second) writeFileSync(regFile(reg, "b.jpg"), second);
-  else {
-    try {
-      unlinkSync(regFile(reg, "b.jpg"));
-    } catch {
-      /* no stale second frame to remove */
-    }
+  try {
+    // Clear any second frame left over from when we captured pairs.
+    unlinkSync(regFile(reg, "b.jpg"));
+  } catch {
+    /* there was none */
   }
   writeFileSync(regFile(reg, "json"), JSON.stringify(snap));
   snapshots.set(reg, snap);
@@ -240,47 +274,45 @@ async function capture(reg, cam, takenAt) {
 }
 
 /**
- * Ask the Python verifier whether a coach is actually in the frame.
+ * Ask the Python verifier whether a coach is actually in the frames.
  *
  * Detection deliberately does not live here: reproducing the model's expected
  * input by hand in JavaScript produced either nothing at all or a flood of false
  * positives across four attempts, because the letterbox and normalisation
  * details are easy to get subtly wrong. The verifier runs ultralytics' own
- * predict(), which knows its own preprocessing, and writes the verdict back
- * into the sidecar. Returns null when the verifier is unavailable, and the card
- * then shows nothing rather than guessing.
+ * predict(), which knows its own preprocessing, and writes verdicts back into the
+ * sidecars.
+ *
+ * All the keys from one poll go in a single call. Loading the model costs a few
+ * seconds, so doing it per capture made a poll with 90 coaches in range take
+ * nine minutes - long enough that the FlixBus coaches at the end of the list
+ * were never reached at all.
  */
-function verifyWithPython(reg) {
+function verifyBatch(keys) {
+  if (!keys.length) return Promise.resolve(false);
   return new Promise((resolve) => {
     const script = join(import.meta.dirname || ".", "scripts", "verify-coaches.py");
     const python = process.env.CAMERA_VERIFY_PY || "/opt/ukb-venv/bin/python";
     let child;
     try {
-      child = spawn(python, [script, "--only", reg], {
+      child = spawn(python, [script, "--keys", keys.join(",")], {
         stdio: ["ignore", "pipe", "pipe"],
-        timeout: 120_000,
+        timeout: 600_000,
       });
     } catch {
-      resolve(null);
+      resolve(false);
       return;
     }
-    let out = "";
-    child.stdout?.on("data", (d) => {
-      out += String(d);
-    });
-    child.on("error", () => resolve(null));
-    child.on("close", () => {
-      const found = /coach\s+detected/i.test(out);
-      resolve({ found });
-    });
+    child.on("error", () => resolve(false));
+    child.on("close", () => resolve(true));
     setTimeout(() => {
       try {
         child.kill();
       } catch {
         /* already gone */
       }
-      resolve(null);
-    }, 130_000);
+      resolve(false);
+    }, 620_000);
   });
 }
 
@@ -307,10 +339,38 @@ function seedTimersFromDisk() {
 function coachRegOf(vehicle) {
   return (
     compactReg(vehicle?.vehicle?.reg) ||
-    compactReg(vehicle?.vehicle?.name) ||
     compactReg(vehicle?._bods?.vehicleRef) ||
+    // bustimes-flix sets vehicle.name to the brand, not a plate, so never use it.
     ""
   );
+}
+
+/** Stable key for a coach: the plate when we have one, else the journey id. */
+function coachKeyOf(vehicle) {
+  const reg = coachRegOf(vehicle);
+  if (reg) return reg;
+  const id = String(vehicle?.id ?? vehicle?.journey_id ?? "")
+    .trim()
+    .replace(/[^A-Za-z0-9]/g, "")
+    .slice(0, 16);
+  return id ? `F${id}` : "";
+}
+
+/** Something a person can read on the card when there is no plate. */
+function coachLabelOf(vehicle, key) {
+  const op = String(vehicle?.operator?.noc || vehicle?.service?.operator?.noc || "").toUpperCase();
+  const brand = op === "FLIX" ? "FlixBus" : op === "NATX" ? "National Express" : op || "Coach";
+  const line = String(vehicle?.service?.line_name || "").trim();
+  const dest = String(vehicle?.destination || "").trim();
+  const bits = [brand, line, dest].filter(Boolean).join(" ");
+  return bits || key;
+}
+
+async function fetchFlixVehicles() {
+  const res = await fetch(FLIX_FEED_URL, { signal: AbortSignal.timeout(20_000) });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
 }
 
 async function pollCoaches(bodsKey, fetchVehicles) {
@@ -321,54 +381,120 @@ async function pollCoaches(bodsKey, fetchVehicles) {
   let vehicles = [];
   for (const op of COACH_OPERATORS) {
     try {
+      // FlixBus is not in BODS at all; it arrives via our bustimes proxy.
+      if (op === "FLIX") {
+        const flix = await fetchFlixVehicles();
+        if (flix.length) vehicles.push(...flix);
+        continue;
+      }
       const out = await fetchVehicles(`operator=${op}`, bodsKey);
       const list = JSON.parse(out.body.toString("utf8"));
       if (Array.isArray(list)) vehicles.push(...list);
-    } catch {
-      /* one operator being unavailable must not stop the others */
+    } catch (err) {
+      // Swallowing this is how a whole operator silently stopped being watched.
+      console.warn(`[camera] ${op} feed failed: ${err.message}`);
     }
   }
   if (!vehicles.length) return;
+  const flixCount = vehicles.filter((v) =>
+    String(v?.operator?.noc || "").toUpperCase() === "FLIX",
+  ).length;
 
   captureBusy = true;
+  const captured = [];
   try {
+    if (process.env.CAMERA_DEBUG) {
+      console.log(
+        `[camera] poll: ${vehicles.length} coaches (${flixCount} FlixBus), ` +
+          `in range ${vehicles.filter((v) => Array.isArray(v?.coordinates) && nearestCameras(Number(v.coordinates[1]), Number(v.coordinates[0]), NEAR_M, 1).length).length}`,
+      );
+    }
     for (const vehicle of vehicles) {
       const coords = vehicle?.coordinates;
       const lat = Number(coords?.[1]);
       const lon = Number(coords?.[0]);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      const reg = coachRegOf(vehicle);
-      if (!reg) continue;
+      const isFlix = String(vehicle?.operator?.noc || "").toUpperCase() === "FLIX";
+      const trace = (why) => {
+        if (isFlix && process.env.CAMERA_DEBUG) {
+          console.log(`[camera] flix ${coachKeyOf(vehicle) || "nokey"}: ${why}`);
+        }
+      };
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        trace("no position");
+        continue;
+      }
+      const reg = coachKeyOf(vehicle);
+      if (!reg) {
+        trace("no usable key");
+        continue;
+      }
       const near = nearestCameras(lat, lon, NEAR_M, 1);
       if (!near.length) {
         lastSeen.delete(reg);
+        trace("no camera within range");
         continue;
       }
       const cam = near[0];
+      // A camera that served an "unavailable" card recently is skipped for a
+      // while, so we do not keep fetching a dead feed for every coach near it.
+      const deadUntil = deadCameras.get(cam.id) || 0;
+      if (deadUntil > now) {
+        trace(`camera ${cam.id} offline`);
+        continue;
+      }
       const prev = lastSeen.get(reg);
       lastSeen.set(reg, { cameraId: cam.id, distanceM: cam.distanceM, at: now });
       // A coach pulling away from the camera is already out of shot, so there is
       // nothing to see. Approaching, running alongside or stopped in a queue are
       // exactly the cases worth keeping.
       if (prev && prev.cameraId === cam.id && cam.distanceM > prev.distanceM + RECEDING_M) {
+        trace(`receding from ${cam.road} ${cam.desc} (${prev.distanceM}m -> ${cam.distanceM}m)`);
         continue;
       }
       const existing = snapshots.get(reg);
-      if (existing && now - existing.takenAt < CAPTURE_INTERVAL_MS) continue;
+      if (existing && now - existing.takenAt < CAPTURE_INTERVAL_MS) {
+        trace(`on cooldown, captured ${Math.round((now - existing.takenAt) / 1000)}s ago`);
+        continue;
+      }
       try {
-        await capture(reg, cam, now);
-        const verdict = await verifyWithPython(reg);
-        if (verdict?.found) {
-          const fresh = JSON.parse(readFileSync(regFile(reg, "json"), "utf8"));
-          snapshots.set(reg, fresh);
+        await capture(reg, cam, now, vehicle);
+        captured.push({ reg, cam });
+      } catch (err) {
+        if (err?.unavailable) {
+          // This camera is offline. Remember it so we stop asking every poll.
+          deadCameras.set(cam.id, Date.now() + CAMERA_RETRY_MS);
+          if (process.env.CAMERA_DEBUG) {
+            console.log(`[camera] ${cam.road} ${cam.desc} (${cam.id}) offline, skipping`);
+          }
+          continue;
+        }
+        console.warn(`[camera] ${reg} capture failed: ${err.message}`);
+      }
+    }
+
+    // One model load for everything captured this poll, then report.
+    if (captured.length) {
+      const ran = await verifyBatch(captured.map((c) => c.reg));
+      for (const { reg, cam } of captured) {
+        let fresh = null;
+        try {
+          fresh = JSON.parse(readFileSync(regFile(reg, "json"), "utf8"));
+        } catch {
+          fresh = null;
+        }
+        if (fresh) snapshots.set(reg, fresh);
+        if (fresh?.busDetected) {
           console.log(
-            `[camera] COACH SEEN ${reg} at ${cam.road} ${cam.desc} (${cam.distanceM}m) confidence ${fresh.busConfidence}`,
+            `[camera] COACH SEEN ${fresh.label || reg} (${fresh.plate || reg}) at ${cam.road} ${cam.desc} ` +
+              `(${cam.distanceM}m) confidence ${fresh.busConfidence}`,
+          );
+        } else if (ran) {
+          console.log(
+            `[camera] ${fresh?.label || reg} near ${cam.road} ${cam.desc} (${cam.distanceM}m) - no coach in view`,
           );
         } else {
-          console.log(`[camera] ${reg} near ${cam.road} ${cam.desc} (${cam.distanceM}m) - no coach in view`);
+          console.warn(`[camera] verifier unavailable for ${captured.length} captures`);
         }
-      } catch (err) {
-        console.warn(`[camera] ${reg} capture failed: ${err.message}`);
       }
     }
   } finally {
@@ -403,3 +529,4 @@ export function stopCameraWatcher() {
 }
 
 export { ATTRIBUTION as CAMERA_ATTRIBUTION, COACH_OPERATORS };
+
