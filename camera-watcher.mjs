@@ -26,11 +26,14 @@ const CAMERA_IMAGE_BASE =
 const ATTRIBUTION = "Camera imagery © National Highways (Crown copyright)";
 
 /**
- * A coach this close to a camera is plausibly in its frame. Kept tight on
- * purpose: a picture taken from a kilometre away is scenery, not evidence, and
- * at 500m a coach fills enough of the frame to be worth looking at.
+ * A coach this close to a camera is plausibly inside its frame. Tight on
+ * purpose: motorway cameras are gantries over the carriageway, so a coach is
+ * only reliably in shot within a couple of hundred metres. At 500m it is a
+ * speck among other traffic, and a speck is not evidence of anything.
  */
-const NEAR_M = 500;
+const NEAR_M = 250;
+/** Closer than this and the close-up is worth trusting. */
+const CLOSE_M = 150;
 /** Two frames this far apart, so a moving vehicle can be seen to move. */
 const FRAME_GAP_MS = 12_000;
 /** Ignore a coach that is clearly driving away from the camera. */
@@ -207,6 +210,10 @@ async function capture(reg, cam, takenAt) {
     distanceM: cam.distanceM,
     takenAt,
     frameGapMs: FRAME_GAP_MS,
+    // How near the coach was when the frames were taken. Inside CLOSE_M the
+    // coach is filling a gantry shot; beyond it we only know it was on the road
+    // somewhere near the camera.
+    confidence: cam.distanceM <= CLOSE_M ? "close" : "near",
     // Nothing here identifies the vehicle, and the card must not imply it does.
     identified: false,
     attribution: ATTRIBUTION,

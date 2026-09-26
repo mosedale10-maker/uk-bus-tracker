@@ -12341,6 +12341,21 @@ async function cameraMotionCrop(frameA, frameB) {
   const covered = hits / (cols * rows);
   if (covered > 0.55) return null;
 
+  /*
+   * Only treat this as "a vehicle moved" if the change is where a vehicle would
+   * be: on the carriageway, in the lower part of the picture, and shaped like a
+   * blob rather than a band across the whole frame. Wind in the trees, rain, or
+   * a headlight flare all change pixels too, and cropping one of those would put
+   * a meaningless close-up on the card.
+   */
+  const boxTop = y0 / rows;
+  const boxLeft = x0 / cols;
+  const boxW = (x1 - x0 + 1) / cols;
+  const boxH = (y1 - y0 + 1) / rows;
+  const onCarriageway = boxTop >= 0.3;
+  const blobLike = boxW <= 0.7 && boxH <= 0.6;
+  if (!onCarriageway || !blobLike) return "nothing-on-road";
+
   // Map the block box back to full resolution and give it room around the change.
   const sx = a.width / CAMERA_DIFF_W;
   const sy = a.height / CAMERA_DIFF_H;
@@ -12396,18 +12411,30 @@ async function paintCameraCrop(host, frames) {
   const key = frames.join("|");
   let work = cameraCropCache.get(key);
   if (!work) {
-    work = cameraMotionCrop(frames[0], frames[1]).catch(() => null);
+    work = cameraMotionCrop(frames[0], frames[1]).catch(() => "nothing-on-road");
     cameraCropCache.set(key, work);
   }
   const dataUrl = await work;
-  if (!dataUrl || !host.isConnected) return;
+  if (!host.isConnected) return;
+  if (!dataUrl || dataUrl === "nothing-on-road") {
+    // Say so rather than pasting a crop of nothing.
+    const note = host.querySelector(".popup-camera-crop-note");
+    if (note) {
+      note.hidden = false;
+      note.textContent = "nothing in view moved enough to photograph";
+    }
+    return;
+  }
   const img = document.createElement("img");
   img.className = "popup-camera-crop-img";
   img.alt = "Close-up of the part of the camera view that changed between the two frames";
   img.src = dataUrl;
   const note = host.querySelector(".popup-camera-crop-note");
   host.prepend(img);
-  if (note) note.hidden = false;
+  if (note) {
+    note.hidden = false;
+    note.textContent = "close-up of what moved on the carriageway between the two frames";
+  }
 }
 
 /**
@@ -12436,14 +12463,15 @@ function cameraSnapBlock(snap) {
   const crop =
     frames.length > 1
       ? `<div class="popup-camera-crop" data-camera-frames="${esc(frames.join(" "))}">
-           <p class="popup-camera-crop-note" hidden>close-up of the biggest change between the two frames</p>
+           <p class="popup-camera-crop-note" hidden></p>
          </div>`
       : "";
+  const near = Number.isFinite(snap.distanceM) && snap.distanceM <= 150;
   return `<div class="popup-camera-snap">
       ${crop}
       <div class="popup-camera-frames${frames.length > 1 ? " is-pair" : ""}">${imgs}</div>
       <p class="popup-camera-where">${esc(where)}${km ? ` &middot; ${esc(km)} km from this coach` : ""}${when ? ` &middot; ${esc(when)}` : ""}</p>
-      <p class="popup-camera-note">${frames.length > 1 && gap ? `${esc(gap)}s apart &middot; ` : ""}vehicle in frame is not verified &mdash; the coach was ${km ? `${esc(km)} km ` : ""}from this camera</p>
+      <p class="popup-camera-note">${frames.length > 1 && gap ? `${esc(gap)}s apart &middot; ` : ""}${near ? "close pass" : "coach was nearby when these were taken"} &middot; vehicle in frame is not verified</p>
       <p class="popup-camera-credit">${esc(snap.attribution || "Camera imagery © National Highways (Crown copyright)")}</p>
     </div>`;
 }
