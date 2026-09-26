@@ -105,7 +105,6 @@ function makeHarness({ responses }) {
     updated: el(),
     empty: el(),
     hits: { checked: false },
-    readable: { checked: true },
     appTab: "map",
     fetched: 0,
     crops: 0,
@@ -119,7 +118,6 @@ function makeHarness({ responses }) {
     camerasCountEl: state.count,
     camerasUpdatedEl: state.updated,
     camerasOnlyHitsEl: state.hits,
-    camerasOnlyReadableEl: state.readable,
     appTab: state.appTab,
     esc,
     cameraPhotoTime,
@@ -141,10 +139,12 @@ function makeHarness({ responses }) {
   state.api = api;
   state.state = api.state;
   let n = 0;
-  state.fetchImpl = async () => {
+  state.urls = [];
+  state.fetchImpl = async (url) => {
     const r = responses[Math.min(n, responses.length - 1)];
     n += 1;
     state.fetched += 1;
+    state.urls.push(String(url));
     if (r === null) return { ok: false, status: 500, json: async () => null };
     if (r === "throw") throw new Error("network down");
     return { ok: true, json: async () => r };
@@ -193,8 +193,36 @@ function scenario(responses) {
     await h.api.loadCameraGallery();
     ok("first load renders the grid", h.grid._writes >= 1);
     ok("first load draws both cards", /AAA/.test(h.grid.innerHTML) && /BBB/.test(h.grid.innerHTML));
-    ok("first load reports what is hidden", /5 hidden/.test(h.count.textContent), h.count.textContent);
+    ok("first load reports what is not shown", /5 beyond the 2 shown/.test(h.count.textContent), h.count.textContent);
     ok("coach close-ups run once", h.crops === 1);
+  }
+
+  // 1b. Every request must ask for unreadable frames too. The "hide frames too
+  // dark or hazy" checkbox is gone; if this ever stops sending readable=0 the
+  // server's default would start hiding photos with no way to bring them back,
+  // which is exactly what that checkbox was removed to fix.
+  {
+    const h = scenario([{ photos: [shot("AAA")], captured: 1 }]);
+    await h.api.loadCameraGallery();
+    h.hits.checked = true;
+    await h.api.loadCameraGallery({ force: true });
+    ok("every request asks for unreadable frames", h.urls.every((u) => /readable=0/.test(u)),
+      JSON.stringify(h.urls));
+    ok("the coach filter is still sent when ticked", h.urls.some((u) => /hits=1/.test(u)),
+      JSON.stringify(h.urls));
+  }
+
+  // 1c. A frame flagged unreadable is shown, and says why it looks bad.
+  {
+    const h = scenario([
+      { photos: [shot("AAA", { readable: false })], captured: 1 },
+    ]);
+    await h.api.loadCameraGallery();
+    ok("an unreadable frame is still shown", /AAA/.test(h.grid.innerHTML));
+    ok("an unreadable frame is marked hard to see", /hard to see/.test(h.grid.innerHTML));
+    const good = scenario([{ photos: [shot("AAA", { readable: true })], captured: 1 }]);
+    await good.api.loadCameraGallery();
+    ok("a readable frame is not marked", !/hard to see/.test(good.grid.innerHTML));
   }
 
   // 2. An unchanged poll must NOT rebuild the grid.
@@ -337,7 +365,7 @@ function scenario(responses) {
     await new Promise((r) => setTimeout(r, 30));
     ok("opening the tab fetches straight away", h.fetched >= 1);
     ok("only one request despite load + sync", h.fetched === 1, `fetched ${h.fetched}`);
-    ok("the hidden count is reported", /11 hidden/.test(h.count.textContent), h.count.textContent);
+    ok("the count of photos not shown is reported", /11 beyond the 1 shown/.test(h.count.textContent), h.count.textContent);
   }
 
   console.log(failed ? `\n${failed} failure(s)` : "\ncamera auto-refresh behaves");

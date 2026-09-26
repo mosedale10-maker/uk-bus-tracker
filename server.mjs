@@ -448,10 +448,13 @@ app.get("/api/bods-vehicles", (req, res) => handleBodsVehicles(req, res, bodsKey
 app.get("/api/camera-gallery", (req, res) => {
   const limit = Math.max(1, Math.min(Number(req.query?.limit) || 120, 400));
   const onlyHits = String(req.query?.hits || "") === "1";
-  // Unreadable frames are not evidence. Most night captures score 0-2 detected
-  // objects on a live motorway, which means glare, rain or dirt - not an empty
-  // road - so they are hidden unless explicitly asked for.
-  const onlyReadable = String(req.query?.readable || "") !== "0";
+  // Frames that are too dark or hazy to read into are all served, with the
+  // `readable` flag on each one so the UI can say why a photo looks bad. They
+  // used to be hidden by default, behind a checkbox; that made the gallery look
+  // empty overnight, when coaches are most numerous, and hiding a photo with no
+  // way to bring it back is worse than showing a poor one. Pass readable=1 to
+  // get the filtered set instead.
+  const onlyReadable = String(req.query?.readable || "") === "1";
   let names = [];
   try {
     names = fs.readdirSync(path.join(__dirname, "data", "camera-snapshots"));

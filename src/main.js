@@ -12701,7 +12701,6 @@ const camerasGridEl = document.getElementById("cameras-grid");
 const camerasEmptyEl = document.getElementById("cameras-empty");
 const camerasCountEl = document.getElementById("cameras-count");
 const camerasOnlyHitsEl = document.getElementById("cameras-only-hits");
-const camerasOnlyReadableEl = document.getElementById("cameras-only-readable");
 const camerasUpdatedEl = document.getElementById("cameras-updated");
 let cameraGalleryLoaded = false;
 /*
@@ -12776,18 +12775,13 @@ async function loadCameraGallery({ force = false, quiet = false } = {}) {
   if (camerasRefreshBusy) return;
   camerasRefreshBusy = true;
   const onlyHits = Boolean(camerasOnlyHitsEl?.checked);
-  // Most night frames come back as glare, rain or dirt - a live motorway with
-  // a coach metres away should show plenty of vehicles, and a frame scoring
-  // almost none of them is not evidence of anything. Hidden unless asked for.
-  const onlyReadable = camerasOnlyReadableEl ? camerasOnlyReadableEl.checked : true;
   const first = !cameraGalleryLoaded;
   // A background pass must never blank the grid: "Loading photos…" on a timer
   // would make the whole tab strobe every 30 seconds.
   if (first || !quiet) camerasGridEl.innerHTML = `<p class="cameras-empty">Loading photos…</p>`;
   else markGalleryUpdated(true);
-  const params = new URLSearchParams({ limit: "160" });
+  const params = new URLSearchParams({ limit: "160", readable: "0" });
   if (onlyHits) params.set("hits", "1");
-  if (!onlyReadable) params.set("readable", "0");
   let data = null;
   try {
     const res = await fetch(`/api/camera-gallery?${params}`);
@@ -12836,9 +12830,7 @@ async function loadCameraGallery({ force = false, quiet = false } = {}) {
       text = `${photos.length} shown of ${total}`;
     }
     if (hidden > 0) {
-      text += onlyHits && !onlyReadable
-        ? ` · ${hidden} hidden as unreadable`
-        : ` · ${hidden} hidden by the filters above`;
+      text += ` · ${hidden} beyond the ${photos.length} shown`;
     }
     camerasCountEl.textContent = text;
   }
@@ -12856,6 +12848,12 @@ async function loadCameraGallery({ force = false, quiet = false } = {}) {
       const badge = p.busDetected
         ? `<span class="cameras-badge is-hit">coach in frame${Number.isFinite(p.busConfidence) ? ` · ${Number(p.busConfidence).toFixed(2)}` : ""}</span>`
         : `<span class="cameras-badge">no coach in frame</span>`;
+      // Every frame is shown now, including the ones that are too dark or hazy
+      // to read into. Say so on the card, or a poor photo looks like a fault
+      // rather than what it is: the camera's lens at night.
+      const dim = p.readable === false
+        ? `<span class="cameras-badge is-dim" title="This frame scored almost no detectable vehicles, which on a live motorway means glare, rain or a dirty lens rather than an empty road. It may be hard to make out.">hard to see</span>`
+        : "";
       const shots = p.shotCount > 1 ? `<span class="cameras-shots">${p.shotCount} cameras</span>` : "";
       // Say when the frame has been brightened. The raw camera image is still
       // one click away via originalImage, so this is disclosure, not a swap.
@@ -12873,7 +12871,7 @@ async function loadCameraGallery({ force = false, quiet = false } = {}) {
             <strong>${esc(p.label)}</strong>
             <span>${esc(where)}${dist ? ` · ${esc(dist)}` : ""}</span>
             <span class="cameras-when">${esc(cameraPhotoTime(p.takenAt))}</span>
-            <span class="cameras-badges">${badge}${shots}${lit}</span>
+            <span class="cameras-badges">${badge}${dim}${shots}${lit}</span>
           </div>
         </a>`;
     })
@@ -12940,9 +12938,6 @@ document.getElementById("cameras-refresh")?.addEventListener("click", () => {
   loadCameraGallery({ force: true });
 });
 camerasOnlyHitsEl?.addEventListener("change", () => {
-  loadCameraGallery({ force: true });
-});
-camerasOnlyReadableEl?.addEventListener("change", () => {
   loadCameraGallery({ force: true });
 });
 
