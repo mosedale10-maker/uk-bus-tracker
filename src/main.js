@@ -15986,6 +15986,42 @@ function trailFetchWithDeadline(url, options = {}, timeoutMs = 12_000) {
   });
 }
 
+/** True when a point sits on real road geometry (uses the grid index). */
+function pointIsOnRoad(lat, lng, radiusM = 60) {
+  const candidates = snapCandidatesNear(lat, lng, radiusM);
+  if (!candidates || !candidates.length) return false;
+  const p = [lat, lng];
+  for (const entry of candidates) {
+    const pts = entry.road?.latlngs;
+    if (!pts?.[entry.i] || !pts?.[entry.i + 1]) continue;
+    if (closestOnSegment(p, pts[entry.i], pts[entry.i + 1]).dist <= radiusM) return true;
+  }
+  return false;
+}
+
+/**
+ * Final gate on a bridged chunk: a plausible length is not enough, the points
+ * must actually sit on road geometry. This is what stops tails cutting diagonally
+ * across Anchor Place and the fields north of Anchor Road.
+ */
+function bridgeStaysOnRoad(part, radiusM = 70) {
+  if (!Array.isArray(part) || part.length < 2) return false;
+  if (!roadsForSnap().length) return false;
+  const step = Math.max(1, Math.floor(part.length / 12));
+  let checked = 0;
+  let onRoad = 0;
+  for (let i = 0; i < part.length; i += step) {
+    const point = part[i];
+    const lat = Array.isArray(point) ? point[0] : point?.lat;
+    const lng = Array.isArray(point) ? point[1] : point?.lng;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    checked += 1;
+    if (pointIsOnRoad(lat, lng, radiusM)) onRoad += 1;
+  }
+  if (!checked) return false;
+  return onRoad / checked >= 0.85;
+}
+
 function roadBridgePlausible(a, b, part, breakOpts = {}) {
   if (!Array.isArray(part) || part.length < 2 || !a || !b) return false;
   const aLat = Number(Array.isArray(a) ? a[0] : a.lat);
@@ -16029,6 +16065,10 @@ function roadBridgePlausible(a, b, part, breakOpts = {}) {
     // implausible detour; ordinary motorway samples remain accepted.
     if (seconds >= 5 && seconds <= 45 * 60 && mph > maxMph && routeM > straight + 1_000) return false;
   }
+  // A plausible length is not the same as being on a road. When road geometry is
+  // loaded, require the bridged points to sit on it, otherwise the tail cuts
+  // diagonally across fields and building plots.
+  if (roadsForSnap().length && !bridgeStaysOnRoad(part)) return false;
   return true;
 }
 
