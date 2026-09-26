@@ -5365,10 +5365,13 @@ function makeTrailPair(path, layer, opts = {}) {
     op: breakOpts.operator || "",
     line: breakOpts.line || "",
   });
+  // Enforce the signed local alignments after snapping, so Birch Terrace /
+  // Charles Street and the Longton bus gate survive the road matcher.
+  const corrected = applyStaffsHanleyDiversion(path, breakOpts);
   const latlngs =
-    (trailPairNeedsRoadMatch(breakOpts, opts) && !roadAligned) || !trailPathIsOnRoad(path)
+    (trailPairNeedsRoadMatch(breakOpts, opts) && !roadAligned) || !trailPathIsOnRoad(corrected)
       ? []
-      : asTrailLatLngs(path, breakOpts);
+      : asTrailLatLngs(corrected, breakOpts);
   // White casing + coloured centre keeps the route readable over both light
   // street maps and the dark night tiles, like the reference replay view.
   const casing = makeTrailPathLayer(latlngs, TRAIL_CASING, layer);
@@ -5418,8 +5421,12 @@ function setTrailPairPath(pair, path, opts = {}) {
     return;
   }
   pair.roadAligned = roadAligned || Boolean(pair.roadAligned);
+  // Enforce the signed local alignments last. Snapping can pull Birch Terrace /
+  // Charles Street (and the Longton bus gate) back onto Potteries Way, so the
+  // correction has to be applied after the road matcher, not before it.
+  const corrected = applyStaffsHanleyDiversion(path, breakOpts);
   // Same on-road gate as a new pair: never draw geometry that leaves the road.
-  if (!trailPathIsOnRoad(path)) {
+  if (!trailPathIsOnRoad(corrected)) {
     pair.path = [];
     setTrailPathLayerLatLngs(pair.casing, []);
     setTrailPathLayerLatLngs(pair.line, []);
@@ -5427,8 +5434,8 @@ function setTrailPairPath(pair, path, opts = {}) {
     pair.arrows = [];
     return;
   }
-  pair.path = path;
-  const latlngs = asTrailLatLngs(path, breakOpts);
+  pair.path = corrected;
+  const latlngs = asTrailLatLngs(corrected, breakOpts);
   setTrailPathLayerLatLngs(pair.casing, latlngs);
   setTrailPathLayerLatLngs(pair.line, latlngs);
   if (opts.gpsPoints || opts.gpsPath) {
