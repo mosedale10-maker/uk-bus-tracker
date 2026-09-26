@@ -24,6 +24,7 @@
     "http-proxy-middleware": "^3.0.5",
     "leaflet": "^1.9.4",
     "leaflet.markercluster": "^1.5.3",
+    "onnxruntime-node": "^1.30.0",
     "pbf": "^5.1.2",
     "pg": "^8.23.0",
     "sharp": "^0.35.4",

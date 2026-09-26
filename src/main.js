@@ -12472,18 +12472,30 @@ function cameraSnapBlock(snap) {
         `<img class="popup-camera-frame" src="${esc(src)}" alt="National Highways camera view near ${esc(where)}${frames.length > 1 ? `, frame ${i + 1} of ${frames.length}` : ""}" loading="lazy" />`,
     )
     .join("");
-  const crop =
-    frames.length > 1
-      ? `<div class="popup-camera-crop" data-camera-frames="${esc(frames.join(" "))}">
-           <p class="popup-camera-crop-note" hidden></p>
-         </div>`
-      : "";
+  /*
+   * The close-up is only ever shown when the server says a coach was detected
+   * in the frame. Two cheaper tests were tried and both put cars on the card -
+   * a livery colour match that scored grey tarmac as National Express navy, and
+   * a motion-streak test that a line of moving cars passes easily - so neither
+   * is used. Until real detection is wired up, `busDetected` is never set and
+   * nothing is invented.
+   */
+  const coachSeen = Boolean(snap.busDetected?.found);
+  const crop = coachSeen
+    ? `<div class="popup-camera-crop" data-camera-frames="${esc(frames.join(" "))}">
+         <p class="popup-camera-crop-note" hidden></p>
+       </div>`
+    : `<p class="popup-camera-none">No coach detected in this camera view${
+        frames.length > 1 ? " - not showing a screenshot of passing traffic" : ""
+      }</p>`;
   const near = Number.isFinite(snap.distanceM) && snap.distanceM <= 150;
   return `<div class="popup-camera-snap">
       ${crop}
       <div class="popup-camera-frames${frames.length > 1 ? " is-pair" : ""}">${imgs}</div>
       <p class="popup-camera-where">${esc(where)}${km ? ` &middot; ${esc(km)} km from this coach` : ""}${when ? ` &middot; ${esc(when)}` : ""}</p>
-      <p class="popup-camera-note">${frames.length > 1 && gap ? `${esc(gap)}s apart &middot; ` : ""}${near ? "close pass" : "coach was nearby when these were taken"} &middot; vehicle in frame is not verified</p>
+      <p class="popup-camera-note">${frames.length > 1 && gap ? `${esc(gap)}s apart &middot; ` : ""}${near ? "close pass" : "coach was nearby when these were taken"}${
+        coachSeen ? " &middot; coach detected in view" : ""
+      }</p>
       <p class="popup-camera-credit">${esc(snap.attribution || "Camera imagery © National Highways (Crown copyright)")}</p>
     </div>`;
 }
