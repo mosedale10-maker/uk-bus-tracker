@@ -452,23 +452,26 @@ app.get("/api/camera-snapshot", (req, res) => {
     res.status(404).json({ snapshot: null });
     return;
   }
-  const first = `/api/camera-snapshot/${snap.reg}.jpg`;
-  const second = `/api/camera-snapshot/${snap.reg}.b.jpg`;
-  const hasSecond = fs.existsSync(path.join(__dirname, "data", "camera-snapshots", `${snap.reg}.b.jpg`));
+  // When a coach was detected, serve the frame that produced the detection: the
+  // live one is overwritten every few minutes by the next capture.
+  const first =
+    snap.detectedImage && fs.existsSync(path.join(__dirname, snap.detectedImage))
+      ? snap.detectedImage
+      : `/api/camera-snapshot/${snap.reg}.jpg`;
   res.json({
     snapshot: {
       ...snap,
       image: first,
-      frames: hasSecond ? [first, second] : [first],
+      frames: [first],
     },
   });
 });
 
 app.get("/api/camera-snapshot/:file", (req, res) => {
   const file = String(req.params?.file || "");
-  // Keys are [A-Z0-9]{1,16} - a plate, or an id for the FlixBus coaches that
-  // arrive from bustimes without one - optionally the ".b" second frame.
-  const match = /^([A-Z0-9]{1,16})(\.b)?\.jpg$/.exec(file);
+  // Keys are [A-Z0-9]{1,16} with an optional "-detected" suffix - a plate, or
+  // an id for the FlixBus coaches that arrive from bustimes without one.
+  const match = /^([A-Z0-9]{1,16})(-detected)?\.jpg$/.exec(file);
   if (!match) {
     res.status(400).end();
     return;
