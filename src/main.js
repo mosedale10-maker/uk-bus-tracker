@@ -16084,7 +16084,10 @@ function roadBridgePlausible(a, b, part, breakOpts = {}) {
   // A plausible length is not the same as being on a road. When road geometry is
   // loaded, require the bridged points to sit on it, otherwise the tail cuts
   // diagonally across fields and building plots.
-  if (roadsForSnap().length && !bridgeStaysOnRoad(part)) return false;
+  if (roadsForSnap().length && !bridgeStaysOnRoad(part, 50)) return false;
+  // A two-point "bridge" over a long distance is a chord, not a road. Real road
+  // geometry between distant points always comes with intermediate vertices.
+  if (part.length <= 2 && straight > 200) return false;
   return true;
 }
 
