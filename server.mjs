@@ -583,6 +583,28 @@ app.get("/api/camera-snapshot", (req, res) => {
 });
 
 /*
+ * The 3D street model behind the Longton virtual camera.
+ *
+ * Served from the project root rather than dist/ because it is generated and
+ * committed alongside camera-locations.generated.json, not a build artefact.
+ * Prebuilt because Overpass, the free service it comes from, was answering 504
+ * for much of the time this was built; fetching geometry per page view would
+ * mean the camera is down whenever Overpass is.
+ */
+app.get("/longton-scene.generated.json", (req, res) => {
+  const file = path.join(__dirname, "longton-scene.generated.json");
+  if (!fs.existsSync(file)) {
+    res.status(503).json({
+      error: "scene not built",
+      detail: "run: node scripts/fetch-longton-scene.mjs",
+    });
+    return;
+  }
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  res.sendFile(file);
+});
+
+/*
  * National Highways camera snapshots. The watcher decides when a coach is near a
  * camera and stores the picture with the vehicle's registration; these endpoints
  * only read what it already captured, so a page view never triggers a fetch from

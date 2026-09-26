@@ -37,7 +37,7 @@ const factory = new Function(
   `
   const {
     esc, cameraPhotoTime, zoomGalleryHits, document: doc,
-    setInterval, clearInterval, createLongtonCamera,
+    setInterval, clearInterval, createLongtonCamera3d,
   } = deps;
   const { camerasGridEl, camerasEmptyEl, camerasCountEl, camerasUpdatedEl,
           camerasOnlyHitsEl, camerasOnlyReadableEl } = deps;
@@ -133,10 +133,11 @@ function makeHarness({ responses }) {
         return state.docHidden;
       },
       addEventListener() {},
-      getElementById: (id) => (id === "longton-camera" ? { id } : null),
+      getElementById: (id) => (id === "longton-camera-3d" ? { id } : null),
     },
-    // Stand-in for the real Leaflet-backed camera. Records lifecycle only.
-    createLongtonCamera: (el) => {
+    // Stand-in for the real WebGL camera. Records lifecycle only; the 3D scene
+    // itself is covered by scripts/test-longton-3d.cjs.
+    createLongtonCamera3d: (el) => {
       if (!el) return null;
       state.cameraBuilt = (state.cameraBuilt || 0) + 1;
       return {
