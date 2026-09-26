@@ -5280,12 +5280,40 @@ function trailPairNeedsRoadMatch(breakOpts = {}, opts = {}) {
   return true;
 }
 
+/**
+ * Last gate before anything is painted. Whatever produced the geometry — live
+ * tail, pinned tail, replay, planned route or staff AVL — a line that is not
+ * actually on the road is never drawn. This is the invariant that stops tails
+ * cutting across housing estates and fields.
+ */
+function trailPathIsOnRoad(path, radiusM = 70, minRatio = 0.9) {
+  const flat = flattenTrailLatLngs(path);
+  if (flat.length < 2) return false;
+  // With no road data loaded we cannot judge; let the caller decide.
+  if (!roadsForSnap().length) return true;
+  const step = Math.max(1, Math.floor(flat.length / 24));
+  let checked = 0;
+  let onRoad = 0;
+  for (let i = 0; i < flat.length; i += step) {
+    const point = flat[i];
+    if (!Array.isArray(point)) continue;
+    const lat = Number(point[0]);
+    const lng = Number(point[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    checked += 1;
+    if (pointIsOnRoad(lat, lng, radiusM)) onRoad += 1;
+  }
+  if (!checked) return false;
+  return onRoad / checked >= minRatio;
+}
+
 function makeTrailPair(path, layer, opts = {}) {
   const breakOpts = trailPairBreakOpts(opts);
   const roadAligned = Boolean(opts.roadAligned);
-  const latlngs = trailPairNeedsRoadMatch(breakOpts, opts) && !roadAligned
-    ? []
-    : asTrailLatLngs(path, breakOpts);
+  const latlngs =
+    (trailPairNeedsRoadMatch(breakOpts, opts) && !roadAligned) || !trailPathIsOnRoad(path)
+      ? []
+      : asTrailLatLngs(path, breakOpts);
   // White casing + coloured centre keeps the route readable over both light
   // street maps and the dark night tiles, like the reference replay view.
   const casing = makeTrailPathLayer(latlngs, TRAIL_CASING, layer);
@@ -5335,6 +5363,15 @@ function setTrailPairPath(pair, path, opts = {}) {
     return;
   }
   pair.roadAligned = roadAligned || Boolean(pair.roadAligned);
+  // Same on-road gate as a new pair: never draw geometry that leaves the road.
+  if (!trailPathIsOnRoad(path)) {
+    pair.path = [];
+    setTrailPathLayerLatLngs(pair.casing, []);
+    setTrailPathLayerLatLngs(pair.line, []);
+    clearTrailArrows(pair, pair.layer);
+    pair.arrows = [];
+    return;
+  }
   pair.path = path;
   const latlngs = asTrailLatLngs(path, breakOpts);
   setTrailPathLayerLatLngs(pair.casing, latlngs);
