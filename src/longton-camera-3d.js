@@ -117,78 +117,311 @@ async function loadBuses(origin) {
 
 /* ------------------------------------------------------------------ geometry */
 
-/** The road surface, as one merged mesh so the draw-call count stays sane. */
+/**
+ * Real aerial photography, stitched into one texture for the ground.
+ *
+ * Flat grey geometry reads as a diagram. Laying the actual Esri World Imagery
+ * of Longton over the ground plane is the single biggest step towards looking
+ * like a street, and it costs one canvas of tiles.
+ *
+ * The tiles are the same free endpoint the map's satellite layer already uses,
+ * so there is no key to hold. Attribution goes on the frame: the imagery is
+ * Esri, Maxar and Earthstar Geographics, and saying so is the condition of use.
+ *
+ * Tiles arrive asynchronously, so the ground is drawn first in plain colour and
+ * the texture swaps in as it loads. The scene must never be blank while waiting.
+ */
+const IMAGERY = {
+  url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+  credit: "Imagery &copy; Esri, Maxar, Earthstar Geographics",
+  zoom: 18,
+  tile: 256,
+  /** Half-width of the area to photograph, in metres either side of the origin. */
+  extentM: 460,
+  maxTiles: 48,
+};
+
+/** Local metres to Web Mercator pixels at a given zoom. */
+function mercatorPx(lat, lon, origin, zoom) {
+  const n = 2 ** zoom;
+  const worldX = ((lon - origin.lon) / 360) * n * IMAGERY.tile;
+  const latRad = (lat * Math.PI) / 180;
+  const worldY =
+    (-Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / (2 * Math.PI)) * n * IMAGERY.tile;
+  return { x: worldX, y: worldY };
+}
+
+/** Local metres back to lat/lon, so the ground corners can be projected. */
+function latLonFrom(origin, x, z) {
+  const mLon = 111_320 * Math.cos((origin.lat * Math.PI) / 180);
+  return {
+    lat: origin.lat - z / 111_320,
+    lon: origin.lon + x / mLon,
+  };
+}
+
+function loadAerialTexture(origin, onReady) {
+  const half = IMAGERY.extentM;
+  const corners = [
+    latLonFrom(origin, -half, -half),
+    latLonFrom(origin, half, -half),
+    latLonFrom(origin, half, half),
+    latLonFrom(origin, -half, half),
+  ].map((c) => mercatorPx(c.lat, c.lon, origin, IMAGERY.zoom));
+
+  const minX = Math.min(...corners.map((c) => c.x));
+  const maxX = Math.max(...corners.map((c) => c.x));
+  const minY = Math.min(...corners.map((c) => c.y));
+  const maxY = Math.max(...corners.map((c) => c.y));
+
+  const t0 = Math.floor(minX / IMAGERY.tile);
+  const t1 = Math.floor((maxX - 1) / IMAGERY.tile);
+  const r0 = Math.floor(minY / IMAGERY.tile);
+  const r1 = Math.floor((maxY - 1) / IMAGERY.tile);
+  const cols = t1 - t0 + 1;
+  const rows = r1 - r0 + 1;
+
+  // A very large scene area at a high zoom would mean hundreds of requests to a
+  // free service. Shrink the zoom rather than hammer it.
+  if (cols * rows > IMAGERY.maxTiles) {
+    return { texture: null, skipped: "too many tiles" };
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = cols * IMAGERY.tile;
+  canvas.height = rows * IMAGERY.tile;
+  const ctx = canvas.getContext("2d");
+  // A neutral base so a slow or missing tile leaves tarmac grey, not black.
+  ctx.fillStyle = "#3a4048";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  let loaded = 0;
+  let failed = 0;
+  const total = cols * rows;
+  return new Promise((resolve) => {
+    const finish = () => {
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.anisotropy = 8;
+      texture.needsUpdate = true;
+      resolve({ texture, loaded, failed, total, uv: { minX, minY, w: canvas.width, h: canvas.height } });
+    };
+    for (let r = 0; r < rows; r += 1) {
+      for (let c = 0; c < cols; c += 1) {
+        const url = IMAGERY.url
+          .replace("{z}", String(IMAGERY.zoom))
+          .replace("{x}", String(t0 + c))
+          .replace("{y}", String(r0 + r));
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => {
+          ctx.drawImage(img, c * IMAGERY.tile, r * IMAGERY.tile);
+          loaded += 1;
+          if (loaded + failed === total) finish();
+        };
+        img.onerror = () => {
+          failed += 1;
+          if (loaded + failed === total) finish();
+        };
+        img.src = url;
+      }
+    }
+  });
+}
+
+/**
+ * The ground, textured with the aerial mosaic when it arrives.
+ *
+ * UVs are worked out from the mercator pixel box the mosaic covers, not guessed
+ * from the plane's own 0..1 range, or the photograph lands in the wrong place and
+ * the street sits next to itself.
+ */
+function buildGround(origin, extentM, uvBox) {
+  const geo = new THREE.PlaneGeometry(extentM * 2, extentM * 2, 1, 1);
+  geo.rotateX(-Math.PI / 2);
+  if (uvBox) {
+    const pos = geo.attributes.position;
+    const uvs = new Float32Array(pos.count * 2);
+    for (let i = 0; i < pos.count; i += 1) {
+      const wx = pos.getX(i);
+      const wz = pos.getZ(i);
+      const ll = latLonFrom(origin, wx, wz);
+      const p = mercatorPx(ll.lat, ll.lon, origin, IMAGERY.zoom);
+      uvs[i * 2] = (p.x - uvBox.minX) / uvBox.w;
+      // Canvas Y runs down, texture V runs up.
+      uvs[i * 2 + 1] = 1 - (p.y - uvBox.minY) / uvBox.h;
+    }
+    geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  }
+  const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.y = -0.06;
+  return mesh;
+}
+
+/**
+ * Road surface, plus the markings and kerbs that make it read as a street.
+ *
+ * Markings are drawn as thin unlit strips just above the tarmac rather than
+ * baked into a texture, so they follow the real OSM geometry instead of a
+ * guessed texture, and so they cost nothing to generate.
+ */
 function buildRoads(scene) {
-  const positions = [];
-  const normals = [];
-  const uvs = [];
+  const group = new THREE.Group();
+  const tarmac = { pos: [], uv: [] };
+  const paint = { pos: [], uv: [] };
+  const kerb = { pos: [], uv: [] };
+
+  const push = (buf, ax, az, bx, bz, half, y) => {
+    const dx = bx - ax;
+    const dz = bz - az;
+    const len = Math.hypot(dx, dz);
+    if (len < 0.01) return;
+    const nx = (-dz / len) * half;
+    const nz = (dx / len) * half;
+    const p = [
+      [ax + nx, az + nz],
+      [bx + nx, bz + nz],
+      [bx - nx, bz - nz],
+      [ax + nx, az + nz],
+      [bx - nx, bz - nz],
+      [ax - nx, az - nz],
+    ];
+    for (const [x, z] of p) {
+      buf.pos.push(x, y, z);
+      buf.uv.push(0, 0);
+    }
+  };
+
   for (const road of scene.roads) {
     const half = road.width / 2;
+    const big = road.type === "primary" || road.type === "secondary" || road.type === "trunk";
     for (let i = 0; i < road.points.length - 1; i += 1) {
       const [ax, az] = road.points[i];
       const [bx, bz] = road.points[i + 1];
-      const dx = bx - ax;
-      const dz = bz - az;
-      const len = Math.hypot(dx, dz);
-      if (len < 0.01) continue;
-      // Left normal of the direction of travel.
-      const nx = -dz / len;
-      const nz = dx / len;
-      const ax1 = ax + nx * half;
-      const az1 = az + nz * half;
-      const ax2 = ax - nx * half;
-      const az2 = az - nz * half;
-      const bx1 = bx + nx * half;
-      const bz1 = bz + nz * half;
-      const bx2 = bx - nx * half;
-      const bz2 = bz - nz * half;
-      // Two triangles, flat and facing up.
-      positions.push(ax1, 0, az1, bx1, 0, bz1, bx2, 0, bz2);
-      positions.push(ax1, 0, az1, bx2, 0, bz2, ax2, 0, az2);
-      for (let k = 0; k < 6; k += 1) normals.push(0, 1, 0);
-      uvs.push(0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1);
+      push(tarmac, ax, az, bx, bz, half, 0);
+      // Kerb line each side, slightly proud of the tarmac.
+      push(kerb, ax, az, bx, bz, half + 0.28, 0.06);
+      if (big) {
+        // Centre line, dashed by drawing short runs.
+        const len = Math.hypot(bx - ax, bz - az);
+        const dash = 3;
+        const gap = 3;
+        const step = dash + gap;
+        for (let d = 0; d < len; d += step) {
+          const t0 = d / len;
+          const t1 = Math.min(1, (d + dash) / len);
+          push(paint, ax + (bx - ax) * t0, az + (bz - az) * t0,
+            ax + (bx - ax) * t1, az + (bz - az) * t1, 0.09, 0.03);
+        }
+        // Edge lines.
+        for (const side of [1, -1]) {
+          const ox = side * (half - 0.35);
+          const dx = bx - ax;
+          const dz = bz - az;
+          const l = Math.hypot(dx, dz) || 1;
+          const nx = (-dz / l) * ox;
+          const nz = (dx / l) * ox;
+          push(paint, ax + nx, az + nz, bx + nx, bz + nz, 0.07, 0.03);
+        }
+      }
     }
   }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geo.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
-  geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-  const mat = new THREE.MeshLambertMaterial({ color: 0x3f4650 });
-  return new THREE.Mesh(geo, mat);
+
+  const mesh = (buf, mat) => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(buf.pos, 3));
+    geo.setAttribute("uv", new THREE.Float32BufferAttribute(buf.uv, 2));
+    geo.computeVertexNormals();
+    return new THREE.Mesh(geo, mat);
+  };
+
+  group.add(mesh(tarmac, new THREE.MeshLambertMaterial({ color: 0x33383f })));
+  group.add(mesh(kerb, new THREE.MeshLambertMaterial({ color: 0x6b7078 })));
+  if (paint.pos.length) {
+    // Unlit: paint is retroreflective and stays bright whatever the sun is doing.
+    group.add(mesh(paint, new THREE.MeshBasicMaterial({ color: 0xe8e6df })));
+  }
+  return group;
 }
 
 /**
  * Buildings, extruded from their mapped footprints.
  *
  * ExtrudeGeometry wants a Shape. A mapped footprint is a ring, not a polygon with
- * holes, so the first and last point are closed explicitly. Anything that fails
+ * holes, so the first and last point is closed explicitly. Anything that fails
  * to build is skipped rather than taking the whole scene down - one bad outline
- * in 239 buildings must not cost the other 238.
+ * in 125 buildings must not cost the other 124.
+ *
+ * Walls and roofs are separate meshes on purpose. A single extruded solid reads
+ * as a lump of the same colour on every face, which is the giveaway that
+ * something is a model; giving the roof its own darker material and adding a
+ * thin eaves lip is what makes extruded boxes look like buildings.
  */
 function buildBuildings(scene) {
   const group = new THREE.Group();
   let built = 0;
   let skipped = 0;
+  // Materials are shared per colour bucket. 125 unique materials is 125 shader
+  // state changes a frame for no visual gain.
+  const wallMats = [];
+  const roofMats = [];
+  const pick = (bucket, color) => {
+    const key = color.getHexString();
+    let entry = bucket.find((m) => m.userData.key === key);
+    if (!entry) {
+      entry = new THREE.MeshLambertMaterial({ color });
+      entry.userData.key = key;
+      bucket.push(entry);
+    }
+    return entry;
+  };
+
   for (const b of scene.buildings) {
     try {
-      const shape = new THREE.Shape();
       const ring = b.ring;
+      const shape = new THREE.Shape();
       shape.moveTo(ring[0][0], ring[0][1]);
       for (let i = 1; i < ring.length; i += 1) shape.lineTo(ring[i][0], ring[i][1]);
       shape.closePath();
-      const geo = new THREE.ExtrudeGeometry(shape, {
-        depth: b.height,
-        bevelEnabled: false,
-      });
-      // ExtrudeGeometry builds in XY; stand it up and drop it onto the ground.
-      geo.rotateX(-Math.PI / 2);
-      const shade = 0.55 + ((b.height % 7) / 7) * 0.2;
-      const mat = new THREE.MeshLambertMaterial({
-        color: new THREE.Color().setHSL(0.08, 0.06, Math.min(0.78, 0.42 + shade * 0.3)),
-      });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.y = 0.02;
-      group.add(mesh);
+      const h = b.height;
+
+      // Walls: a brick-ish tone varied deterministically by footprint position,
+      // so the same building looks the same every reload but neighbours differ.
+      const seed = Math.abs(Math.round(ring[0][0] * 7 + ring[0][1] * 13)) % 100;
+      const kind = b.kind;
+      let wall;
+      if (kind === "retail" || kind === "commercial") {
+        wall = new THREE.Color().setHSL(0.09, 0.1, 0.42 + (seed % 12) / 100);
+      } else if (kind === "industrial" || kind === "warehouse") {
+        wall = new THREE.Color().setHSL(0.58, 0.05, 0.46 + (seed % 10) / 100);
+      } else if (kind === "church") {
+        wall = new THREE.Color().setHSL(0.1, 0.06, 0.52);
+      } else {
+        // Terraced housing and everything else: brick reds and buff stone.
+        wall = new THREE.Color().setHSL(0.02 + (seed % 8) / 100, 0.22, 0.36 + (seed % 14) / 100);
+      }
+
+      const wallGeo = new THREE.ExtrudeGeometry(shape, { depth: h - 0.4, bevelEnabled: false });
+      wallGeo.rotateX(-Math.PI / 2);
+      const wallMesh = new THREE.Mesh(wallGeo, pick(wallMats, wall));
+      wallMesh.position.y = 0.02;
+      wallMesh.castShadow = true;
+      wallMesh.receiveShadow = true;
+      group.add(wallMesh);
+
+      // Roof: a flat cap plus a thin lip, so the top edge is not a hard cut.
+      const roofGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.4, bevelEnabled: false });
+      roofGeo.rotateX(-Math.PI / 2);
+      const roofColor = kind === "industrial" || kind === "warehouse"
+        ? new THREE.Color().setHSL(0.58, 0.08, 0.34)
+        : new THREE.Color().setHSL(0.09, 0.14, 0.2 + (seed % 8) / 100);
+      const roofMesh = new THREE.Mesh(roofGeo, pick(roofMats, roofColor));
+      roofMesh.position.y = 0.02 + h - 0.4;
+      roofMesh.castShadow = true;
+      roofMesh.receiveShadow = true;
+      group.add(roofMesh);
+
       built += 1;
     } catch {
       skipped += 1;
@@ -198,13 +431,35 @@ function buildBuildings(scene) {
   return group;
 }
 
-function buildGround() {
+/** A wide plain beyond the photographed area, so the horizon is not a hard edge. */
+function buildFarGround() {
   const geo = new THREE.PlaneGeometry(4200, 4200);
   geo.rotateX(-Math.PI / 2);
   const mat = new THREE.MeshLambertMaterial({ color: 0x2b3038 });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.y = -0.05;
   return mesh;
+}
+
+/**
+ * Where the sun is, from the time of day.
+ *
+ * A fixed overhead light is the other thing that makes a render look fake: at
+ * 9am and 3pm in Britain the shadows fall in completely different directions.
+ * This is a rough model - it ignores latitude and season - but it moves the
+ * shadows through the day, which is what the eye notices.
+ */
+function sunDirection(hour) {
+  // Solar noon is around 13:00 in the UK in summer, 14:30 in winter.
+  const noon = 13.2;
+  const t = (hour - noon) / 6;
+  const altitude = Math.max(0.08, Math.cos(t * 1.35) * 0.95);
+  const azimuth = -0.9 + t * 1.5;
+  return {
+    x: Math.cos(altitude) * Math.sin(azimuth) * 320,
+    y: Math.max(30, Math.sin(altitude) * 320),
+    z: Math.cos(altitude) * Math.cos(azimuth) * 320,
+  };
 }
 
 /** A bus: body, glazing band, and a route plate on the side. */
@@ -257,6 +512,16 @@ export function createLongtonCamera3d(container, opts = {}) {
     return null;
   }
   renderer.setPixelRatio(Math.min(2, globalThis.devicePixelRatio || 1));
+  // Tone mapping and sRGB output. Without these the render is washed out and
+  // the colours do not match the aerial photograph laid over the ground, which
+  // is the most obvious tell that two images sources have been combined.
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.05;
+  // Shadows are most of what makes extruded boxes look solid. The map is 2k, so
+  // a basic shadow map is plenty and will not choke a phone.
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   container.innerHTML = "";
   container.appendChild(renderer.domElement);
 
@@ -269,10 +534,21 @@ export function createLongtonCamera3d(container, opts = {}) {
   const hemi = new THREE.HemisphereLight(0xbfd4ff, 0x2a2f38, 1.05);
   scene.add(hemi);
   const sun = new THREE.DirectionalLight(0xffffff, 0.85);
-  sun.position.set(-160, 260, 120);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  // A tight shadow camera around the view, or the 2048 map is spread over four
+  // kilometres and every shadow is a blur.
+  const S = 300;
+  sun.shadow.camera.left = -S;
+  sun.shadow.camera.right = S;
+  sun.shadow.camera.top = S;
+  sun.shadow.camera.bottom = -S;
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far = 1200;
+  sun.shadow.bias = -0.0012;
+  sun.shadow.normalBias = 0.4;
   scene.add(sun);
-
-  scene.add(buildGround());
+  scene.add(sun.target);
 
   const busLayer = new THREE.Group();
   scene.add(busLayer);
@@ -337,7 +613,14 @@ export function createLongtonCamera3d(container, opts = {}) {
     scene.fog.color.set(night ? 0x070c16 : 0x9fb6d4);
     hemi.intensity = night ? 0.5 : 1.05;
     sun.intensity = night ? 0.22 : 0.85;
-    if (els.note) {
+    // Move the sun with the time of day, and keep the shadow camera centred on
+    // wherever the camera is looking, or the shadows fall outside the map.
+    const dir = sunDirection(hour);
+    const at = state.sceneData?.camera?.at || [0, 0];
+    sun.position.set(at[0] + dir.x, dir.y, at[1] + dir.z);
+    sun.target.position.set(at[0], 0, at[1]);
+    sun.target.updateMatrixWorld();
+    if (els.note && !els.note.dataset.locked) {
       els.note.textContent = night
         ? "night — street lighting approximated"
         : "daylight";
@@ -393,6 +676,18 @@ export function createLongtonCamera3d(container, opts = {}) {
       return false;
     }
     state.sceneData = data;
+    const origin = data.origin || { lat: view.lat, lon: view.lon };
+
+    // The ground goes in first, untextured, so there is always a surface to see.
+    // The aerial photograph is layered over it when it arrives rather than
+    // blocking on it - a slow tile fetch must not delay the street appearing.
+    const ground = buildGround(origin, IMAGERY.extentM, null);
+    ground.receiveShadow = true;
+    scene.add(ground);
+    // A wide plain beyond the photographed area, so the horizon is ground and
+    // not a hard edge with sky under it.
+    scene.add(buildFarGround());
+
     scene.add(buildRoads(data));
     const buildings = buildBuildings(data);
     scene.add(buildings);
@@ -404,10 +699,38 @@ export function createLongtonCamera3d(container, opts = {}) {
       // buildings than the model holds and leaving the viewer to assume it is
       // an accurate skyline.
       const skipped = buildings.userData?.skipped || 0;
+      els.note.dataset.locked = "1";
       els.note.textContent =
-        `OpenStreetMap model · ${n.buildings || 0} buildings · ${n.roads || 0} road sections` +
-        (skipped ? ` · ${skipped} outline(s) could not be drawn` : "");
+        `OpenStreetMap 3D model · ${n.buildings || 0} buildings · ${n.roads || 0} road sections` +
+        (skipped ? ` · ${skipped} outline(s) could not be drawn` : "") +
+        " · loading aerial imagery…";
     }
+
+    // Now the photography, and swap it in when it is all there.
+    loadAerialTexture(origin)
+      .then((res) => {
+        if (res?.texture && res.uv) {
+          const textured = buildGround(origin, IMAGERY.extentM, res.uv);
+          textured.position.y = -0.05;
+          textured.receiveShadow = true;
+          scene.add(textured);
+          state.aerial = res;
+        }
+        if (els.note) {
+          const bits = [`aerial imagery: ${res?.loaded ?? 0} tiles`];
+          if (res?.failed) bits.push(`${res.failed} unavailable`);
+          els.note.textContent = `${els.note.textContent.replace(" · loading aerial imagery…", "")} · ${bits.join(", ")}`;
+        }
+      })
+      .catch(() => {
+        if (els.note) {
+          els.note.textContent = els.note.textContent.replace(
+            " · loading aerial imagery…",
+            " · aerial imagery unavailable, plain ground shown",
+          );
+        }
+      });
+
     return true;
   }
 

@@ -192,7 +192,17 @@ ok("the generator explains why the chain is walked, not concatenated",
 const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
 ok("the frame is labelled 3D virtual camera", /3D virtual camera/.test(html));
 ok("the frame says not CCTV footage", /Not CCTV footage/.test(html));
-ok("the frame explains it is a model", /it is a model, not a photograph/i.test(html));
+ok("the frame explains it is a model", /It is a model, not a\s+photograph/i.test(html.replace(/\s+/g, " ")));
+ok("the frame credits the aerial imagery", /Esri, Maxar, Earthstar Geographics/.test(html));
+ok("the frame credits OpenStreetMap", /OpenStreetMap contributors/.test(html));
+ok("the renderer uses the real imagery endpoint", /arcgisonline\.com/.test(mod));
+ok("the renderer does not block on imagery", /loading aerial imagery/.test(mod));
+ok("the renderer says so if imagery fails", /aerial imagery unavailable/.test(mod));
+ok("the sun moves with the time of day", /sunDirection/.test(mod));
+ok("shadows are enabled", /shadowMap\.enabled = true/.test(mod));
+ok("tone mapping is on so the photo and the render match",
+  /ACESFilmicToneMapping/.test(mod) && /SRGBColorSpace/.test(mod));
+ok("there is only one buildGround", (mod.match(/function buildGround\b/g) || []).length === 1);
 ok("the accessible name says it is a model", /not CCTV footage/.test(html));
 ok("the scene is served without a build step", /longton-scene\.generated\.json/.test(mod));
 
