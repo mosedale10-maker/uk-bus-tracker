@@ -10034,13 +10034,19 @@ async function ensureLiveries(idsOrBuses) {
   const list = Array.isArray(idsOrBuses) ? idsOrBuses : [];
   const bustimesIds = new Set();
   for (const item of list) {
-    if (item && typeof item === "object" && (item.vehicle || item.service || item._bods)) {
+    if (item && typeof item === "object") {
+      // Only a real vehicle field can name a livery. Never fall back to an
+      // object's `id`: on a bustimes row that is the row id, and asking
+      // /api/bt-liveries/<rowId> 404s while eating the real CSS request.
+      if (!item.vehicle) continue;
       const id = liveryIdOf(item);
       if (id && /^\d+$/.test(String(id))) bustimesIds.add(String(id));
       continue;
     }
-    const id = item == null || item === "" ? "" : String(typeof item === "object" ? item.id ?? "" : item);
-    if (id && /^\d+$/.test(id)) bustimesIds.add(id);
+    // Primitives are explicit ids, but a six-figure "id" is a bustimes row id
+    // rather than a livery — never spend a request on it.
+    const id = item == null || item === "" ? "" : String(item);
+    if (/^\d+$/.test(id) && Number(id) > 0 && Number(id) < 200000) bustimesIds.add(id);
   }
 
   const ids = [...bustimesIds].filter((id) => !liveryCss(liveryById.get(id)));
@@ -10261,6 +10267,17 @@ function paintBodsWithBustimesLiveries(bodsBuses, btBuses) {
 
 function liveryIdOf(busOrLivery) {
   if (busOrLivery == null || busOrLivery === "") return "";
+  // A bus or paint row with no vehicle must never be read as a livery: its `id`
+  // is a bustimes row id, and /api/bt-liveries/<rowId> is a 404 that also used to
+  // swallow the real CSS request.
+  if (typeof busOrLivery === "object" && !busOrLivery.vehicle) {
+    if (busOrLivery.left_css || busOrLivery.left || busOrLivery.stroke_colour) {
+      return String(busOrLivery.id ?? "");
+    }
+    if (busOrLivery.coordinates || busOrLivery.service || busOrLivery.line || busOrLivery._bods) {
+      return "";
+    }
+  }
   const liv =
     typeof busOrLivery === "object" && !busOrLivery.vehicle
       ? busOrLivery
@@ -12477,8 +12494,16 @@ async function staffLivery(item) {
     (parsed.reg || parsed.fleet
       ? await bustimesVehicleByReg(parsed.reg, { fleet: parsed.fleet })
       : null);
-  const id = vehicle?.livery?.id ?? vehicle?.livery;
-  if (id != null && id !== "") await ensureLiveries([id]);
+  // Bustimes sometimes puts the vehicle/row id in `livery` rather than a livery
+  // id. Livery ids are small; a six-figure id is a row id and /api/bt-liveries
+  // 404s for it on every single poll.
+  const rawLiveryId = vehicle?.livery?.id ?? vehicle?.livery;
+  const numericLiveryId = Number(rawLiveryId);
+  const id =
+    Number.isFinite(numericLiveryId) && numericLiveryId > 0 && numericLiveryId < 200000
+      ? String(numericLiveryId)
+      : "";
+  if (id) await ensureLiveries([id]);
   const fromBt = liveryFromBtVehicle(vehicle);
   if (fromBt?.left_css || fromBt?.left) return fromBt;
   if (id != null && id !== "") {
