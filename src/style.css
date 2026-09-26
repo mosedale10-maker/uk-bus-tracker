@@ -1171,6 +1171,28 @@ html[data-plus="1"] .plus-tag {
   padding-bottom: 6px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.28);
 }
+/* Motion close-up: the part of the picture that changed between the two frames,
+   so a vehicle is big enough to actually look at. */
+.popup-camera-crop {
+  margin: 0 0 4px;
+  background: #0b1220;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.popup-camera-crop-img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.popup-camera-crop-note {
+  margin: 0;
+  padding: 3px 6px 4px;
+  font-size: 0.68rem;
+  line-height: 1.25;
+  color: #94a3b8;
+  background: #0b1220;
+}
+
 .popup-camera-frames {
   display: flex;
   gap: 4px;

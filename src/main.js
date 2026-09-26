@@ -12247,13 +12247,176 @@ function vehicleFleetForPhoto(marker) {
 }
 
 /**
+ * Turn the two frames into a close-up.
+ *
+ * There is no detection model here and no plate to read, so instead of guessing
+ * which vehicle is which we use the only reliable signal the feed gives us:
+ * pixels that changed between the two frames are where something moved. Find
+ * those blocks, crop around them, and the vehicle is at least big enough to
+ * look at. It is a motion crop, not a detection of our coach, and the card
+ * says exactly that.
+ */
+const CAMERA_DIFF_W = 120;
+const CAMERA_DIFF_H = 90;
+const cameraCropCache = new Map();
+
+function loadFrameCanvas(url, w, h) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.decoding = "async";
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) {
+        reject(new Error("no 2d context"));
+        return;
+      }
+      try {
+        ctx.drawImage(img, 0, 0, w, h);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      resolve({ canvas, ctx, width: img.naturalWidth || w, height: img.naturalHeight || h });
+    };
+    img.onerror = () => reject(new Error("frame load failed"));
+    img.src = url;
+  });
+}
+
+async function cameraMotionCrop(frameA, frameB) {
+  const [a, b] = await Promise.all([
+    loadFrameCanvas(frameA, CAMERA_DIFF_W, CAMERA_DIFF_H),
+    loadFrameCanvas(frameB, CAMERA_DIFF_W, CAMERA_DIFF_H),
+  ]);
+  if (a.width < 8 || b.width < 8) return null;
+  const da = a.ctx.getImageData(0, 0, CAMERA_DIFF_W, CAMERA_DIFF_H).data;
+  const db = b.ctx.getImageData(0, 0, CAMERA_DIFF_W, CAMERA_DIFF_H).data;
+  const cols = 15;
+  const rows = 9;
+  const bw = Math.floor(CAMERA_DIFF_W / cols);
+  const bh = Math.floor(CAMERA_DIFF_H / rows);
+  const scores = new Float32Array(cols * rows);
+  for (let by = 0; by < rows; by += 1) {
+    for (let bx = 0; bx < cols; bx += 1) {
+      let sum = 0;
+      let n = 0;
+      for (let y = by * bh; y < (by + 1) * bh; y += 1) {
+        for (let x = bx * bw; x < (bx + 1) * bw; x += 1) {
+          const i = (y * CAMERA_DIFF_W + x) * 4;
+          sum +=
+            Math.abs(da[i] - db[i]) +
+            Math.abs(da[i + 1] - db[i + 1]) +
+            Math.abs(da[i + 2] - db[i + 2]);
+          n += 1;
+        }
+      }
+      scores[by * cols + bx] = n ? sum / n : 0;
+    }
+  }
+  let max = 0;
+  for (const s of scores) if (s > max) max = s;
+  // Too little change (a still frame) or so much (night, rain, a wipe) that we
+  // would be cropping noise.
+  if (max < 4) return null;
+  const cut = max * 0.5;
+  let x0 = cols;
+  let y0 = rows;
+  let x1 = -1;
+  let y1 = -1;
+  let hits = 0;
+  for (let by = 0; by < rows; by += 1) {
+    for (let bx = 0; bx < cols; bx += 1) {
+      if (scores[by * cols + bx] < cut) continue;
+      hits += 1;
+      x0 = Math.min(x0, bx);
+      y0 = Math.min(y0, by);
+      x1 = Math.max(x1, bx);
+      y1 = Math.max(y1, by);
+    }
+  }
+  if (hits < 2 || x1 < x0) return null;
+  const covered = hits / (cols * rows);
+  if (covered > 0.55) return null;
+
+  // Map the block box back to full resolution and give it room around the change.
+  const sx = a.width / CAMERA_DIFF_W;
+  const sy = a.height / CAMERA_DIFF_H;
+  let left = x0 * bw * sx;
+  let top = y0 * bh * sy;
+  let right = (x1 + 1) * bw * sx;
+  let bottom = (y1 + 1) * bh * sy;
+  const cx = (left + right) / 2;
+  const cy = (top + bottom) / 2;
+  let w = Math.max(right - left, a.width * 0.22) * 1.7;
+  let h = Math.max(bottom - top, a.height * 0.22) * 1.7;
+  // Keep the camera's own aspect so the crop is a true part of the picture.
+  const aspect = a.width / a.height;
+  if (w / h < aspect) w = h * aspect;
+  else h = w / aspect;
+  w = Math.min(w, a.width);
+  h = Math.min(h, a.height);
+  left = Math.max(0, Math.min(a.width - w, cx - w / 2));
+  top = Math.max(0, Math.min(a.height - h, cy - h / 2));
+
+  const full = await loadFrameCanvas(frameB, a.width, a.height);
+  const out = document.createElement("canvas");
+  const scale = Math.min(2.2, 620 / w);
+  out.width = Math.round(Math.max(240, w * scale));
+  out.height = Math.round(Math.max(180, h * scale));
+  const octx = out.getContext("2d");
+  octx.imageSmoothingEnabled = true;
+  octx.imageSmoothingQuality = "high";
+  octx.drawImage(full.canvas, left, top, w, h, 0, 0, out.width, out.height);
+  return out.toDataURL("image/jpeg", 0.82);
+}
+
+/**
+ * The close-up is built in the browser from the two frames, once per card. Kick
+ * it off after the panel has been re-rendered, and skip anything already done.
+ */
+let cameraCropTimer = null;
+function scheduleCameraCrops() {
+  if (cameraCropTimer) return;
+  cameraCropTimer = setTimeout(() => {
+    cameraCropTimer = null;
+    for (const host of document.querySelectorAll(".popup-camera-crop[data-camera-frames]")) {
+      if (host.dataset.cameraDone === "1" || host.querySelector("img")) continue;
+      const frames = String(host.dataset.cameraFrames || "").split(" ").filter(Boolean);
+      host.dataset.cameraDone = "1";
+      paintCameraCrop(host, frames);
+    }
+  }, 60);
+}
+
+async function paintCameraCrop(host, frames) {
+  if (!host || frames.length < 2) return;
+  const key = frames.join("|");
+  let work = cameraCropCache.get(key);
+  if (!work) {
+    work = cameraMotionCrop(frames[0], frames[1]).catch(() => null);
+    cameraCropCache.set(key, work);
+  }
+  const dataUrl = await work;
+  if (!dataUrl || !host.isConnected) return;
+  const img = document.createElement("img");
+  img.className = "popup-camera-crop-img";
+  img.alt = "Close-up of the part of the camera view that changed between the two frames";
+  img.src = dataUrl;
+  const note = host.querySelector(".popup-camera-crop-note");
+  host.prepend(img);
+  if (note) note.hidden = false;
+}
+
+/**
  * The camera frames taken while this coach was near a National Highways camera.
  *
- * Two frames, seconds apart, side by side and never cropped: a cropped road
- * scene hides the very thing you came to look at, and two frames let you see
- * whether a vehicle moved. The caption is deliberately cautious — this is the
- * camera nearest the coach's recorded position, not proof of which vehicle is
- * in the shot, and the card must not pretend otherwise.
+ * A close-up of whatever moved between the two frames comes first, then both
+ * frames uncropped for context. The wording stays cautious: this is the camera
+ * nearest the coach's recorded position, and the close-up is a motion crop, not
+ * a confirmed picture of this coach.
  */
 function cameraSnapBlock(snap) {
   const frames = Array.isArray(snap?.frames) && snap.frames.length ? snap.frames : snap?.image ? [snap.image] : [];
@@ -12270,7 +12433,14 @@ function cameraSnapBlock(snap) {
         `<img class="popup-camera-frame" src="${esc(src)}" alt="National Highways camera view near ${esc(where)}${frames.length > 1 ? `, frame ${i + 1} of ${frames.length}` : ""}" loading="lazy" />`,
     )
     .join("");
+  const crop =
+    frames.length > 1
+      ? `<div class="popup-camera-crop" data-camera-frames="${esc(frames.join(" "))}">
+           <p class="popup-camera-crop-note" hidden>close-up of the biggest change between the two frames</p>
+         </div>`
+      : "";
   return `<div class="popup-camera-snap">
+      ${crop}
       <div class="popup-camera-frames${frames.length > 1 ? " is-pair" : ""}">${imgs}</div>
       <p class="popup-camera-where">${esc(where)}${km ? ` &middot; ${esc(km)} km from this coach` : ""}${when ? ` &middot; ${esc(when)}` : ""}</p>
       <p class="popup-camera-note">${frames.length > 1 && gap ? `${esc(gap)}s apart &middot; ` : ""}vehicle in frame is not verified &mdash; the coach was ${km ? `${esc(km)} km ` : ""}from this camera</p>
@@ -13263,6 +13433,7 @@ function refreshPopup(marker, { force = false } = {}) {
   if (!marker) return;
   refreshObservedStopTimes(marker);
   refreshFirstOccupancyIfDue(marker);
+  scheduleCameraCrops();
   if (selectedMapMarker === marker && journeyPanelEl && !journeyPanelEl.hidden) {
     rememberNextStop(marker);
     const html = markerPopupHtml(marker);
