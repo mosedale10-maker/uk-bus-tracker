@@ -12506,6 +12506,26 @@ async function paintCameraCrop(host, frames, snap) {
 function cameraSnapBlock(snap) {
   const frames = Array.isArray(snap?.frames) && snap.frames.length ? snap.frames : snap?.image ? [snap.image] : [];
   if (!frames.length) return "";
+  /*
+   * Only the coach's current camera is shown. A coach is photographed at every
+   * camera it passes, because most single frames do not contain it at all, but
+   * showing the whole series left an old junction sitting under the plate - so
+   * the earlier shots are dropped from the card as the coach moves on, and just
+   * the count is reported. The detection shown belongs to THIS camera, not to
+   * the best of the run: claiming a coach here because one was seen two
+   * junctions ago would be exactly the sort of thing this card must not do.
+   *
+   * These two have to be resolved BEFORE the strings below are built - they used
+   * to be declared further down, which put them in the temporal dead zone and
+   * threw a ReferenceError on every single bus card, so the camera photo never
+   * appeared on the card at all.
+   */
+  const shot = snap.currentShot || null;
+  const coachSeen =
+    Boolean(shot?.busDetected) &&
+    Array.isArray(shot?.busBox) &&
+    shot.busBox.length === 4;
+  const shown = coachSeen ? shot : null;
   const where = [shot?.road ?? snap.road, shot?.desc ?? snap.desc].filter(Boolean).join(" ") || "National Highways camera";
   const shownM = shown?.distanceM ?? shot?.distanceM ?? snap.distanceM;
   const km = Number.isFinite(shownM) ? (shownM / 1000).toFixed(1) : "";
@@ -12524,24 +12544,9 @@ function cameraSnapBlock(snap) {
    * in the frame. Two cheaper tests were tried and both put cars on the card -
    * a livery colour match that scored grey tarmac as National Express navy, and
    * a motion-streak test that a line of moving cars passes easily - so neither
-   * is used. Until real detection is wired up, `busDetected` is never set and
-   * nothing is invented.
+   * is used. Nothing is invented here: if the detector did not find a coach,
+   * the card says so.
    */
-  /*
-   * Only the coach's current camera is shown. A coach is photographed at every
-   * camera it passes, because most single frames do not contain it at all, but
-   * showing the whole series left an old junction sitting under the plate - so
-   * the earlier shots are dropped from the card as the coach moves on, and just
-   * the count is reported. The detection shown belongs to THIS camera, not to
-   * the best of the run: claiming a coach here because one was seen two
-   * junctions ago would be exactly the sort of thing this card must not do.
-   */
-  const shot = snap.currentShot || null;
-  const coachSeen =
-    Boolean(shot?.busDetected) &&
-    Array.isArray(shot?.busBox) &&
-    shot.busBox.length === 4;
-  const shown = coachSeen ? shot : null;
   // FlixBus coaches arrive without a plate, so show the service instead.
   const who = snap.plate ? snap.operatorLabel || "" : snap.label || snap.operatorLabel || "";
   const shotCount = Number(snap.shotCount) || frames.length;
@@ -12557,6 +12562,12 @@ function cameraSnapBlock(snap) {
        </div>`
     : `<p class="popup-camera-none">No coach detected in this camera view &mdash; nothing to photograph</p>`;
   const near = Number.isFinite(shownM) && shownM <= 150;
+  // Night frames are usually too dark to read, so a copy is brightened for
+  // display. Say so rather than passing it off as the raw camera image - the
+  // original is untouched on the server.
+  const lit = frames.some((f) => /-n\.jpg$/.test(f))
+    ? " &middot; brightened for night"
+    : "";
   return `<div class="popup-camera-snap">
       ${crop}
       <div class="popup-camera-frames${frames.length > 1 ? " is-pair" : ""}">${imgs}</div>
@@ -12567,7 +12578,7 @@ function cameraSnapBlock(snap) {
               who ? ` &middot; ${esc(who)}` : ""
             }`
           : ""
-      }${shotNote}</p>
+      }${shotNote}${lit}</p>
       <p class="popup-camera-credit">${esc(snap.attribution || "Camera imagery © National Highways (Crown copyright)")}</p>
     </div>`;
 }
@@ -12690,6 +12701,7 @@ const camerasGridEl = document.getElementById("cameras-grid");
 const camerasEmptyEl = document.getElementById("cameras-empty");
 const camerasCountEl = document.getElementById("cameras-count");
 const camerasOnlyHitsEl = document.getElementById("cameras-only-hits");
+const camerasOnlyReadableEl = document.getElementById("cameras-only-readable");
 let cameraGalleryLoaded = false;
 
 function cameraPhotoTime(ts) {
@@ -12706,23 +12718,38 @@ async function loadCameraGallery({ force = false } = {}) {
   if (!camerasGridEl) return;
   if (cameraGalleryLoaded && !force) return;
   const onlyHits = Boolean(camerasOnlyHitsEl?.checked);
+  // Most night frames come back as glare, rain or dirt - a live motorway with
+  // a coach metres away should show plenty of vehicles, and a frame scoring
+  // almost none of them is not evidence of anything. Hidden unless asked for.
+  const onlyReadable = camerasOnlyReadableEl ? camerasOnlyReadableEl.checked : true;
   camerasGridEl.innerHTML = `<p class="cameras-empty">Loading photos…</p>`;
-  const res = await fetch(`/api/camera-gallery?limit=160${onlyHits ? "&hits=1" : ""}`).catch(
-    () => null,
-  );
+  const params = new URLSearchParams({ limit: "160" });
+  if (onlyHits) params.set("hits", "1");
+  if (!onlyReadable) params.set("readable", "0");
+  const res = await fetch(`/api/camera-gallery?${params}`).catch(() => null);
   const data = res?.ok ? await res.json().catch(() => null) : null;
   const photos = Array.isArray(data?.photos) ? data.photos : [];
   cameraGalleryLoaded = true;
   if (camerasEmptyEl) camerasEmptyEl.hidden = photos.length > 0;
   const total = Number(data?.captured ?? data?.total) || photos.length;
+  const hidden = Math.max(0, total - photos.length);
   if (camerasCountEl) {
     // Always say what is being hidden. A gallery that silently drops photos
     // reads as "we have no photos", which is a different and wrong claim.
-    camerasCountEl.textContent = onlyHits
-      ? photos.length
+    let text;
+    if (onlyHits) {
+      text = photos.length
         ? `${photos.length} with a coach in frame, of ${total} captured`
-        : `none of the ${total} captured have a coach in frame`
-      : `${photos.length} shown of ${total}`;
+        : `none of the ${total} captured have a coach in frame`;
+    } else {
+      text = `${photos.length} shown of ${total}`;
+    }
+    if (hidden > 0) {
+      text += onlyHits && !onlyReadable
+        ? ` · ${hidden} hidden as unreadable`
+        : ` · ${hidden} hidden by the filters above`;
+    }
+    camerasCountEl.textContent = text;
   }
   if (!photos.length) {
     camerasGridEl.innerHTML = onlyHits
@@ -12738,6 +12765,11 @@ async function loadCameraGallery({ force = false } = {}) {
         ? `<span class="cameras-badge is-hit">coach in frame${Number.isFinite(p.busConfidence) ? ` · ${Number(p.busConfidence).toFixed(2)}` : ""}</span>`
         : `<span class="cameras-badge">no coach in frame</span>`;
       const shots = p.shotCount > 1 ? `<span class="cameras-shots">${p.shotCount} cameras</span>` : "";
+      // Say when the frame has been brightened. The raw camera image is still
+      // one click away via originalImage, so this is disclosure, not a swap.
+      const lit = p.enhanced
+        ? `<span class="cameras-shots" title="Brightened for night; the raw frame is unmodified on the server">brightened for night</span>`
+        : "";
       const box = Array.isArray(p.busBox) && p.busBox.length === 4 ? p.busBox.join(",") : "";
       return `<a class="cameras-card" href="${esc(p.link || "#")}">
           <span class="cameras-thumbwrap">
@@ -12749,7 +12781,7 @@ async function loadCameraGallery({ force = false } = {}) {
             <strong>${esc(p.label)}</strong>
             <span>${esc(where)}${dist ? ` · ${esc(dist)}` : ""}</span>
             <span class="cameras-when">${esc(cameraPhotoTime(p.takenAt))}</span>
-            <span class="cameras-badges">${badge}${shots}</span>
+            <span class="cameras-badges">${badge}${shots}${lit}</span>
           </div>
         </a>`;
     })
@@ -12788,6 +12820,9 @@ document.getElementById("cameras-refresh")?.addEventListener("click", () => {
   loadCameraGallery({ force: true });
 });
 camerasOnlyHitsEl?.addEventListener("change", () => {
+  loadCameraGallery({ force: true });
+});
+camerasOnlyReadableEl?.addEventListener("change", () => {
   loadCameraGallery({ force: true });
 });
 

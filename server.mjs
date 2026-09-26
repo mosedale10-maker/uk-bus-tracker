@@ -448,6 +448,10 @@ app.get("/api/bods-vehicles", (req, res) => handleBodsVehicles(req, res, bodsKey
 app.get("/api/camera-gallery", (req, res) => {
   const limit = Math.max(1, Math.min(Number(req.query?.limit) || 120, 400));
   const onlyHits = String(req.query?.hits || "") === "1";
+  // Unreadable frames are not evidence. Most night captures score 0-2 detected
+  // objects on a live motorway, which means glare, rain or dirt - not an empty
+  // road - so they are hidden unless explicitly asked for.
+  const onlyReadable = String(req.query?.readable || "") !== "0";
   let names = [];
   try {
     names = fs.readdirSync(path.join(__dirname, "data", "camera-snapshots"));
@@ -458,6 +462,20 @@ app.get("/api/camera-gallery", (req, res) => {
   const dir = path.join(__dirname, "data", "camera-snapshots");
   const photos = [];
   let captured = 0;
+  /*
+   * Prefer the night-enhanced copy when the verifier measured that it reads
+   * better than the original. The original frame is never deleted or replaced -
+   * it stays on disk and can still be fetched by swapping the `-n` off the
+   * filename - so the evidence is untouched and only the display is helped.
+   */
+  const displayFile = (shot, fallback) => {
+    const original = shot?.file || fallback;
+    const enhanced = shot?.enhancedImage;
+    if (enhanced && fs.existsSync(path.join(dir, path.basename(enhanced)))) {
+      return enhanced;
+    }
+    return original;
+  };
   for (const name of names) {
     if (!name.endsWith(".json")) continue;
     let meta;
@@ -468,12 +486,13 @@ app.get("/api/camera-gallery", (req, res) => {
     }
     const shots = Array.isArray(meta.shots) ? meta.shots : [];
     const current = shots.length ? shots[shots.length - 1] : null;
-    const file = current?.file || `/api/camera-snapshot/${meta.reg}.jpg`;
-    if (!fs.existsSync(path.join(dir, path.basename(file)))) continue;
+    const file = displayFile(current, `/api/camera-snapshot/${meta.reg}.jpg`);
+    if (!fs.existsSync(path.join(dir, path.basename(current?.file || file)))) continue;
     // Count everything before filtering, so the UI can say how many photos the
     // filter is hiding rather than implying there are none at all.
     captured += 1;
     if (onlyHits && !current?.busDetected) continue;
+    if (onlyReadable && current && current.readable === false) continue;
     photos.push({
       key: meta.reg,
       label: meta.label || meta.plate || meta.reg,
@@ -486,10 +505,15 @@ app.get("/api/camera-gallery", (req, res) => {
       shotCount: meta.shotCount || shots.length || 1,
       busDetected: Boolean(current?.busDetected),
       busConfidence: current?.busConfidence ?? null,
+      readable: current ? current.readable !== false : true,
       // The box travels with the photo so the card can zoom straight to the
       // coach instead of making you hunt for a 60px shape in a 720px frame.
       busBox: current?.busBox ?? null,
       image: file,
+      // So the UI can say the frame was brightened for night rather than
+      // quietly passing off processed pixels as the raw camera image.
+      enhanced: Boolean(current?.enhanced),
+      originalImage: current?.file || null,
       link: `/?bus=${encodeURIComponent(meta.reg)}`,
     });
   }
@@ -519,9 +543,19 @@ app.get("/api/camera-snapshot", (req, res) => {
     "camera-snapshots",
     path.basename(currentFile),
   );
-  const image = fs.existsSync(onDisk)
+  let image = fs.existsSync(onDisk)
     ? currentFile
     : `/api/camera-snapshot/${snap.reg}.jpg`;
+  // Brightened copy when the verifier measured it reads better than the raw
+  // frame. The raw one is still reachable, so nothing is hidden from you.
+  if (
+    current?.enhancedImage &&
+    fs.existsSync(
+      path.join(__dirname, "data", "camera-snapshots", path.basename(current.enhancedImage)),
+    )
+  ) {
+    image = current.enhancedImage;
+  }
   res.json({
     snapshot: {
       ...snap,
@@ -538,6 +572,7 @@ app.get("/api/camera-snapshot", (req, res) => {
             busDetected: Boolean(current.busDetected),
             busConfidence: current.busConfidence ?? null,
             busBox: current.busBox ?? null,
+            enhanced: Boolean(current.enhanced),
           }
         : null,
     },
@@ -554,9 +589,11 @@ app.get("/api/camera-snapshot/:file", (req, res) => {
   const file = String(req.params?.file || "");
   // Keys are [A-Z0-9]{1,16} - a plate, or an id for the FlixBus coaches that
   // arrive from bustimes without one - optionally followed by "-c<cameraId>"
-  // for each camera a coach was photographed at, or "-detected" for the kept
-  // copy of the frame a detection came from.
-  const match = /^([A-Z0-9]{1,16})(-c[0-9]{1,8})?(-detected)?\.jpg$/.exec(file);
+  // for each camera a coach was photographed at, "-detected" for the kept copy
+  // of the frame a detection came from, and "-n" for the night-brightened copy.
+  // Every suffix is plain [a-z0-9-] with no separators, so a request can never
+  // escape the snapshot directory.
+  const match = /^([A-Z0-9]{1,16})(-c[0-9]{1,8})?(-detected)?(-n)?\.jpg$/.exec(file);
   if (!match) {
     res.status(400).end();
     return;

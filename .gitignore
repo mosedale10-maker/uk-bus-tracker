@@ -11,6 +11,12 @@ data/pg/
 data/pc-database.url
 data/pc-env.cache.json
 data/maintenance.on
+# Camera snapshots are captured on the VPS, not in the repo: thousands of
+# National Highways frames plus the brightened copies. The camera location list
+# IS tracked, because the app needs it.
+data/camera-snapshots/
+data/models/
+data/preview-key
 logs/
 scripts/_empty.bin
 
