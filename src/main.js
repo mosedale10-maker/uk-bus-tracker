@@ -8594,18 +8594,27 @@ async function startRoutePlayback({
   const coachOp = coachPlayback;
   // Route 36A explicitly displays the published A50 alignment instead of the
   // recorded Longton diversion. Other journeys still prefer recorded GPS.
+  // Judge the closure against the journey's own time: a run that started before
+  // the road closed was never diverted, and rerouting it drew a diversion that
+  // cut straight across Anchor Place.
+  const journeyAt = Number.isFinite(toMs) ? toMs : Number.isFinite(fromMs) ? fromMs : Date.now();
+  const noticeContext = { operator, line: line || trip?.line || "", at: journeyAt };
   const plannedPathBlocked =
     plannedRouteOverride &&
     tripPath.length >= 2 &&
-    pathCrossesActiveRoadNotice(tripPath, { operator, line: line || trip?.line || "" });
+    pathCrossesActiveRoadNotice(tripPath, noticeContext);
   const staffsRecordedRoute = prefersRecordedStaffsRoute(operator, true, line || trip?.line || "");
   if (staffsRecordedRoute && hasRecordedGps) {
     // The recorded GPS is the authority for the current diverted stint.
     actualRouteRequired = true;
   }
-  const diversionFallbackPath = plannedPathBlocked
-    ? activeDiversionReplacement(tripPath, { operator, line: line || trip?.line || "" })
-    : [];
+  // Never overlay a diversion on a journey we actually recorded: the GPS already
+  // shows the road the bus drove, and splicing replacement geometry in puts
+  // straight connectors across the places either side of it.
+  const diversionFallbackPath =
+    plannedPathBlocked && !hasRecordedGps
+      ? activeDiversionReplacement(tripPath, noticeContext)
+      : [];
   let plannedPath =
     plannedRouteOverride &&
     !actualRouteRequired &&
@@ -12510,7 +12519,9 @@ function roadNoticeAppliesToService(notice, { operator = "", line = "" } = {}) {
 function pathCrossesActiveRoadNotice(path, context = {}) {
   const flat = Array.isArray(path?.[0]?.[0]) ? path.flat() : path;
   if (!Array.isArray(flat) || flat.length < 2) return false;
-  const now = Date.now();
+  // Judge the closure against the journey's own timestamp when we have one, so a
+  // run from before the road closed is not treated as diverted.
+  const now = Number.isFinite(Number(context.at)) ? Number(context.at) : Date.now();
   for (const notice of ROAD_NOTICES || []) {
     if (
       !roadNoticeIsActive(notice, now) ||
@@ -12532,7 +12543,7 @@ function pathCrossesActiveRoadNotice(path, context = {}) {
 function activeDiversionReplacement(path, context = {}) {
   const flat = Array.isArray(path?.[0]?.[0]) ? path.flat() : path;
   if (!Array.isArray(flat) || flat.length < 2) return [];
-  const now = Date.now();
+  const now = Number.isFinite(Number(context.at)) ? Number(context.at) : Date.now();
   for (const notice of ROAD_NOTICES || []) {
     if (
       !roadNoticeIsActive(notice, now) ||
