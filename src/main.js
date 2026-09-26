@@ -5059,6 +5059,11 @@ function preferRoadMatchedTrail(gpsPath, roadPath, breakOpts = {}) {
     return flattenTrailLatLngs(local).length >= 2 ? local : [];
   }
   if (breakOpts.plannedRoute) {
+    // A timetable/stop-to-stop path is a chord across town by nature. Snap it to
+    // the real road layout before painting, exactly like a recorded tail, so no
+    // planned route is ever drawn over building blocks or fields.
+    const local = alignTrailToRoadsLocal(gpsPath, { ...breakOpts, staffs: true });
+    if (flattenTrailLatLngs(local).length >= 2) return local;
     return plannedPathNeedsRoadMatch(gpsPath, breakOpts) ? [] : gpsPath;
   }
   // A local nearest-road stitch can choose the opposite carriageway at a
