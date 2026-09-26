@@ -12246,12 +12246,45 @@ function vehicleFleetForPhoto(marker) {
   ).trim();
 }
 
+/**
+ * The camera frames taken while this coach was near a National Highways camera.
+ *
+ * Two frames, seconds apart, side by side and never cropped: a cropped road
+ * scene hides the very thing you came to look at, and two frames let you see
+ * whether a vehicle moved. The caption is deliberately cautious — this is the
+ * camera nearest the coach's recorded position, not proof of which vehicle is
+ * in the shot, and the card must not pretend otherwise.
+ */
+function cameraSnapBlock(snap) {
+  const frames = Array.isArray(snap?.frames) && snap.frames.length ? snap.frames : snap?.image ? [snap.image] : [];
+  if (!frames.length) return "";
+  const where = [snap.road, snap.desc].filter(Boolean).join(" ") || "National Highways camera";
+  const km = Number.isFinite(snap.distanceM) ? (snap.distanceM / 1000).toFixed(1) : "";
+  const when = snap.takenAt
+    ? new Date(snap.takenAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "";
+  const gap = Number.isFinite(snap.frameGapMs) ? Math.round(snap.frameGapMs / 1000) : 0;
+  const imgs = frames
+    .map(
+      (src, i) =>
+        `<img class="popup-camera-frame" src="${esc(src)}" alt="National Highways camera view near ${esc(where)}${frames.length > 1 ? `, frame ${i + 1} of ${frames.length}` : ""}" loading="lazy" />`,
+    )
+    .join("");
+  return `<div class="popup-camera-snap">
+      <div class="popup-camera-frames${frames.length > 1 ? " is-pair" : ""}">${imgs}</div>
+      <p class="popup-camera-where">${esc(where)}${km ? ` &middot; ${esc(km)} km from this coach` : ""}${when ? ` &middot; ${esc(when)}` : ""}</p>
+      <p class="popup-camera-note">${frames.length > 1 && gap ? `${esc(gap)}s apart &middot; ` : ""}vehicle in frame is not verified &mdash; the coach was ${km ? `${esc(km)} km ` : ""}from this camera</p>
+      <p class="popup-camera-credit">${esc(snap.attribution || "Camera imagery © National Highways (Crown copyright)")}</p>
+    </div>`;
+}
+
 function photoBlock(extra = {}, { reg = "", fleet = "", operator = "" } = {}) {
   const plate = compactReg(reg || extra.photoReg || "");
   const photo = extra.photo;
   const pending = Boolean(extra.photoPending);
   const status = extra.photoStatus || "";
   const canUpload = Boolean(plate);
+  const cameraSnap = cameraSnapBlock(extra.cameraSnap);
   const img = photo?.url
     ? `<img class="popup-bus-photo" src="${esc(photo.url)}" alt="Photo of ${esc(plate)}" loading="lazy" />`
     : "";
@@ -12273,8 +12306,8 @@ function photoBlock(extra = {}, { reg = "", fleet = "", operator = "" } = {}) {
         pending ? "Add another photo" : photo ? "Replace photo" : "Add photo"
       }</button>`
     : "";
-  if (!img && !btn && !note) return "";
-  return `<div class="popup-photo">${img}${credit}${note}${nameField}${btn}</div>`;
+  if (!img && !btn && !note && !cameraSnap) return "";
+  return `<div class="popup-photo">${cameraSnap}${img}${credit}${note}${nameField}${btn}</div>`;
 }
 
 async function fetchApprovedPhoto(reg) {
@@ -12289,6 +12322,42 @@ async function fetchApprovedPhoto(reg) {
   return promise;
 }
 
+/**
+ * National Highways camera snapshot for this vehicle, if the watcher caught one
+ * while the coach was near a camera. Cached briefly: a snapshot is a moment, not
+ * a live feed, but a coach that has just passed a camera will get a new one
+ * within minutes and the card should pick that up without a reload.
+ */
+const cameraSnapCache = new Map();
+const CAMERA_SNAP_TTL_MS = 2 * 60 * 1000;
+
+async function fetchCameraSnapshot(reg) {
+  const key = compactReg(reg);
+  if (!key) return null;
+  const hit = cameraSnapCache.get(key);
+  if (hit && Date.now() - hit.at < CAMERA_SNAP_TTL_MS) return hit.promise;
+  const promise = fetch(`/api/camera-snapshot?reg=${encodeURIComponent(key)}`)
+    .then((res) => (res.ok ? res.json() : null))
+    .then((data) => data?.snapshot || null)
+    .catch(() => null);
+  cameraSnapCache.set(key, { at: Date.now(), promise });
+  return promise;
+}
+
+/**
+ * Only the coach operators the watcher follows can ever have a camera shot.
+ * `marker.bus` is the feed object the popup renders from, and the same
+ * predicates the popup uses to title a coach decide this.
+ */
+function mayHaveCameraSnapshot(marker) {
+  const bus = marker?.bus;
+  if (!bus) return false;
+  if (isFlixBus(bus) || isNationalExpress(bus)) return true;
+  return isCoachTrailOperator(
+    trailOperatorForBus(bus) || bus?.operator?.noc || bus?.operator?.id,
+  );
+}
+
 async function loadPhotoIntoMarker(marker) {
   if (!marker) return;
   marker.extra ||= {};
@@ -12296,11 +12365,19 @@ async function loadPhotoIntoMarker(marker) {
   marker.extra.photoReg = reg;
   if (!reg) {
     marker.extra.photo = null;
+    marker.extra.cameraSnap = null;
     return;
   }
-  const photo = await fetchApprovedPhoto(reg);
+  // Asking for every bus would be one pointless request per marker on the map.
+  const wantCamera = mayHaveCameraSnapshot(marker);
+  if (!wantCamera) cameraSnapCache.delete(compactReg(reg));
+  const [photo, cameraSnap] = await Promise.all([
+    fetchApprovedPhoto(reg),
+    wantCamera ? fetchCameraSnapshot(reg) : null,
+  ]);
   if (vehicleRegForPhoto(marker) !== reg) return;
   marker.extra.photo = photo;
+  marker.extra.cameraSnap = cameraSnap;
   if (photo) marker.extra.photoPending = false;
   refreshPopup(marker);
 }

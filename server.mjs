@@ -69,6 +69,13 @@ import {
   TRAIL_KEEP_DAYS,
 } from "./trail-store.mjs";
 import { startTrailRecorder } from "./trail-recorder.mjs";
+import {
+  startCameraWatcher,
+  cameraSnapshotFor,
+  cameraCount,
+  loadCameraLocations,
+  CAMERA_ATTRIBUTION,
+} from "./camera-watcher.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, "dist");
@@ -432,6 +439,52 @@ app.get("/api/health", (_req, res) => {
 app.get("/api/bods-occupancy", (req, res) => handleBodsOccupancy(req, res, bodsKey));
 app.get("/api/dg-at-timetable", (req, res) => handleDgAtTimetable(req, res));
 app.get("/api/bods-vehicles", (req, res) => handleBodsVehicles(req, res, bodsKey));
+
+/*
+ * National Highways camera snapshots. The watcher decides when a coach is near a
+ * camera and stores the picture with the vehicle's registration; these endpoints
+ * only read what it already captured, so a page view never triggers a fetch from
+ * someone else's service.
+ */
+app.get("/api/camera-snapshot", (req, res) => {
+  const snap = cameraSnapshotFor(req.query?.reg);
+  if (!snap) {
+    res.status(404).json({ snapshot: null });
+    return;
+  }
+  const first = `/api/camera-snapshot/${snap.reg}.jpg`;
+  const second = `/api/camera-snapshot/${snap.reg}.b.jpg`;
+  const hasSecond = fs.existsSync(path.join(__dirname, "data", "camera-snapshots", `${snap.reg}.b.jpg`));
+  res.json({
+    snapshot: {
+      ...snap,
+      image: first,
+      frames: hasSecond ? [first, second] : [first],
+    },
+  });
+});
+
+app.get("/api/camera-snapshot/:file", (req, res) => {
+  const file = String(req.params?.file || "");
+  // Registration keys are [A-Z0-9]{1,12}, optionally the ".b" second frame.
+  const match = /^([A-Z0-9]{1,12})(\.b)?\.jpg$/.exec(file);
+  if (!match) {
+    res.status(400).end();
+    return;
+  }
+  const reg = match[1];
+  const full = path.join(__dirname, "data", "camera-snapshots", file);
+  const snap = cameraSnapshotFor(reg);
+  if (!snap || !fs.existsSync(full)) {
+    res.status(404).end();
+    return;
+  }
+  res.setHeader("Content-Type", "image/jpeg");
+  res.setHeader("Cache-Control", "private, max-age=60");
+  // The credit has to travel with the bytes, not just sit in the UI.
+  res.setHeader("X-Image-Credit", CAMERA_ATTRIBUTION);
+  fs.createReadStream(full).pipe(res);
+});
 
 /**
  * Current build id — the client polls this and reloads when it changes, so an
@@ -2286,6 +2339,11 @@ const server = app.listen(port, "0.0.0.0", () => {
     revalidateVehiclesInBackground(quantizeVehiclesQuery(qs));
   }
   startPaintWarmer();
+  startCameraWatcher({
+    bodsKey,
+    fetchVehicles: fetchBodsVehiclesJson,
+    dataDir: path.join(__dirname, "data"),
+  });
 });
 
 /**
