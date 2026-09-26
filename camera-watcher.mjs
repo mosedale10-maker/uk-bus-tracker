@@ -28,12 +28,17 @@ const CAMERA_IMAGE_BASE =
 const ATTRIBUTION = "Camera imagery © National Highways (Crown copyright)";
 
 /**
- * A coach this close to a camera is plausibly inside its frame. Tight on
- * purpose: motorway cameras are gantries over the carriageway, so a coach is
- * only reliably in shot within a couple of hundred metres. At 500m it is a
- * speck among other traffic, and a speck is not evidence of anything.
+ * How close a coach must be to a camera before we photograph it.
+ *
+ * Cut from 250m to 120m deliberately. At 250m a coach is roughly 50px long in a
+ * 720x576 frame among dense motorway traffic, and the detector found a coach in
+ * none of the 20 M6 captures taken at that range - volume without information.
+ * At 120m a coach is big enough to be recognised, which is what makes "coach
+ * detected" on the card worth something. Fewer photographs, each one worth
+ * having. Applies to every road, not just the M6: the limit is about how big a
+ * coach is in the picture, not about which road it is on.
  */
-const NEAR_M = 250;
+const NEAR_M = 120;
 /** Closer than this and the close-up is worth trusting. */
 const CLOSE_M = 150;
 /**
