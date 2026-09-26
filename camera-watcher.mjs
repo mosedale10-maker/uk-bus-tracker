@@ -20,6 +20,7 @@
  */
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 
 const CAMERA_IMAGE_BASE =
   "https://public.highwaystrafficcameras.co.uk/cctvpublicaccess/images/";
@@ -238,6 +239,51 @@ async function capture(reg, cam, takenAt) {
   return snap;
 }
 
+/**
+ * Ask the Python verifier whether a coach is actually in the frame.
+ *
+ * Detection deliberately does not live here: reproducing the model's expected
+ * input by hand in JavaScript produced either nothing at all or a flood of false
+ * positives across four attempts, because the letterbox and normalisation
+ * details are easy to get subtly wrong. The verifier runs ultralytics' own
+ * predict(), which knows its own preprocessing, and writes the verdict back
+ * into the sidecar. Returns null when the verifier is unavailable, and the card
+ * then shows nothing rather than guessing.
+ */
+function verifyWithPython(reg) {
+  return new Promise((resolve) => {
+    const script = join(import.meta.dirname || ".", "scripts", "verify-coaches.py");
+    const python = process.env.CAMERA_VERIFY_PY || "/opt/ukb-venv/bin/python";
+    let child;
+    try {
+      child = spawn(python, [script, "--only", reg], {
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 120_000,
+      });
+    } catch {
+      resolve(null);
+      return;
+    }
+    let out = "";
+    child.stdout?.on("data", (d) => {
+      out += String(d);
+    });
+    child.on("error", () => resolve(null));
+    child.on("close", () => {
+      const found = /coach\s+detected/i.test(out);
+      resolve({ found });
+    });
+    setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* already gone */
+      }
+      resolve(null);
+    }, 130_000);
+  });
+}
+
 /** Reuse an existing snapshot's timer so a restart cannot re-capture instantly. */
 function seedTimersFromDisk() {
   let names = [];
@@ -311,7 +357,16 @@ async function pollCoaches(bodsKey, fetchVehicles) {
       if (existing && now - existing.takenAt < CAPTURE_INTERVAL_MS) continue;
       try {
         await capture(reg, cam, now);
-        console.log(`[camera] ${reg} near ${cam.road} ${cam.desc} (${cam.distanceM}m)`);
+        const verdict = await verifyWithPython(reg);
+        if (verdict?.found) {
+          const fresh = JSON.parse(readFileSync(regFile(reg, "json"), "utf8"));
+          snapshots.set(reg, fresh);
+          console.log(
+            `[camera] COACH SEEN ${reg} at ${cam.road} ${cam.desc} (${cam.distanceM}m) confidence ${fresh.busConfidence}`,
+          );
+        } else {
+          console.log(`[camera] ${reg} near ${cam.road} ${cam.desc} (${cam.distanceM}m) - no coach in view`);
+        }
       } catch (err) {
         console.warn(`[camera] ${reg} capture failed: ${err.message}`);
       }

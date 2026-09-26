@@ -21,16 +21,44 @@ import { dirname, join } from "node:path";
 import sharp from "sharp";
 
 const MODEL_SIZE = 640;
-/** COCO label ids we treat as "this could be a coach". */
-const BUS_CLASSES = new Set([5]); // bus (coaches are labelled bus in COCO)
+/** The v6.0 YOLOv8n export takes float32 and has dynamic input dims. */
+const DTYPE = "float32";
+/** COCO label id for a bus - coaches are annotated as buses. */
+const BUS_CLASS = 5;
+const NUM_CLASSES = 80;
 /** Below this the detector is guessing, and a guess is worse than nothing. */
-const MIN_BUS_CONF = 0.35;
+const MIN_BUS_CONF = 0.4;
+
+/** IEEE half precision, because the model wants it. */
+const f32buf = new Float32Array(1);
+const i32buf = new Int32Array(f32buf.buffer);
+function toHalf(value) {
+  f32buf[0] = value;
+  const x = i32buf[0];
+  let bits = (x >> 16) & 0x8000;
+  let m = (x >> 12) & 0x07ff;
+  const e = (x >> 23) & 0xff;
+  if (e < 103) return bits;
+  if (e > 142) {
+    bits |= 0x7c00;
+    bits |= (e === 255 ? 0 : 1) && x & 0x007fffff;
+    return bits;
+  }
+  if (e < 113) {
+    m |= 0x0800;
+    bits |= (m >> (114 - e)) + ((m >> (113 - e)) & 1);
+    return bits;
+  }
+  bits |= ((e - 112) << 10) | (m >> 1);
+  bits += m & 1;
+  return bits;
+}
 
 let sessionPromise = null;
 let unavailableReason = "";
 
 function modelPath(dataDir) {
-  return join(dataDir || process.cwd(), "models", "yolov10n.onnx");
+  return join(dataDir || process.cwd(), "models", "yolov8n.onnx");
 }
 
 async function getSession(dataDir) {
@@ -65,44 +93,61 @@ async function toTensor(buffer) {
   const uchar = await image
     .resize(MODEL_SIZE, MODEL_SIZE, {
       fit: "contain",
-      background: { r: 0, g: 0, b: 0 },
+      background: { r: 114, g: 114, b: 114 },
       kernel: "cubic",
     })
     .removeAlpha()
     .raw()
     .toBuffer();
   const data = new Float32Array(MODEL_SIZE * MODEL_SIZE * 3);
-  for (let i = 0; i < uchar.length && i < data.length; i += 1) data[i] = uchar[i];
+  for (let i = 0, j = 0; i < uchar.length && j < data.length; i += 1, j += 1) {
+    data[j] = uchar[i] / 255;
+  }
   return { data, meta, scale };
 }
 
 function boxesFromOutput(output, tensor) {
-  // YOLOv10 output rows are (x1, y1, x2, y2, score, class) in model pixels.
+  /*
+   * YOLOv8 head: [1, 4 + nc, anchors] as (x, y, w, h) then one score per class.
+   * There is no separate objectness channel - reading one is what made an
+   * earlier attempt score every anchor as a bus. The export applies sigmoid, but
+   * guard anyway so an unsigmoided build cannot produce nonsense.
+   */
   const data = output.data;
   if (!data) return { found: [] };
-  const rows = Math.floor(data.length / 6);
+  const [batch, ch, anchors] = output.dims.length === 3 ? output.dims : [1, 84, 0];
+  const nAnchor = anchors || Math.floor(data.length / (4 + NUM_CLASSES));
+  const nc = Math.min(NUM_CLASSES, ch - 4);
   const found = [];
-  for (let i = 0; i < rows; i += 1) {
-    const o = i * 6;
-    const score = data[o + 4];
-    const cls = Math.round(data[o + 5]);
-    if (!(score >= MIN_BUS_CONF) || !BUS_CLASSES.has(cls)) continue;
-    const x1 = data[o] / tensor.scale;
-    const y1 = data[o + 1] / tensor.scale;
-    const x2 = data[o + 2] / tensor.scale;
-    const y2 = data[o + 3] / tensor.scale;
+  const raw = (v) => (v > 1 || v < 0 ? 1 / (1 + Math.exp(-v)) : v);
+  for (let i = 0; i < nAnchor; i += 1) {
+    let best = 0;
+    let cls = -1;
+    for (let c = 0; c < nc; c += 1) {
+      const v = raw(data[(4 + c) * nAnchor + i]);
+      if (v > best) {
+        best = v;
+        cls = c;
+      }
+    }
+    if (cls !== BUS_CLASS) continue;
+    if (!(best >= MIN_BUS_CONF)) continue;
+    const cx = data[i] / tensor.scale;
+    const cy = data[nAnchor + i] / tensor.scale;
+    const bw = data[2 * nAnchor + i] / tensor.scale;
+    const bh = data[3 * nAnchor + i] / tensor.scale;
     found.push({
-      score: Number(score.toFixed(3)),
+      score: Number(best.toFixed(3)),
       box: [
-        Math.max(0, Math.round(x1)),
-        Math.max(0, Math.round(y1)),
-        Math.min(tensor.meta.width, Math.round(x2)),
-        Math.min(tensor.meta.height, Math.round(y2)),
+        Math.max(0, Math.round(cx - bw / 2)),
+        Math.max(0, Math.round(cy - bh / 2)),
+        Math.min(tensor.meta.width, Math.round(cx + bw / 2)),
+        Math.min(tensor.meta.height, Math.round(cy + bh / 2)),
       ],
     });
   }
   found.sort((a, b) => b.score - a.score);
-  return { found };
+  return { found, batch };
 }
 
 /**
@@ -133,7 +178,7 @@ export async function detectCoach(jpegBuffer, { dataDir } = {}) {
 let ortModule = null;
 function ortTensor(tensor) {
   if (!ortModule) throw new Error("runtime not initialised");
-  return new ortModule.Tensor("float32", tensor.data, [1, 3, MODEL_SIZE, MODEL_SIZE]);
+  return new ortModule.Tensor(DTYPE, tensor.data, [1, 3, MODEL_SIZE, MODEL_SIZE]);
 }
 
 // onnxruntime-node is loaded lazily inside getSession; keep a reference for
@@ -153,3 +198,5 @@ export function ensureModelDir(dataDir) {
   mkdirSync(dir, { recursive: true });
   return dir;
 }
+
+

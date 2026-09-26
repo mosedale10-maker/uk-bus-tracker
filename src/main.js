@@ -12300,6 +12300,52 @@ function loadFrameCanvas(url, w, h) {
   });
 }
 
+/**
+ * Crop the close-up around the box the detector found, with room around it so
+ * you can see the vehicle it is pointing at rather than a tight rectangle of
+ * pixels. The two-frame diff is no longer used to choose the region: the
+ * detector tells us where the coach is, which is the whole point.
+ */
+async function cameraCoachCrop(frameUrl, box, imageW, imageH) {
+  const full = await loadFrameCanvas(frameUrl, imageW, imageH);
+  const [x1, y1, x2, y2] = box;
+  const bw = Math.max(24, x2 - x1);
+  const bh = Math.max(24, y2 - y1);
+  const cx = (x1 + x2) / 2;
+  const cy = (y1 + y2) / 2;
+  const aspect = imageW / imageH;
+  let w = bw * 2.6;
+  let h = bh * 2.6;
+  if (w / h < aspect) w = h * aspect;
+  else h = w / aspect;
+  w = Math.min(w, imageW);
+  h = Math.min(h, imageH);
+  const left = Math.max(0, Math.min(imageW - w, cx - w / 2));
+  const top = Math.max(0, Math.min(imageH - h, cy - h / 2));
+
+  const out = document.createElement("canvas");
+  const scale = Math.min(2.4, 640 / w);
+  out.width = Math.round(Math.max(260, w * scale));
+  out.height = Math.round(Math.max(190, h * scale));
+  const octx = out.getContext("2d");
+  octx.imageSmoothingEnabled = true;
+  octx.imageSmoothingQuality = "high";
+  octx.drawImage(full.canvas, left, top, w, h, 0, 0, out.width, out.height);
+  // Mark where the detector says the coach is, so a wrong box is obvious
+  // instead of quietly misleading.
+  const sx = out.width / w;
+  const sy = out.height / h;
+  octx.strokeStyle = "#22c55e";
+  octx.lineWidth = Math.max(2, Math.round(out.width / 220));
+  octx.strokeRect(
+    (x1 - left) * sx,
+    (y1 - top) * sy,
+    (x2 - x1) * sx,
+    (y2 - y1) * sy,
+  );
+  return out.toDataURL("image/jpeg", 0.85);
+}
+
 async function cameraMotionCrop(frameA, frameB) {
   const [a, b] = await Promise.all([
     loadFrameCanvas(frameA, CAMERA_DIFF_W, CAMERA_DIFF_H),
@@ -12411,42 +12457,42 @@ function scheduleCameraCrops() {
     for (const host of document.querySelectorAll(".popup-camera-crop[data-camera-frames]")) {
       if (host.dataset.cameraDone === "1" || host.querySelector("img")) continue;
       const frames = String(host.dataset.cameraFrames || "").split(" ").filter(Boolean);
+      let snap = null;
+      try {
+        snap = JSON.parse(host.dataset.cameraSnap || "null");
+      } catch {
+        snap = null;
+      }
       host.dataset.cameraDone = "1";
-      paintCameraCrop(host, frames);
+      paintCameraCrop(host, frames, snap);
     }
   }, 60);
 }
 
-async function paintCameraCrop(host, frames) {
-  if (!host || frames.length < 2) return;
-  const key = frames.join("|");
+async function paintCameraCrop(host, frames, snap) {
+  if (!host || !snap?.busBox?.length) return;
+  const key = `${frames[0]}|${snap.busBox.join(",")}`;
   let work = cameraCropCache.get(key);
   if (!work) {
-    work = cameraMotionCrop(frames[0], frames[1]).catch(() => "nothing-in-view");
+    const frame = await loadFrameCanvas(frames[0], 64, 64).catch(() => null);
+    const size = frame ? { w: frame.width, h: frame.height } : null;
+    work = size
+      ? cameraCoachCrop(frames[0], snap.busBox, size.w, size.h).catch(() => null)
+      : Promise.resolve(null);
     cameraCropCache.set(key, work);
   }
-  const result = await work;
-  if (!host.isConnected) return;
-  const note = host.querySelector(".popup-camera-crop-note");
-  const say = (text) => {
-    if (!note) return;
-    note.hidden = false;
-    note.textContent = text;
-  };
-  if (!result || typeof result === "string") {
-    say(
-      result === "short-vehicle"
-        ? "only short vehicles moved in view - no coach-length streak"
-        : "nothing in view moved enough to photograph",
-    );
-    return;
-  }
+  const dataUrl = await work;
+  if (!dataUrl || !host.isConnected) return;
   const img = document.createElement("img");
   img.className = "popup-camera-crop-img";
-  img.alt = "Close-up of the camera view where a long vehicle moved between the two frames";
-  img.src = result.dataUrl;
+  img.alt = "National Highways camera view with a detected coach marked";
+  img.src = dataUrl;
   host.prepend(img);
-  say("close-up of a long vehicle that moved between the two frames");
+  const note = host.querySelector(".popup-camera-crop-note");
+  if (note) {
+    note.hidden = false;
+    note.textContent = `coach detected (confidence ${Number(snap.busConfidence || 0).toFixed(2)}) - green box is where the detector found it`;
+  }
 }
 
 /**
@@ -12480,21 +12526,23 @@ function cameraSnapBlock(snap) {
    * is used. Until real detection is wired up, `busDetected` is never set and
    * nothing is invented.
    */
-  const coachSeen = Boolean(snap.busDetected?.found);
+  const coachSeen = Boolean(snap.busDetected) && Array.isArray(snap.busBox) && snap.busBox.length === 4;
   const crop = coachSeen
-    ? `<div class="popup-camera-crop" data-camera-frames="${esc(frames.join(" "))}">
+    ? `<div class="popup-camera-crop" data-camera-frames="${esc(frames.join(" "))}" data-camera-snap='${esc(
+        JSON.stringify({ busBox: snap.busBox, busConfidence: snap.busConfidence }),
+      )}'>
          <p class="popup-camera-crop-note" hidden></p>
        </div>`
-    : `<p class="popup-camera-none">No coach detected in this camera view${
-        frames.length > 1 ? " - not showing a screenshot of passing traffic" : ""
-      }</p>`;
+    : `<p class="popup-camera-none">No coach detected in this camera view &mdash; nothing to photograph</p>`;
   const near = Number.isFinite(snap.distanceM) && snap.distanceM <= 150;
   return `<div class="popup-camera-snap">
       ${crop}
       <div class="popup-camera-frames${frames.length > 1 ? " is-pair" : ""}">${imgs}</div>
       <p class="popup-camera-where">${esc(where)}${km ? ` &middot; ${esc(km)} km from this coach` : ""}${when ? ` &middot; ${esc(when)}` : ""}</p>
       <p class="popup-camera-note">${frames.length > 1 && gap ? `${esc(gap)}s apart &middot; ` : ""}${near ? "close pass" : "coach was nearby when these were taken"}${
-        coachSeen ? " &middot; coach detected in view" : ""
+        coachSeen
+          ? ` &middot; <strong>coach detected</strong> at ${Number(snap.busConfidence || 0).toFixed(2)} confidence`
+          : ""
       }</p>
       <p class="popup-camera-credit">${esc(snap.attribution || "Camera imagery © National Highways (Crown copyright)")}</p>
     </div>`;
