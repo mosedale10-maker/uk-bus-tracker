@@ -15780,13 +15780,13 @@ function alignTrailToRoadsLocal(latlngs, breakOpts = {}) {
   // A wide snap radius is what makes a tail drift over buildings: a fix 300m away
   // still "finds" a road, just the wrong one. Stay close to the carriageway and
   // drop anything further out rather than inventing a line across a block.
-  const snapNear = staffs ? 140 : 120;
-  const snapFar = staffs ? 240 : 200;
+  const snapNear = staffs ? 200 : 180;
+  const snapFar = staffs ? 320 : 300;
   const inputSegs = splitLatLngsByGaps(latlngs, limits.gapM, breakOpts);
-  // Snapping is O(points × roads). Keep a runaway guard only — thinning to a few
-  // hundred fixes left 300m gaps that the snapper bridged straight across
-  // buildings, so the tail must see the real point sequence.
-  const MAX_SNAP_INPUT = 6000;
+  // Snapping is O(points × roads) on the main thread, so the input must stay
+  // bounded or the whole map locks up. 1,200 fixes is still ~2 fixes per second
+  // over a long journey — plenty to follow the carriageway without freezing.
+  const MAX_SNAP_INPUT = 1200;
   const sourceSegs = (inputSegs.length ? inputSegs : [latlngs]).map((seg) => {
     if (seg.length <= MAX_SNAP_INPUT) return seg;
     const step = Math.ceil(seg.length / MAX_SNAP_INPUT);
