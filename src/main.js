@@ -12506,8 +12506,9 @@ async function paintCameraCrop(host, frames, snap) {
 function cameraSnapBlock(snap) {
   const frames = Array.isArray(snap?.frames) && snap.frames.length ? snap.frames : snap?.image ? [snap.image] : [];
   if (!frames.length) return "";
-  const where = [snap.road, snap.desc].filter(Boolean).join(" ") || "National Highways camera";
-  const km = Number.isFinite(snap.distanceM) ? (snap.distanceM / 1000).toFixed(1) : "";
+  const where = [shot?.road ?? snap.road, shot?.desc ?? snap.desc].filter(Boolean).join(" ") || "National Highways camera";
+  const shownM = shown?.distanceM ?? shot?.distanceM ?? snap.distanceM;
+  const km = Number.isFinite(shownM) ? (shownM / 1000).toFixed(1) : "";
   const when = snap.takenAt
     ? new Date(snap.takenAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
     : "";
@@ -12526,34 +12527,43 @@ function cameraSnapBlock(snap) {
    * is used. Until real detection is wired up, `busDetected` is never set and
    * nothing is invented.
    */
-  const coachSeen = Boolean(snap.busDetected) && Array.isArray(snap.busBox) && snap.busBox.length === 4;
+  /*
+   * Only the coach's current camera is shown. A coach is photographed at every
+   * camera it passes, because most single frames do not contain it at all, but
+   * showing the whole series left an old junction sitting under the plate - so
+   * the earlier shots are dropped from the card as the coach moves on, and just
+   * the count is reported. The detection shown belongs to THIS camera, not to
+   * the best of the run: claiming a coach here because one was seen two
+   * junctions ago would be exactly the sort of thing this card must not do.
+   */
+  const shot = snap.currentShot || null;
+  const coachSeen =
+    Boolean(shot?.busDetected) &&
+    Array.isArray(shot?.busBox) &&
+    shot.busBox.length === 4;
+  const shown = coachSeen ? shot : null;
   // FlixBus coaches arrive without a plate, so show the service instead.
   const who = snap.plate ? snap.operatorLabel || "" : snap.label || snap.operatorLabel || "";
-  // One coach is photographed at every camera it passes, because most single
-  // frames do not contain it at all. Say how many, and where.
-  const shots = Array.isArray(snap.shots) ? snap.shots.filter((s) => s && s.file) : [];
+  const shotCount = Number(snap.shotCount) || frames.length;
   const shotNote =
-    shots.length > 1
-      ? ` &middot; photographed at ${shots.length} cameras: ${shots
-          .map((s) => [s.road, s.desc].filter(Boolean).join(" "))
-          .filter(Boolean)
-          .join(", ")}`
+    shotCount > 1
+      ? ` &middot; followed past ${shotCount} cameras on this run, showing the current one`
       : "";
   const crop = coachSeen
     ? `<div class="popup-camera-crop" data-camera-frames="${esc(frames.join(" "))}" data-camera-snap='${esc(
-        JSON.stringify({ busBox: snap.busBox, busConfidence: snap.busConfidence, operator: snap.operator }),
+        JSON.stringify({ busBox: shown.busBox, busConfidence: shown.busConfidence, operator: snap.operator }),
       )}'>
          <p class="popup-camera-crop-note" hidden></p>
        </div>`
     : `<p class="popup-camera-none">No coach detected in this camera view &mdash; nothing to photograph</p>`;
-  const near = Number.isFinite(snap.distanceM) && snap.distanceM <= 150;
+  const near = Number.isFinite(shownM) && shownM <= 150;
   return `<div class="popup-camera-snap">
       ${crop}
       <div class="popup-camera-frames${frames.length > 1 ? " is-pair" : ""}">${imgs}</div>
       <p class="popup-camera-where">${esc(where)}${km ? ` &middot; ${esc(km)} km from this coach` : ""}${when ? ` &middot; ${esc(when)}` : ""}</p>
-      <p class="popup-camera-note">${frames.length > 1 && gap ? `${esc(gap)}s apart &middot; ` : ""}${near ? "close pass" : "coach was nearby when these were taken"}${
+      <p class="popup-camera-note">${frames.length > 1 && gap ? `${esc(gap)}s apart &middot; ` : ""}${near ? "close pass" : "coach was nearby when this was taken"}${
         coachSeen
-          ? ` &middot; <strong>coach detected</strong> at ${Number(snap.busConfidence || 0).toFixed(2)} confidence${
+          ? ` &middot; <strong>coach detected</strong> at ${Number(shown.busConfidence || 0).toFixed(2)} confidence${
               who ? ` &middot; ${esc(who)}` : ""
             }`
           : ""
@@ -12644,6 +12654,136 @@ function cameraSnapKeyFor(marker) {
 }
 
 /**
+ * Shareable link to a coach: ?bus=<key> centres the map on where we last saw it
+ * and opens its camera card. There was no way to link to a vehicle before, so
+ * anyone wanting to point at "this coach" could only describe it.
+ */
+function busLinkFor(key) {
+  if (!key) return "";
+  const url = new URL(window.location.href);
+  url.search = `?bus=${encodeURIComponent(key)}`;
+  url.hash = "";
+  return url.toString();
+}
+
+function noteBusLinkInAddressBar(key) {
+  const link = busLinkFor(key);
+  if (!link) return;
+  try {
+    // replaceState, not pushState: following a coach should not fill the back
+    // button with every refresh.
+    window.history.replaceState(null, "", link);
+  } catch {
+    /* the address bar is a nicety, not a feature */
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Cameras tab: every coach photo we hold, newest first.
+ *
+ * Kept deliberately plain. A coach in frame is the only thing worth calling out,
+ * and the distance and camera name travel with each photo so a picture can be
+ * judged rather than trusted - the same honesty the bus card keeps.
+ * ------------------------------------------------------------------------- */
+const camerasScreenEl = document.getElementById("cameras-screen");
+const camerasGridEl = document.getElementById("cameras-grid");
+const camerasEmptyEl = document.getElementById("cameras-empty");
+const camerasCountEl = document.getElementById("cameras-count");
+const camerasOnlyHitsEl = document.getElementById("cameras-only-hits");
+let cameraGalleryLoaded = false;
+
+function cameraPhotoTime(ts) {
+  if (!ts) return "";
+  return new Date(ts).toLocaleString([], {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+async function loadCameraGallery({ force = false } = {}) {
+  if (!camerasGridEl) return;
+  if (cameraGalleryLoaded && !force) return;
+  const onlyHits = Boolean(camerasOnlyHitsEl?.checked);
+  camerasGridEl.innerHTML = `<p class="cameras-empty">Loading photos…</p>`;
+  const res = await fetch(`/api/camera-gallery?limit=160${onlyHits ? "&hits=1" : ""}`).catch(
+    () => null,
+  );
+  const data = res?.ok ? await res.json().catch(() => null) : null;
+  const photos = Array.isArray(data?.photos) ? data.photos : [];
+  cameraGalleryLoaded = true;
+  if (camerasEmptyEl) camerasEmptyEl.hidden = photos.length > 0;
+  if (camerasCountEl) {
+    camerasCountEl.textContent = data?.total
+      ? `${photos.length} shown of ${data.total}`
+      : "";
+  }
+  if (!photos.length) {
+    camerasGridEl.innerHTML = onlyHits
+      ? `<p class="cameras-empty">No photo has a coach in frame yet. Tick the box off to see every capture.</p>`
+      : "";
+    return;
+  }
+  camerasGridEl.innerHTML = photos
+    .map((p) => {
+      const where = [p.road, p.desc].filter(Boolean).join(" ") || "camera";
+      const dist = Number.isFinite(p.distanceM) ? `${Math.round(p.distanceM)} m away` : "";
+      const badge = p.busDetected
+        ? `<span class="cameras-badge is-hit">coach in frame${Number.isFinite(p.busConfidence) ? ` · ${Number(p.busConfidence).toFixed(2)}` : ""}</span>`
+        : `<span class="cameras-badge">no coach in frame</span>`;
+      const shots = p.shotCount > 1 ? `<span class="cameras-shots">${p.shotCount} cameras</span>` : "";
+      return `<a class="cameras-card" href="${esc(p.link || "#")}">
+          <img class="cameras-thumb" src="${esc(p.image)}" loading="lazy" decoding="async"
+               alt="National Highways camera view near ${esc(where)}" width="720" height="576" />
+          <div class="cameras-meta">
+            <strong>${esc(p.label)}</strong>
+            <span>${esc(where)}${dist ? ` · ${esc(dist)}` : ""}</span>
+            <span class="cameras-when">${esc(cameraPhotoTime(p.takenAt))}</span>
+            <span class="cameras-badges">${badge}${shots}</span>
+          </div>
+        </a>`;
+    })
+    .join("");
+}
+
+document.getElementById("cameras-refresh")?.addEventListener("click", () => {
+  loadCameraGallery({ force: true });
+});
+camerasOnlyHitsEl?.addEventListener("change", () => {
+  loadCameraGallery({ force: true });
+});
+
+async function openBusFromLink() {  let key = "";
+  try {
+    key = String(new URLSearchParams(window.location.search).get("bus") || "")
+      .replace(/[^A-Za-z0-9]/g, "")
+      .slice(0, 16);
+  } catch {
+    return;
+  }
+  if (!key) return;
+  const res = await fetch(`/api/camera-snapshot?reg=${encodeURIComponent(key)}`).catch(() => null);
+  const snap = res?.ok ? (await res.json().catch(() => null))?.snapshot : null;
+  if (!snap) {
+    showMessage(`No camera information for that coach yet (${key})`);
+    return;
+  }
+  const shot = Array.isArray(snap.shots) ? snap.shots[snap.shots.length - 1] : null;
+  const lat = shot?.coachLat ?? snap.coachLat;
+  const lng = shot?.coachLng ?? snap.coachLng;
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    map.setView([lat, lng], 13, { animate: false });
+  }
+  const label = snap.label || snap.plate || key;
+  const where = [shot?.road ?? snap.road, shot?.desc ?? snap.desc].filter(Boolean).join(" ");
+  showMessage(
+    `${label}${snap.operatorLabel ? ` · ${snap.operatorLabel}` : ""}` +
+      `${where ? ` · last seen by the camera at ${where}` : ""}`,
+  );
+}
+
+/**
  * Only the coach operators the watcher follows can ever have a camera shot.
  * `marker.bus` is the feed object the popup renders from, and the same
  * predicates the popup uses to title a coach decide this.
@@ -12678,6 +12818,8 @@ async function loadPhotoIntoMarker(marker) {
   if (vehicleRegForPhoto(marker) !== reg) return;
   marker.extra.photo = photo;
   marker.extra.cameraSnap = cameraSnap;
+  // With a coach selected, the address bar becomes a shareable link to it.
+  if (camKey) noteBusLinkInAddressBar(camKey);
   if (photo) marker.extra.photoPending = false;
   refreshPopup(marker);
 }
@@ -17423,14 +17565,20 @@ function openTopMenu() {
 }
 
 function setAppTab(tab) {
-  const next = tab === "fleet" ? "fleet" : tab === "about" ? "about" : tab === "home" ? "home" : "map";
+  const next = tab === "fleet" ? "fleet" : tab === "cameras" ? "cameras" : tab === "about" ? "about" : tab === "home" ? "home" : "map";
   appTab = next;
   document.querySelectorAll(".menu-nav-btn, .app-tab").forEach((btn) => {
     btn.classList.toggle("is-on", btn.dataset.tab === next);
   });
   if (homeScreenEl) homeScreenEl.hidden = next !== "home";
   if (aboutScreenEl) aboutScreenEl.hidden = next !== "about";
+  if (camerasScreenEl) {
+    camerasScreenEl.hidden = next !== "cameras";
+    if (next === "cameras") loadCameraGallery();
+  }
   if (mapWrapEl) {
+    // The cameras panel lives inside the map wrapper, so the wrapper has to stay
+    // visible for that tab - the panel is opaque and covers the map itself.
     mapWrapEl.hidden = next === "home" || next === "about";
     mapWrapEl.dataset.view = next === "fleet" ? "fleet" : "map";
   }
@@ -17471,6 +17619,14 @@ document.addEventListener("click", (event) => {
 document.querySelectorAll(".menu-nav-btn, .app-tab, .home-action[data-tab]").forEach((btn) => {
   btn.addEventListener("click", () => setAppTab(btn.dataset.tab));
 });
+
+// A ?bus=<key> link should land on the map, not the home screen.
+if (new URLSearchParams(window.location.search).get("bus")) {
+  setAppTab("map");
+  window.setTimeout(() => {
+    openBusFromLink().catch(() => {});
+  }, 1200);
+}
 
 document.querySelectorAll("[data-nav='home']").forEach((el) => {
   el.addEventListener("click", (event) => {

@@ -441,35 +441,108 @@ app.get("/api/dg-at-timetable", (req, res) => handleDgAtTimetable(req, res));
 app.get("/api/bods-vehicles", (req, res) => handleBodsVehicles(req, res, bodsKey));
 
 /*
- * National Highways camera snapshots. The watcher decides when a coach is near a
- * camera and stores the picture with the vehicle's registration; these endpoints
- * only read what it already captured, so a page view never triggers a fetch from
- * someone else's service.
+ * Gallery of every coach photograph taken, newest first. Read-only, and served
+ * from what the watcher already stored - opening this never asks National
+ * Highways for anything.
  */
+app.get("/api/camera-gallery", (req, res) => {
+  const limit = Math.max(1, Math.min(Number(req.query?.limit) || 120, 400));
+  const onlyHits = String(req.query?.hits || "") === "1";
+  let names = [];
+  try {
+    names = fs.readdirSync(path.join(__dirname, "data", "camera-snapshots"));
+  } catch {
+    res.json({ photos: [], total: 0 });
+    return;
+  }
+  const dir = path.join(__dirname, "data", "camera-snapshots");
+  const photos = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    let meta;
+    try {
+      meta = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
+    } catch {
+      continue;
+    }
+    const shots = Array.isArray(meta.shots) ? meta.shots : [];
+    const current = shots.length ? shots[shots.length - 1] : null;
+    const file = current?.file || `/api/camera-snapshot/${meta.reg}.jpg`;
+    if (!fs.existsSync(path.join(dir, path.basename(file)))) continue;
+    if (onlyHits && !current?.busDetected) continue;
+    photos.push({
+      key: meta.reg,
+      label: meta.label || meta.plate || meta.reg,
+      operator: meta.operator || "",
+      operatorLabel: meta.operatorLabel || "",
+      road: current?.road ?? meta.road ?? "",
+      desc: current?.desc ?? meta.desc ?? "",
+      distanceM: current?.distanceM ?? meta.distanceM ?? null,
+      takenAt: current?.takenAt ?? meta.takenAt ?? 0,
+      shotCount: meta.shotCount || shots.length || 1,
+      busDetected: Boolean(current?.busDetected),
+      busConfidence: current?.busConfidence ?? null,
+      image: file,
+      link: `/?bus=${encodeURIComponent(meta.reg)}`,
+    });
+  }
+  photos.sort((a, b) => b.takenAt - a.takenAt);
+  res.json({ photos: photos.slice(0, limit), total: photos.length });
+});
 app.get("/api/camera-snapshot", (req, res) => {
   const snap = cameraSnapshotFor(req.query?.reg || req.query?.key);
   if (!snap) {
     res.status(404).json({ snapshot: null });
     return;
   }
-  // When a coach was detected, serve the frame that produced the detection: the
-  // live one is overwritten as the coach moves to the next camera. Otherwise
-  // serve every camera it was photographed at, so the card can show the series.
+  /*
+   * The card shows the coach's CURRENT camera, not its history. A coach is
+   * photographed at every camera it passes - that is what gives us a decent
+   * chance of one frame actually containing it - but showing all six at once
+   * just left yesterday's junction sitting under the plate. So the earlier shots
+   * stay on disk and the count is reported, but only the current one is served.
+   */
   const shots = Array.isArray(snap.shots) ? snap.shots : [];
-  const images = shots.map((s) => s?.file).filter(Boolean);
-  const first =
-    snap.detectedImage && fs.existsSync(path.join(__dirname, snap.detectedImage))
-      ? snap.detectedImage
-      : images[0] || `/api/camera-snapshot/${snap.reg}.jpg`;
+  const current = shots.length ? shots[shots.length - 1] : null;
+  const currentFile = current?.file || `/api/camera-snapshot/${snap.reg}.jpg`;
+  // shot.file is a URL path, so map it back to disk before checking it is there.
+  const onDisk = path.join(
+    __dirname,
+    "data",
+    "camera-snapshots",
+    path.basename(currentFile),
+  );
+  const image = fs.existsSync(onDisk)
+    ? currentFile
+    : `/api/camera-snapshot/${snap.reg}.jpg`;
   res.json({
     snapshot: {
       ...snap,
-      image: first,
-      frames: images.length ? images : [first],
+      image,
+      frames: [image],
+      // The card needs the current shot's own detection, not the run's best.
+      currentShot: current
+        ? {
+            cameraId: current.cameraId,
+            road: current.road,
+            desc: current.desc,
+            distanceM: current.distanceM,
+            file: current.file,
+            busDetected: Boolean(current.busDetected),
+            busConfidence: current.busConfidence ?? null,
+            busBox: current.busBox ?? null,
+          }
+        : null,
     },
   });
 });
 
+/*
+ * National Highways camera snapshots. The watcher decides when a coach is near a
+ * camera and stores the picture with the vehicle's registration; these endpoints
+ * only read what it already captured, so a page view never triggers a fetch from
+ * someone else's service.
+ */
 app.get("/api/camera-snapshot/:file", (req, res) => {
   const file = String(req.params?.file || "");
   // Keys are [A-Z0-9]{1,16} - a plate, or an id for the FlixBus coaches that

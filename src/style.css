@@ -1213,6 +1213,127 @@ html[data-plus="1"] .plus-tag {
   border-radius: 6px;
   background: #0b1220;
 }
+/* Cameras tab: the gallery of coach photos. */
+.cameras-screen {
+  position: absolute;
+  inset: 0;
+  z-index: 1200;
+  background: var(--bg, #0b1220);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.cameras-inner {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 16px 16px 40px;
+}
+.cameras-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg, #0b1220);
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+}
+.cameras-title {
+  margin: 0 0 4px;
+  font-size: 1.15rem;
+}
+.cameras-sub {
+  margin: 0 0 10px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.cameras-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.8rem;
+}
+.cameras-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.cameras-refresh {
+  font: inherit;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: rgba(148, 163, 184, 0.12);
+  color: inherit;
+  cursor: pointer;
+}
+.cameras-count {
+  color: var(--muted);
+}
+.cameras-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+.cameras-card {
+  display: block;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(15, 23, 42, 0.55);
+  color: inherit;
+  text-decoration: none;
+}
+.cameras-card:hover {
+  border-color: rgba(148, 163, 184, 0.6);
+}
+.cameras-thumb {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #0b1220;
+}
+.cameras-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px 10px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.cameras-meta strong {
+  color: #e2e8f0;
+  font-size: 0.82rem;
+}
+.cameras-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.cameras-badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  font-size: 0.68rem;
+}
+.cameras-badge.is-hit {
+  border-color: #22c55e;
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.12);
+}
+.cameras-shots {
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  font-size: 0.68rem;
+}
+.cameras-empty {
+  margin: 18px 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .popup-camera-none {
   margin: 0 0 6px;
   padding: 6px 8px;

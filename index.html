@@ -133,6 +133,7 @@
             <button type="button" class="menu-nav-btn" data-tab="home">Home</button>
             <button type="button" class="menu-nav-btn" data-tab="map">Map</button>
             <button type="button" class="menu-nav-btn" data-tab="fleet">Fleet</button>
+            <button type="button" class="menu-nav-btn" data-tab="cameras">Cameras</button>
             <button type="button" class="menu-nav-btn" data-tab="about">About</button>
           </nav>
           <label class="announce-toggle">
@@ -241,6 +242,36 @@
           </footer>
         </aside>
         <div id="map"></div>
+        <section
+          id="cameras-screen"
+          class="cameras-screen"
+          aria-label="Coach camera photos"
+          hidden
+        >
+          <div class="cameras-inner">
+            <header class="cameras-head">
+              <h2 class="cameras-title">Coach camera photos</h2>
+              <p class="cameras-sub">
+                Every National Highways camera frame we have captured for a coach, newest
+                first. Imagery &copy; National Highways (Crown copyright).
+              </p>
+              <div class="cameras-controls">
+                <label class="cameras-toggle">
+                  <input id="cameras-only-hits" type="checkbox" />
+                  <span>Only photos with a coach in frame</span>
+                </label>
+                <button type="button" id="cameras-refresh" class="cameras-refresh">
+                  Refresh
+                </button>
+                <span id="cameras-count" class="cameras-count"></span>
+              </div>
+            </header>
+            <div id="cameras-grid" class="cameras-grid"></div>
+            <p id="cameras-empty" class="cameras-empty" hidden>
+              No photos captured yet. They appear here as coaches pass cameras.
+            </p>
+          </div>
+        </section>
         <button type="button" id="tail-close" class="tail-close-chip" hidden>Close tail</button>
         <aside id="map-welcome" class="map-welcome" hidden>
           <button type="button" id="map-welcome-close" class="map-welcome-close" aria-label="Dismiss">×</button>
