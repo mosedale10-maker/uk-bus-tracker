@@ -10070,7 +10070,11 @@ async function ensureLiveries(idsOrBuses) {
       // /api/bt-liveries/<rowId> 404s while eating the real CSS request.
       if (!item.vehicle) continue;
       const id = liveryIdOf(item);
-      if (id && /^\d+$/.test(String(id))) bustimesIds.add(String(id));
+      // Same bound for object sources: bustimes row ids are six figures, and
+      // /api/bt-liveries/<rowId> is a 404 on every poll.
+      if (/^\d+$/.test(String(id)) && Number(id) > 0 && Number(id) < 200000) {
+        bustimesIds.add(String(id));
+      }
       continue;
     }
     // Primitives are explicit ids, but a six-figure "id" is a bustimes row id
