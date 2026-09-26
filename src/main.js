@@ -8697,10 +8697,17 @@ async function startRoutePlayback({
   // The correction changes the geometry, not the source-selection decision.
   usingTracked = recordedPathSelected && tracked.length >= 2;
   if (effectiveActualRoute && tracked.length < 2 && diversionFallbackPath.length < 2) {
-    showMessage(
-      "This journey is diverted, but no recorded GPS is available yet — the planned route will not be shown",
-    );
-    return;
+    // No GPS for this stint. The planned route is snapped to the real road layout
+    // like everything else, so showing it beats a dead end and a warning the user
+    // cannot act on — the recorded road replaces it as soon as the bus runs.
+    if (tripPath.length >= 2 && !plannedPathBlocked) {
+      path = tripPath;
+    } else {
+      showMessage(
+        "This journey is diverted, but no recorded GPS is available yet — the planned route will not be shown",
+      );
+      return;
+    }
   }
   if (path.length < 2 && !(replayOnly && allGps.length >= 2)) {
     showMessage(
