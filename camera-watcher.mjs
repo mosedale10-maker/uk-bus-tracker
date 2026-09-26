@@ -51,8 +51,22 @@ const CLOSE_M = 150;
 const FRAME_GAP_MS = 0;
 /** Ignore a coach that is clearly driving away from the camera. */
 const RECEDING_M = 30;
-/** Never re-capture the same coach more often than this. */
-const CAPTURE_INTERVAL_MS = 5 * 60 * 1000;
+/** Never re-capture the same coach at the same camera more often than this. */
+const CAPTURE_INTERVAL_MS = 60 * 1000;
+/**
+ * How many cameras we will photograph one coach at.
+ *
+ * A camera being near a coach's position does not mean the coach is in its field
+ * of view - on a two-way motorway the camera usually covers one carriageway.
+ * Measured over 339 captures, only ~6% of frames contained a coach even at
+ * 0-50m, mostly because most frames simply do not contain it. Following a coach
+ * along its route and shooting at every camera it passes turns that lottery into
+ * a short series, so the odds that at least one frame has the coach in it climb
+ * sharply. Bounded so we do not hammer the service.
+ */
+const MAX_SHOTS_PER_COACH = 6;
+/** Stop following a coach once it has been away from the cameras this long. */
+const RUN_IDLE_MS = 45 * 60 * 1000;
 /** Snapshots older than this are deleted rather than shown. */
 const SNAPSHOT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 /** Coaches are polled for live positions on this cadence. */
@@ -231,25 +245,38 @@ export function cameraSnapshotFor(reg, now = Date.now()) {
  * coaches in range never got past the first of them, so the FlixBus coaches at
  * the end of the list were never photographed at all.
  */
+/** One coach followed across the cameras it passes: key -> { shots: Map, ... } */
+const runs = new Map();
+
+function runFor(key, vehicle) {
+  let run = runs.get(key);
+  const now = Date.now();
+  if (!run || now - (run.lastSeenAt || 0) > RUN_IDLE_MS) {
+    run = { shots: new Map(), startedAt: now, lastSeenAt: now };
+    runs.set(key, run);
+  }
+  run.lastSeenAt = now;
+  if (!run.label) run.label = coachLabelOf(vehicle, key);
+  if (!run.operator) {
+    const noc = String(vehicle?.operator?.noc || vehicle?.service?.operator?.noc || "").toUpperCase();
+    run.operator = noc;
+  }
+  return run;
+}
+
+/** The file a shot at one camera is stored under. */
+function shotFile(reg, camId) {
+  return join(snapshotDir(), `${reg}-c${camId}.jpg`);
+}
+
 async function capture(reg, cam, takenAt, vehicle = {}) {
-  const first = await fetchFrame(cam.id, takenAt);
+  const frame = await fetchFrame(cam.id, takenAt);
   mkdirSync(snapshotDir(), { recursive: true });
-  const noc = String(
-    vehicle?.operator?.noc || vehicle?.service?.operator?.noc || vehicle?.operator?.id || "",
-  )
-    .trim()
-    .toUpperCase();
-  const snap = {
-    reg,
-    // FlixBus vehicles arrive from bustimes with no plate, only a journey id, so
-    // the key is an id and the card is labelled with the service instead.
-    plate: coachRegOf(vehicle) || "",
-    label: coachLabelOf(vehicle, reg),
-    // Which operator this coach belongs to. The camera frames themselves are
-    // operator-agnostic - the detector only finds "a bus" - so without this the
-    // card cannot say whether it photographed a FlixBus or National Express one.
-    operator: noc,
-    operatorLabel: noc === "FLIX" ? "FlixBus" : noc === "NATX" ? "National Express" : noc,
+  const run = runFor(reg, vehicle);
+  const file = shotFile(reg, cam.id);
+  writeFileSync(file, frame);
+
+  const shot = {
     cameraId: cam.id,
     road: cam.road,
     desc: cam.desc,
@@ -257,25 +284,53 @@ async function capture(reg, cam, takenAt, vehicle = {}) {
     lon: cam.lon,
     distanceM: cam.distanceM,
     takenAt,
-    frameGapMs: FRAME_GAP_MS,
-    // How near the coach was when the frames were taken. Inside CLOSE_M the
-    // coach is filling a gantry shot; beyond it we only know it was on the road
-    // somewhere near the camera.
-    confidence: cam.distanceM <= CLOSE_M ? "close" : "near",
+    file: `/api/camera-snapshot/${reg}-c${cam.id}.jpg`,
+    busDetected: false,
+  };
+  run.shots.set(cam.id, shot);
+
+  const noc = run.operator || "";
+  const shots = [...run.shots.values()].sort((a, b) => a.takenAt - b.takenAt);
+  const withCoach = shots.find((s) => s.busDetected) || null;
+  // The headline fields describe the best shot we have, so the existing card
+  // keeps working while the full series travels in `shots`.
+  const best = withCoach || shots[shots.length - 1];
+  const snap = {
+    reg,
+    // FlixBus vehicles arrive from bustimes with no plate, only a journey id, so
+    // the key is an id and the card is labelled with the service instead.
+    plate: coachRegOf(vehicle) || "",
+    label: run.label || coachLabelOf(vehicle, reg),
+    operator: noc,
+    operatorLabel: noc === "FLIX" ? "FlixBus" : noc === "NATX" ? "National Express" : noc,
+    cameraId: best.cameraId,
+    road: best.road,
+    desc: best.desc,
+    distanceM: best.distanceM,
+    takenAt: best.takenAt,
+    shots,
+    shotCount: shots.length,
+    // How near the coach was. Inside CLOSE_M the coach is filling a gantry shot.
+    confidence: best.distanceM <= CLOSE_M ? "close" : "near",
     // Nothing here identifies the vehicle, and the card must not imply it does.
     identified: false,
     attribution: ATTRIBUTION,
   };
-  writeFileSync(regFile(reg, "jpg"), first);
-  try {
-    // Clear any second frame left over from when we captured pairs.
-    unlinkSync(regFile(reg, "b.jpg"));
-  } catch {
-    /* there was none */
+  if (withCoach) {
+    snap.busDetected = true;
+    snap.busConfidence = withCoach.busConfidence;
+    snap.busBox = withCoach.busBox;
+    snap.detectedImage = withCoach.file;
+  } else {
+    delete snap.busDetected;
+    delete snap.busConfidence;
+    delete snap.busBox;
   }
+  // Keep a plain <reg>.jpg as the current frame, for anything that wants it.
+  writeFileSync(regFile(reg, "jpg"), frame);
   writeFileSync(regFile(reg, "json"), JSON.stringify(snap));
   snapshots.set(reg, snap);
-  return snap;
+  return { snap, shot, file };
 }
 
 /**
@@ -457,7 +512,23 @@ async function pollCoaches(bodsKey, fetchVehicles) {
         continue;
       }
       const existing = snapshots.get(reg);
-      if (existing && now - existing.takenAt < CAPTURE_INTERVAL_MS) {
+      const run = runs.get(reg);
+      const shotAlready = run?.shots?.get(cam.id);
+      if (shotAlready) {
+        // This coach has already been photographed at this camera. Move on to
+        // the next one it passes rather than re-shooting the same view.
+        trace(`already shot at ${cam.road} ${cam.desc}`);
+        continue;
+      }
+      if (run && run.shots.size >= MAX_SHOTS_PER_COACH) {
+        trace(`already have ${run.shots.size} shots for this coach`);
+        continue;
+      }
+      if (
+        existing &&
+        shotAlready === undefined &&
+        now - (existing.takenAt || 0) < CAPTURE_INTERVAL_MS
+      ) {
         trace(`on cooldown, captured ${Math.round((now - existing.takenAt) / 1000)}s ago`);
         continue;
       }
@@ -491,11 +562,13 @@ async function pollCoaches(bodsKey, fetchVehicles) {
         if (fresh?.busDetected) {
           console.log(
             `[camera] COACH SEEN ${fresh.label || reg} (${fresh.plate || reg}) at ${cam.road} ${cam.desc} ` +
-              `(${cam.distanceM}m) confidence ${fresh.busConfidence}`,
+              `(${cam.distanceM}m) confidence ${fresh.busConfidence}` +
+              (fresh.shotCount > 1 ? ` [shot ${fresh.shotCount} of ${MAX_SHOTS_PER_COACH}]` : ""),
           );
         } else if (ran) {
           console.log(
-            `[camera] ${fresh?.label || reg} near ${cam.road} ${cam.desc} (${cam.distanceM}m) - no coach in view`,
+            `[camera] ${fresh?.label || reg} near ${cam.road} ${cam.desc} (${cam.distanceM}m) - no coach in view` +
+              (fresh?.shotCount > 1 ? ` (${fresh.shotCount} shots so far)` : ""),
           );
         } else {
           console.warn(`[camera] verifier unavailable for ${captured.length} captures`);

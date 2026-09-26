@@ -12529,6 +12529,16 @@ function cameraSnapBlock(snap) {
   const coachSeen = Boolean(snap.busDetected) && Array.isArray(snap.busBox) && snap.busBox.length === 4;
   // FlixBus coaches arrive without a plate, so show the service instead.
   const who = snap.plate ? snap.operatorLabel || "" : snap.label || snap.operatorLabel || "";
+  // One coach is photographed at every camera it passes, because most single
+  // frames do not contain it at all. Say how many, and where.
+  const shots = Array.isArray(snap.shots) ? snap.shots.filter((s) => s && s.file) : [];
+  const shotNote =
+    shots.length > 1
+      ? ` &middot; photographed at ${shots.length} cameras: ${shots
+          .map((s) => [s.road, s.desc].filter(Boolean).join(" "))
+          .filter(Boolean)
+          .join(", ")}`
+      : "";
   const crop = coachSeen
     ? `<div class="popup-camera-crop" data-camera-frames="${esc(frames.join(" "))}" data-camera-snap='${esc(
         JSON.stringify({ busBox: snap.busBox, busConfidence: snap.busConfidence, operator: snap.operator }),
@@ -12547,7 +12557,7 @@ function cameraSnapBlock(snap) {
               who ? ` &middot; ${esc(who)}` : ""
             }`
           : ""
-      }</p>
+      }${shotNote}</p>
       <p class="popup-camera-credit">${esc(snap.attribution || "Camera imagery © National Highways (Crown copyright)")}</p>
     </div>`;
 }

@@ -453,30 +453,37 @@ app.get("/api/camera-snapshot", (req, res) => {
     return;
   }
   // When a coach was detected, serve the frame that produced the detection: the
-  // live one is overwritten every few minutes by the next capture.
+  // live one is overwritten as the coach moves to the next camera. Otherwise
+  // serve every camera it was photographed at, so the card can show the series.
+  const shots = Array.isArray(snap.shots) ? snap.shots : [];
+  const images = shots.map((s) => s?.file).filter(Boolean);
   const first =
     snap.detectedImage && fs.existsSync(path.join(__dirname, snap.detectedImage))
       ? snap.detectedImage
-      : `/api/camera-snapshot/${snap.reg}.jpg`;
+      : images[0] || `/api/camera-snapshot/${snap.reg}.jpg`;
   res.json({
     snapshot: {
       ...snap,
       image: first,
-      frames: [first],
+      frames: images.length ? images : [first],
     },
   });
 });
 
 app.get("/api/camera-snapshot/:file", (req, res) => {
   const file = String(req.params?.file || "");
-  // Keys are [A-Z0-9]{1,16} with an optional "-detected" suffix - a plate, or
-  // an id for the FlixBus coaches that arrive from bustimes without one.
-  const match = /^([A-Z0-9]{1,16})(-detected)?\.jpg$/.exec(file);
+  // Keys are [A-Z0-9]{1,16} - a plate, or an id for the FlixBus coaches that
+  // arrive from bustimes without one - optionally followed by "-c<cameraId>"
+  // for each camera a coach was photographed at, or "-detected" for the kept
+  // copy of the frame a detection came from.
+  const match = /^([A-Z0-9]{1,16})(-c[0-9]{1,8})?(-detected)?\.jpg$/.exec(file);
   if (!match) {
     res.status(400).end();
     return;
   }
   const reg = match[1];
+  // Shots are stored as <key>-c<cameraId>.jpg for a coach photographed at
+  // several cameras, so the id part may carry a "-c12345" suffix too.
   const full = path.join(__dirname, "data", "camera-snapshots", file);
   const snap = cameraSnapshotFor(reg);
   if (!snap || !fs.existsSync(full)) {
