@@ -16345,11 +16345,12 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
   if (trailAlignPending.has(key)) return trailAlignPending.get(key);
   const pending = (async () => {
     try {
-      // Warm the local road tiles in the background. Awaiting this froze the map
-      // on long runs (Alton Towers → Fenton is thousands of points), so the snap
-      // below runs on whatever roads are already cached and the next pass picks
-      // up the rest.
-      ensureSnapRoadsForPath(latlngs, signal).catch(() => {});
+      // Warm the local road tiles. Awaiting the full fetch froze the map on long
+      // runs, so wait only briefly and retry the local snap once if the roads were
+      // not there yet — otherwise a cold tail has nothing to snap to and no line
+      // is drawn at all.
+      const warm = ensureSnapRoadsForPath(latlngs, signal).catch(() => {});
+      await Promise.race([warm, new Promise((resolve) => setTimeout(resolve, 1200))]);
       const flat = Array.isArray(latlngs?.[0]?.[0]) ? latlngs.flat() : latlngs;
       let aligned = null;
       let segs = [];
@@ -16393,13 +16394,35 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
         } else if (staffs) {
           // Rural Staffs / AT / FPOT / D&G: sparse AVL often fails tight map-match —
           // stitch driving routes first so the trail sticks to roads, then match.
-          const thinned = thinTrailPoints(flat, 140);
-          aligned = await stitchTrailViaOsrmRoutes(
-            thinned.length >= 2 ? thinned : flat,
-            signal,
+          const local = alignTrailToRoadsLocal(
+            thinTrailPoints(flat, 140).length >= 2 ? thinTrailPoints(flat, 140) : flat,
             alignOpts,
           );
-          segs = trailSegmentsOf(aligned, alignOpts);
+          if (flattenTrailLatLngs(local).length >= 2) {
+            aligned = local;
+            segs = trailSegmentsOf(aligned, alignOpts);
+          }
+          if (!segs.length) {
+            // Roads were still loading — give them one more chance before OSRM.
+            await Promise.race([warm, new Promise((resolve) => setTimeout(resolve, 2500))]);
+            const retry = alignTrailToRoadsLocal(
+              thinTrailPoints(flat, 140).length >= 2 ? thinTrailPoints(flat, 140) : flat,
+              alignOpts,
+            );
+            if (flattenTrailLatLngs(retry).length >= 2) {
+              aligned = retry;
+              segs = trailSegmentsOf(aligned, alignOpts);
+            }
+          }
+          const thinned = thinTrailPoints(flat, 140);
+          if (!segs.length) {
+            aligned = await stitchTrailViaOsrmRoutes(
+              thinned.length >= 2 ? thinned : flat,
+              signal,
+              alignOpts,
+            );
+            segs = trailSegmentsOf(aligned, alignOpts);
+          }
           if (!segs.length) {
             aligned = await matchTrailViaOsrm(thinned.length >= 2 ? thinned : flat, signal, alignOpts);
             segs = trailSegmentsOf(aligned, alignOpts);
