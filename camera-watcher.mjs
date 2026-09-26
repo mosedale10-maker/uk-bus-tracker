@@ -18,7 +18,7 @@
  *  - Images are Crown copyright, National Highways. Every copy carries the
  *    attribution string and expires; nothing is archived long term.
  */
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import sharp from "sharp";
@@ -57,14 +57,17 @@ const CAPTURE_INTERVAL_MS = 60 * 1000;
  * How many cameras we will photograph one coach at.
  *
  * A camera being near a coach's position does not mean the coach is in its field
- * of view - on a two-way motorway the camera usually covers one carriageway.
- * Measured over 339 captures, only ~6% of frames contained a coach even at
- * 0-50m, mostly because most frames simply do not contain it. Following a coach
- * along its route and shooting at every camera it passes turns that lottery into
- * a short series, so the odds that at least one frame has the coach in it climb
- * sharply. Bounded so we do not hammer the service.
+ * of view - on a two-way motorway the camera usually covers one carriageway, and
+ * National Highways publish no aim data, so nothing tells us which side it
+ * faces. Measured, only ~1.5% of frames contain the coach even at 30-120m.
+ *
+ * With a per-shot rate that low, the only lever that helps is more shots: 12
+ * cameras per coach puts the odds of at least one frame containing the coach at
+ * roughly one in six journeys, against one in forty at 6 shots. Bounded, and
+ * paced by the 60s per-camera cooldown, so it stays a light load on someone
+ * else's public service.
  */
-const MAX_SHOTS_PER_COACH = 6;
+const MAX_SHOTS_PER_COACH = 12;
 /** Stop following a coach once it has been away from the cameras this long. */
 const RUN_IDLE_MS = 45 * 60 * 1000;
 /** Snapshots older than this are deleted rather than shown. */
@@ -203,7 +206,19 @@ function pruneOldSnapshots(now) {
   }
   for (const name of names) {
     const full = join(snapshotDir(), name);
-    const age = now - (snapshots.get(name.replace(/\.(jpg|json)$/, ""))?.takenAt || 0);
+    /*
+     * Work the age out from the file's own mtime, not from a sidecar lookup.
+     * Looking the name up in `snapshots` only ever matched "<reg>.jpg", so
+     * every per-camera shot ("<reg>-c52874.jpg") resolved to no sidecar, got an
+     * age of "now", and was deleted as expired within a poll - which is why the
+     * runs listed six shots and none of the images existed.
+     */
+    let age = Infinity;
+    try {
+      age = now - statSync(full).mtimeMs;
+    } catch {
+      continue;
+    }
     if (age > SNAPSHOT_MAX_AGE_MS) {
       try {
         unlinkSync(full);
@@ -287,6 +302,15 @@ async function capture(reg, cam, takenAt, vehicle = {}) {
     file: `/api/camera-snapshot/${reg}-c${cam.id}.jpg`,
     busDetected: false,
   };
+  // Where the coach itself was, not the camera. This is what makes a shareable
+  // link possible: ?bus=<key> can centre the map on the coach from the data we
+  // already hold, with no lookup needed.
+  const coords = vehicle?.coordinates;
+  if (Array.isArray(coords)) {
+    shot.coachLat = Number(coords[1]);
+    shot.coachLng = Number(coords[0]);
+    shot.coachHeading = Number(vehicle?.heading);
+  }
   run.shots.set(cam.id, shot);
 
   const noc = run.operator || "";

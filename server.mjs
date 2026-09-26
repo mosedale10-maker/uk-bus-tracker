@@ -457,6 +457,7 @@ app.get("/api/camera-gallery", (req, res) => {
   }
   const dir = path.join(__dirname, "data", "camera-snapshots");
   const photos = [];
+  let captured = 0;
   for (const name of names) {
     if (!name.endsWith(".json")) continue;
     let meta;
@@ -469,6 +470,9 @@ app.get("/api/camera-gallery", (req, res) => {
     const current = shots.length ? shots[shots.length - 1] : null;
     const file = current?.file || `/api/camera-snapshot/${meta.reg}.jpg`;
     if (!fs.existsSync(path.join(dir, path.basename(file)))) continue;
+    // Count everything before filtering, so the UI can say how many photos the
+    // filter is hiding rather than implying there are none at all.
+    captured += 1;
     if (onlyHits && !current?.busDetected) continue;
     photos.push({
       key: meta.reg,
@@ -482,12 +486,15 @@ app.get("/api/camera-gallery", (req, res) => {
       shotCount: meta.shotCount || shots.length || 1,
       busDetected: Boolean(current?.busDetected),
       busConfidence: current?.busConfidence ?? null,
+      // The box travels with the photo so the card can zoom straight to the
+      // coach instead of making you hunt for a 60px shape in a 720px frame.
+      busBox: current?.busBox ?? null,
       image: file,
       link: `/?bus=${encodeURIComponent(meta.reg)}`,
     });
   }
   photos.sort((a, b) => b.takenAt - a.takenAt);
-  res.json({ photos: photos.slice(0, limit), total: photos.length });
+  res.json({ photos: photos.slice(0, limit), total: photos.length, captured });
 });
 app.get("/api/camera-snapshot", (req, res) => {
   const snap = cameraSnapshotFor(req.query?.reg || req.query?.key);

@@ -12714,28 +12714,37 @@ async function loadCameraGallery({ force = false } = {}) {
   const photos = Array.isArray(data?.photos) ? data.photos : [];
   cameraGalleryLoaded = true;
   if (camerasEmptyEl) camerasEmptyEl.hidden = photos.length > 0;
+  const total = Number(data?.captured ?? data?.total) || photos.length;
   if (camerasCountEl) {
-    camerasCountEl.textContent = data?.total
-      ? `${photos.length} shown of ${data.total}`
-      : "";
+    // Always say what is being hidden. A gallery that silently drops photos
+    // reads as "we have no photos", which is a different and wrong claim.
+    camerasCountEl.textContent = onlyHits
+      ? photos.length
+        ? `${photos.length} with a coach in frame, of ${total} captured`
+        : `none of the ${total} captured have a coach in frame`
+      : `${photos.length} shown of ${total}`;
   }
   if (!photos.length) {
     camerasGridEl.innerHTML = onlyHits
-      ? `<p class="cameras-empty">No photo has a coach in frame yet. Tick the box off to see every capture.</p>`
+      ? `<p class="cameras-empty">No photo has a coach in frame yet. Untick the box to see all ${total} captures.</p>`
       : "";
     return;
   }
   camerasGridEl.innerHTML = photos
-    .map((p) => {
+    .map((p, i) => {
       const where = [p.road, p.desc].filter(Boolean).join(" ") || "camera";
       const dist = Number.isFinite(p.distanceM) ? `${Math.round(p.distanceM)} m away` : "";
       const badge = p.busDetected
         ? `<span class="cameras-badge is-hit">coach in frame${Number.isFinite(p.busConfidence) ? ` · ${Number(p.busConfidence).toFixed(2)}` : ""}</span>`
         : `<span class="cameras-badge">no coach in frame</span>`;
       const shots = p.shotCount > 1 ? `<span class="cameras-shots">${p.shotCount} cameras</span>` : "";
+      const box = Array.isArray(p.busBox) && p.busBox.length === 4 ? p.busBox.join(",") : "";
       return `<a class="cameras-card" href="${esc(p.link || "#")}">
-          <img class="cameras-thumb" src="${esc(p.image)}" loading="lazy" decoding="async"
-               alt="National Highways camera view near ${esc(where)}" width="720" height="576" />
+          <span class="cameras-thumbwrap">
+            <img class="cameras-thumb" src="${esc(p.image)}" loading="lazy" decoding="async"
+                 alt="National Highways camera view near ${esc(where)}" width="720" height="576"
+                 data-zoom-src="${esc(p.image)}" data-zoom-box="${esc(box)}" data-zoom-i="${i}" />
+          </span>
           <div class="cameras-meta">
             <strong>${esc(p.label)}</strong>
             <span>${esc(where)}${dist ? ` · ${esc(dist)}` : ""}</span>
@@ -12745,6 +12754,34 @@ async function loadCameraGallery({ force = false } = {}) {
         </a>`;
     })
     .join("");
+  zoomGalleryHits(photos);
+}
+
+/**
+ * Replace the thumbnail with a close-up of the coach, using the same crop the bus
+ * card draws. Only photos that actually have a coach in frame get one, so this
+ * costs nothing on a gallery of misses - and a miss still shows its full frame,
+ * because hiding it would hide the evidence.
+ */
+async function zoomGalleryHits(photos) {
+  const byIndex = new Map(photos.map((p, i) => [i, p]));
+  for (const img of document.querySelectorAll(".cameras-thumb")) {
+    const box = String(img.dataset.zoomBox || "");
+    if (!box) continue;
+    const photo = byIndex.get(Number(img.dataset.zoomI));
+    if (!photo) continue;
+    const nums = box.split(",").map(Number);
+    if (nums.length !== 4 || nums.some((n) => !Number.isFinite(n))) continue;
+    const size = await loadFrameCanvas(photo.image, 64, 64).catch(() => null);
+    if (!size) continue;
+    const dataUrl = await cameraCoachCrop(photo.image, nums, size.width, size.height).catch(
+      () => null,
+    );
+    if (dataUrl) {
+      img.src = dataUrl;
+      img.classList.add("is-zoomed");
+    }
+  }
 }
 
 document.getElementById("cameras-refresh")?.addEventListener("click", () => {

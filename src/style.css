@@ -1287,6 +1287,14 @@ html[data-plus="1"] .plus-tag {
 .cameras-card:hover {
   border-color: rgba(148, 163, 184, 0.6);
 }
+.cameras-thumbwrap {
+  display: block;
+  line-height: 0;
+  background: #0b1220;
+}
+.cameras-thumb.is-zoomed {
+  cursor: zoom-out;
+}
 .cameras-thumb {
   display: block;
   width: 100%;
