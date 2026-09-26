@@ -6598,6 +6598,36 @@ async function showFleetRouteTails({
     });
     for (const key of expanded) keys.add(key);
   }
+  // Some vehicles are recorded under a key we cannot derive from the selection
+  // (fleet-number keys, opaque staff refs). Ask the server what this route holds
+  // before giving up, otherwise the Fleet/tail view always reports "no GPS".
+  if (!keys.size && (code || opCode)) {
+    try {
+      const params = new URLSearchParams({ days: "2" });
+      if (code) params.set("lines", code);
+      if (opCode) params.set("operators", opCode);
+      const res = await fetch(`/api/trails/keys?${params}`);
+      const data = res.ok ? await res.json() : null;
+      const fallbackKeys = (data?.keys || [])
+        .map((row) => (typeof row === "string" ? row : row?.key || ""))
+        .filter(Boolean)
+        .filter((k) => /^(reg:|staff-|at:)/.test(k))
+        .slice(0, 24);
+      // Prefer the plate of the selected vehicle when we know it.
+      const wantedReg = compactReg(
+        targets.map((v) => v?.reg || v?.regLabel || "").find(Boolean) || "",
+      );
+      const ordered = wantedReg
+        ? [
+            ...fallbackKeys.filter((k) => k === `reg:${wantedReg}`),
+            ...fallbackKeys.filter((k) => k !== `reg:${wantedReg}`),
+          ]
+        : fallbackKeys;
+      for (const key of ordered) keys.add(key);
+    } catch {
+      /* keep going — the message below still covers a genuine miss */
+    }
+  }
   const trailsPromise = keys.size
     ? fetchServerTrailsChunked([...keys], { force: true })
         .then(() => {
