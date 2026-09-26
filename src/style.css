@@ -1269,6 +1269,20 @@ html[data-plus="1"] .plus-tag {
 .cameras-count {
   color: var(--muted);
 }
+/* Live-refresh indicator. Dims while a background pass is in flight so it is
+   clear the grid is checking rather than sitting idle. */
+.cameras-updated {
+  color: var(--muted);
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.cameras-updated:empty {
+  display: none;
+}
+.cameras-updated.is-checking {
+  opacity: 0.4;
+}
 .cameras-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));

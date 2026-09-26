@@ -12702,7 +12702,61 @@ const camerasEmptyEl = document.getElementById("cameras-empty");
 const camerasCountEl = document.getElementById("cameras-count");
 const camerasOnlyHitsEl = document.getElementById("cameras-only-hits");
 const camerasOnlyReadableEl = document.getElementById("cameras-only-readable");
+const camerasUpdatedEl = document.getElementById("cameras-updated");
 let cameraGalleryLoaded = false;
+/*
+ * The Cameras tab refreshes on its own, because the watcher is capturing new
+ * frames and new coach photos all the time and a gallery that only loads once
+ * per visit reads as "that is all there is".
+ *
+ * It re-renders only when the response actually differs. Rebuilding an
+ * identical grid every 30 seconds would re-download every thumbnail, throw away
+ * the scroll position and restart each coach close-up, all to produce exactly
+ * the same page - so the signature below is compared first and an unchanged
+ * pass only moves the "updated" clock.
+ */
+let cameraGallerySig = "";
+let camerasRefreshTimer = null;
+let camerasRefreshBusy = false;
+let camerasUpdatedAt = 0;
+const CAMERAS_REFRESH_MS = 30_000;
+
+/** Everything that would change what is on screen, and nothing that would not. */
+function cameraGallerySignature(photos, captured) {
+  return `${captured}|${photos.length}|${photos
+    .map(
+      (p) =>
+        `${p.key}:${p.takenAt}:${p.busDetected ? 1 : 0}:${p.readable ? 1 : 0}:${p.shotCount}:${p.image}`,
+    )
+    .join("|")}`;
+}
+
+function markGalleryUpdated(checking = false) {
+  if (!camerasUpdatedEl) return;
+  if (checking) {
+    camerasUpdatedEl.textContent = "checking…";
+    camerasUpdatedEl.classList.add("is-checking");
+    return;
+  }
+  const at = camerasUpdatedAt;
+  if (!at) {
+    camerasUpdatedEl.textContent = "";
+    return;
+  }
+  // While the tab is open and checking every 30 seconds the age is almost always
+  // under a minute, so "just now" is the honest reading. Past that, show the
+  // clock - a screen claiming to be live must not be vague about how live it is.
+  const secs = Math.round((Date.now() - at) / 1000);
+  camerasUpdatedEl.textContent =
+    secs < 60
+      ? "updated just now"
+      : `updated ${new Date(at).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        })}`;
+  camerasUpdatedEl.classList.remove("is-checking");
+}
 
 function cameraPhotoTime(ts) {
   if (!ts) return "";
@@ -12714,24 +12768,61 @@ function cameraPhotoTime(ts) {
   });
 }
 
-async function loadCameraGallery({ force = false } = {}) {
+async function loadCameraGallery({ force = false, quiet = false } = {}) {
   if (!camerasGridEl) return;
   if (cameraGalleryLoaded && !force) return;
+  // One refresh at a time. A slow response must not land on top of a later one
+  // and repaint the grid with stale data.
+  if (camerasRefreshBusy) return;
+  camerasRefreshBusy = true;
   const onlyHits = Boolean(camerasOnlyHitsEl?.checked);
   // Most night frames come back as glare, rain or dirt - a live motorway with
   // a coach metres away should show plenty of vehicles, and a frame scoring
   // almost none of them is not evidence of anything. Hidden unless asked for.
   const onlyReadable = camerasOnlyReadableEl ? camerasOnlyReadableEl.checked : true;
-  camerasGridEl.innerHTML = `<p class="cameras-empty">Loading photos…</p>`;
+  const first = !cameraGalleryLoaded;
+  // A background pass must never blank the grid: "Loading photos…" on a timer
+  // would make the whole tab strobe every 30 seconds.
+  if (first || !quiet) camerasGridEl.innerHTML = `<p class="cameras-empty">Loading photos…</p>`;
+  else markGalleryUpdated(true);
   const params = new URLSearchParams({ limit: "160" });
   if (onlyHits) params.set("hits", "1");
   if (!onlyReadable) params.set("readable", "0");
-  const res = await fetch(`/api/camera-gallery?${params}`).catch(() => null);
-  const data = res?.ok ? await res.json().catch(() => null) : null;
-  const photos = Array.isArray(data?.photos) ? data.photos : [];
+  let data = null;
+  try {
+    const res = await fetch(`/api/camera-gallery?${params}`);
+    if (res.ok) data = await res.json().catch(() => null);
+  } catch {
+    data = null;
+  } finally {
+    camerasRefreshBusy = false;
+  }
+  if (!data) {
+    // A failed pass leaves whatever is on screen alone. Saying "0 photos" here
+    // would be a lie about a server hiccup.
+    if (first) camerasGridEl.innerHTML = `<p class="cameras-empty">Could not reach the camera photos. Try Refresh.</p>`;
+    else markGalleryUpdated(false);
+    return;
+  }
+  const photos = Array.isArray(data.photos) ? data.photos : [];
   cameraGalleryLoaded = true;
+  camerasUpdatedAt = Date.now();
+  const total = Number(data.captured ?? data.total) || photos.length;
+  const sig = cameraGallerySignature(photos, total);
+  if (!first && sig === cameraGallerySig) {
+    markGalleryUpdated(false);
+    return;
+  }
+  // Each card is a link to that coach. Replacing the grid between mousedown and
+  // mouseup would throw the click away, so wait for the next pass instead - it is
+  // 30 seconds, and the alternative is a link that sometimes does nothing.
+  // `:active` lands on the link being pressed, not on the grid, so look inside.
+  if (!first && camerasGridEl.querySelector(":active")) {
+    markGalleryUpdated(false);
+    return;
+  }
+  cameraGallerySig = sig;
   if (camerasEmptyEl) camerasEmptyEl.hidden = photos.length > 0;
-  const total = Number(data?.captured ?? data?.total) || photos.length;
   const hidden = Math.max(0, total - photos.length);
   if (camerasCountEl) {
     // Always say what is being hidden. A gallery that silently drops photos
@@ -12755,6 +12846,7 @@ async function loadCameraGallery({ force = false } = {}) {
     camerasGridEl.innerHTML = onlyHits
       ? `<p class="cameras-empty">No photo has a coach in frame yet. Untick the box to see all ${total} captures.</p>`
       : "";
+    markGalleryUpdated(false);
     return;
   }
   camerasGridEl.innerHTML = photos
@@ -12787,7 +12879,35 @@ async function loadCameraGallery({ force = false } = {}) {
     })
     .join("");
   zoomGalleryHits(photos);
+  markGalleryUpdated(false);
 }
+
+/*
+ * Run the auto-refresh only while the tab is actually on screen. A timer that
+ * keeps polling a hidden tab burns the user's battery and the server's time for
+ * something nobody is looking at, and browsers already throttle background
+ * timers to the point of making the result arbitrary.
+ */
+function syncCameraGalleryPolling() {
+  const wanted = appTab === "cameras" && !document.hidden;
+  if (wanted && !camerasRefreshTimer) {
+    // Catch up straight away rather than making someone who has just opened the
+    // tab stare at a stale grid for half a minute.
+    loadCameraGallery({ force: true, quiet: true });
+    camerasRefreshTimer = setInterval(() => {
+      loadCameraGallery({ force: true, quiet: true });
+    }, CAMERAS_REFRESH_MS);
+  } else if (!wanted && camerasRefreshTimer) {
+    clearInterval(camerasRefreshTimer);
+    camerasRefreshTimer = null;
+  }
+}
+
+// Coming back to the tab, or returning to it from another window, should show
+// current photos straight away.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) syncCameraGalleryPolling();
+});
 
 /**
  * Replace the thumbnail with a close-up of the coach, using the same crop the bus
@@ -17648,6 +17768,8 @@ function setAppTab(tab) {
     camerasScreenEl.hidden = next !== "cameras";
     if (next === "cameras") loadCameraGallery();
   }
+  // Starts the auto-refresh when the tab opens, stops it when the tab closes.
+  syncCameraGalleryPolling();
   if (mapWrapEl) {
     // The cameras panel lives inside the map wrapper, so the wrapper has to stay
     // visible for that tab - the panel is opaque and covers the map itself.
