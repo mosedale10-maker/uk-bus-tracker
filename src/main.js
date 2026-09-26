@@ -11312,6 +11312,11 @@ function busIdentityTokens(bus = {}, extra = {}) {
     extra.vehicle?.fleet_number,
     extra.vehicle?.name,
     extra.vehicle?.reg,
+    // The BODS reference (DAGC-52) is often the only stable identity on a bus
+    // whose vehicle name is blank, and leaving it out let the same bus match
+    // nothing and get drawn twice.
+    bus._bods?.vehicleRef,
+    bus._bods?.fleet_code,
     bus.vehicle?.name,
     bus.vehicle?.reg,
     bus.vehicle?.fleet_code,
@@ -11484,7 +11489,10 @@ function enrichBodsFromBustimes(bods, bt) {
   );
   return {
     ...bt,
-    id: bt.id,
+    // Keep the BODS id as the marker key. Keying the enriched bus by the bustimes
+    // row id made the key flip between polls, so the previous marker was never
+    // replaced and the same bus was drawn twice.
+    id: bods.id ?? bt.id,
     coordinates: bods.coordinates,
     heading: Number.isFinite(bods.heading) ? bods.heading : bt.heading,
     datetime: bods.datetime || bt.datetime,
@@ -13805,6 +13813,20 @@ function upsertLiveBus(bus, snapped) {
     if (existing === announceFollow) announceJourney(existing);
     keepFollowedInView(existing);
     return existing;
+  }
+  // Safety net: a bus whose marker key changed between polls (feed id flip, BODS
+  // vs bustimes) leaves its old marker behind, and the bus is drawn twice. Drop
+  // any marker that is clearly the same physical vehicle first.
+  for (const [otherId, other] of markers) {
+    if (otherId === bus.id || !other) continue;
+    if (!busesShareStableIdentity(other.bus, bus)) continue;
+    if (other.isPopupOpen?.() || isFollowingMarker(other) || other === selectedMapMarker) continue;
+    try {
+      cluster.removeLayer(other);
+    } catch {
+      /* ignore */
+    }
+    markers.delete(otherId);
   }
   const marker = L.marker([snapped.lat, snapped.lng], { icon: busIcon(bus, snapped.heading) });
   marker.bus = bus;
