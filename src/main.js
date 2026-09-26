@@ -5244,24 +5244,12 @@ function isMultiTrailPath(latlngs) {
  * zig-zag/loop.
  */
 function makeTrailPathLayer(latlngs, options, target) {
-  if (!isMultiTrailPath(latlngs)) return L.polyline(latlngs, options).addTo(target);
-  const group = L.layerGroup().addTo(target);
-  const render = (next) => {
-    group.clearLayers();
-    const segments = isMultiTrailPath(next) ? next : next?.length ? [next] : [];
-    for (const segment of segments) {
-      if (!Array.isArray(segment) || segment.length < 2) continue;
-      group.addLayer(L.polyline(segment, options));
-    }
-  };
-  render(latlngs);
-  group.__trailMulti = true;
-  group.setLatLngs = render;
-  group.setStyle = (style) => {
-    group.eachLayer((child) => child.setStyle?.(style));
-    return group;
-  };
-  return group;
+  // Leaflet renders a nested array as a native MultiPolyline, so a gapped tail
+  // stays one <path> element with the gaps intact. Building a layerGroup of one
+  // polyline per segment instead meant dozens of elements per tail (66 for a
+  // full journey), which is what made tails take so long to appear and be
+  // dropped again by the next clear pass.
+  return L.polyline(latlngs, options).addTo(target);
 }
 
 function setTrailPathLayerLatLngs(layer, latlngs) {
@@ -5279,55 +5267,15 @@ function trailPairNeedsRoadMatch(breakOpts = {}, opts = {}) {
   // Every other visible route stroke must come from a validated road matcher.
   return true;
 }
-
-/**
- * TEMPORARY diagnostic (?traildiag=1): shows which path a tail came from and how
- * many points it had, so the un-snapped source can be identified in one load.
- * Remove once the source is fixed.
- */
-function trailDiagEnabled() {
-  try {
-    return new URLSearchParams(location.search).has("traildiag");
-  } catch {
-    return false;
-  }
-}
-
-function recordTrailDiag(stage, data = {}) {
-  if (!trailDiagEnabled()) return;
-  const state = (window.__trailDiag = window.__trailDiag || { events: [] });
-  const entry = { stage, at: new Date().toISOString().slice(11, 19), ...data };
-  state.events.push(entry);
-  if (state.events.length > 40) state.events.shift();
-  state.last = entry;
-  let el = document.getElementById("trail-diag");
-  if (!el) {
-    el = document.createElement("pre");
-    el.id = "trail-diag";
-    el.style.cssText =
-      "position:fixed;left:8px;bottom:8px;z-index:99999;margin:0;padding:8px 10px;" +
-      "background:rgba(2,6,23,.92);color:#e2e8f0;font:11px/1.45 ui-monospace,monospace;" +
-      "border:1px solid #334155;border-radius:8px;max-width:520px;max-height:46vh;overflow:auto;white-space:pre-wrap";
-    document.body.appendChild(el);
-  }
-  el.textContent = state.events
-    .slice(-14)
-    .map((e) => {
-      const { stage, at, ...rest } = e;
-      const bits = Object.entries(rest)
-        .map(([k, v]) => `${k}=${typeof v === "number" ? v : JSON.stringify(v)}`)
-        .join(" ");
-      return `${at} ${stage.padEnd(14)} ${bits}`;
-    })
-    .join("\n");
-}
-
 /**
  * Last gate before anything is painted. Whatever produced the geometry — live
  * tail, pinned tail, replay, planned route or staff AVL — a line that is not
  * actually on the road is never drawn. This is the invariant that stops tails
  * cutting across housing estates and fields.
  */
+/** How far to look before deciding we simply have no road data for a point. */
+const ROAD_COVERAGE_PROBE_M = 1200;
+
 function trailPathIsOnRoad(path, radiusM = 70, minRatio = 0.9) {
   const flat = flattenTrailLatLngs(path);
   if (flat.length < 2) return false;
@@ -5342,33 +5290,52 @@ function trailPathIsOnRoad(path, radiusM = 70, minRatio = 0.9) {
     const lat = Number(point[0]);
     const lng = Number(point[1]);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    // A whole-journey tail (AT1-AT3, Alton Towers -> Fenton) is far longer than
+    // the road data held for the current map. A point with no road anywhere near
+    // it cannot be judged, and must never blank an otherwise valid tail.
+    if (!snapCandidatesNear(lat, lng, ROAD_COVERAGE_PROBE_M)?.length) continue;
     checked += 1;
     if (pointIsOnRoad(lat, lng, radiusM)) onRoad += 1;
   }
-  if (!checked) return false;
+  // Nothing in range of loaded road data: unjudgeable rather than wrong.
+  if (!checked) return true;
   return onRoad / checked >= minRatio;
+}
+
+/**
+ * Signed local alignments (Hanley Birch Terrace/Charles Street, Longton bus
+ * gate) must be enforced *after* the road matcher, not before it: a widened snap
+ * radius otherwise drags the gate vertices straight back onto Potteries Way or
+ * the Longton roundabout, which is what the buses actually use. Doing it here —
+ * the single choke point every trail passes through — covers live tails, pinned
+ * tails, replay, planned routes and the recorded Staffordshire services
+ * including AT1/AT3.
+ *
+ * Safety: a correction is only kept while it stays on the road. If the
+ * substituted alignment fails that check the untouched road path is drawn, so a
+ * correction can never blank a tail.
+ */
+function applyStaffsLocalAlignments(path, breakOpts = {}) {
+  if (!Array.isArray(path) || path.length < 2) return path;
+  let corrected;
+  try {
+    corrected = applyStaffsHanleyDiversion(path, breakOpts);
+  } catch {
+    return path;
+  }
+  if (corrected === path) return path;
+  return trailPathIsOnRoad(corrected) ? corrected : path;
 }
 
 function makeTrailPair(path, layer, opts = {}) {
   const breakOpts = trailPairBreakOpts(opts);
   const roadAligned = Boolean(opts.roadAligned);
-  recordTrailDiag("makePair", {
-    src: flattenTrailLatLngs(path).length,
-    gps: (opts.gpsPoints || []).length,
-    aligned: roadAligned,
-    roads: roadsForSnap().length,
-    onRoad: trailPathIsOnRoad(path),
-    planned: Boolean(breakOpts.plannedRoute),
-    guide: Boolean(breakOpts.plannedGuide),
-    actual: Boolean(breakOpts.actualRoute),
-    staffs: Boolean(breakOpts.staffs),
-    op: breakOpts.operator || "",
-    line: breakOpts.line || "",
-  });
+  const corrected = applyStaffsLocalAlignments(path, breakOpts);
   const latlngs =
-    (trailPairNeedsRoadMatch(breakOpts, opts) && !roadAligned) || !trailPathIsOnRoad(path)
+    (trailPairNeedsRoadMatch(breakOpts, opts) && !roadAligned) ||
+    !trailPathIsOnRoad(corrected)
       ? []
-      : asTrailLatLngs(path, breakOpts);
+      : asTrailLatLngs(corrected, breakOpts);
   // White casing + coloured centre keeps the route readable over both light
   // street maps and the dark night tiles, like the reference replay view.
   const casing = makeTrailPathLayer(latlngs, TRAIL_CASING, layer);
@@ -5378,11 +5345,20 @@ function makeTrailPair(path, layer, opts = {}) {
     layer,
   );
   const gps = opts.gpsPoints || opts.gpsPath || null;
-  const arrowPath = latlngs.length >= 2 ? path : [];
+  const arrowPath = latlngs.length >= 2 ? corrected : [];
   const arrows = opts.deferArrows
     ? []
     : buildTrailArrowsAlongRoad(arrowPath, layer, { gpsPoints: gps, breakOpts });
-  return { casing, line, arrows, layer, gpsPoints: gps || null, breakOpts, path, roadAligned };
+  return {
+    casing,
+    line,
+    arrows,
+    layer,
+    gpsPoints: gps || null,
+    breakOpts,
+    path: corrected,
+    roadAligned,
+  };
 }
 
 function setTrailPairPath(pair, path, opts = {}) {
@@ -5418,8 +5394,13 @@ function setTrailPairPath(pair, path, opts = {}) {
     return;
   }
   pair.roadAligned = roadAligned || Boolean(pair.roadAligned);
+  const corrected = applyStaffsLocalAlignments(path, breakOpts);
   // Same on-road gate as a new pair: never draw geometry that leaves the road.
-  if (!trailPathIsOnRoad(path)) {
+  if (!trailPathIsOnRoad(corrected)) {
+    // A rejected update must never wipe a tail that is already drawn on the
+    // road: keep the last accepted geometry and let the next update try again.
+    // Otherwise a single bad refresh silently blanks a tail that was fine.
+    if (pair.path?.length) return;
     pair.path = [];
     setTrailPathLayerLatLngs(pair.casing, []);
     setTrailPathLayerLatLngs(pair.line, []);
@@ -5427,8 +5408,8 @@ function setTrailPairPath(pair, path, opts = {}) {
     pair.arrows = [];
     return;
   }
-  pair.path = path;
-  const latlngs = asTrailLatLngs(path, breakOpts);
+  pair.path = corrected;
+  const latlngs = asTrailLatLngs(corrected, breakOpts);
   setTrailPathLayerLatLngs(pair.casing, latlngs);
   setTrailPathLayerLatLngs(pair.line, latlngs);
   if (opts.gpsPoints || opts.gpsPath) {
@@ -5440,7 +5421,7 @@ function setTrailPairPath(pair, path, opts = {}) {
     return;
   }
   // Rebuild arrows on the path being shown (road-aligned when prepareRoadTrail finishes).
-  pair.arrows = buildTrailArrowsAlongRoad(path, pair.layer, {
+  pair.arrows = buildTrailArrowsAlongRoad(corrected, pair.layer, {
     gpsPoints: pair.gpsPoints,
     breakOpts,
   });
@@ -6087,16 +6068,6 @@ function refreshPinnedTrailLine(key) {
     }
   }
   path = applyStaffsHanleyDiversion(path, { ...breakOpts, key: id });
-  recordTrailDiag("pinned", {
-    id: String(id).slice(0, 28),
-    gps: gpsPoints.length,
-    path: flattenTrailLatLngs(path).length,
-    roads: roadsForSnap().length,
-    live: Boolean(filter.live),
-    planned: Boolean(breakOpts.plannedRoute),
-    op: breakOpts.operator || "",
-    line: breakOpts.line || "",
-  });
   const existing = pinnedTrailLines.get(id);
   if (flattenTrailLatLngs(path).length < 2) {
     if (existing && (filter.live || filter.follow)) {
@@ -6254,16 +6225,6 @@ function refreshLiveTrailLine(key) {
   }
   // Show GPS immediately so the tail keeps following even when OSM match is slow/fails.
   const immediate = preferRoadMatchedTrail(path, [], breakOpts);
-  recordTrailDiag("live", {
-    key: String(key).slice(0, 28),
-    gps: gpsPoints.length,
-    path: flattenTrailLatLngs(path).length,
-    immediate: flattenTrailLatLngs(immediate).length,
-    roads: roadsForSnap().length,
-    op: breakOpts.operator || "",
-    line: breakOpts.line || "",
-    staffs: Boolean(breakOpts.staffs),
-  });
   if (!liveTrailLine) {
     liveTrailLine = makeTrailPair(immediate, liveTrailLayer, {
       gpsPoints,
@@ -15770,6 +15731,11 @@ function placeOnRoad(marker, snapped) {
  */
 const SNAP_CELL_DEG = 0.002; // ~140m lat / ~110m lng at UK latitudes
 let snapRoadIndex = new Map();
+/** Road data arrives in batches (viewport, then whole-journey warms). */
+let snapRoadBatches = [];
+let snapRoadSeen = new Set();
+const SNAP_ROAD_BATCH_LIMIT = 6;
+const SNAP_ROAD_MAX_FEATURES = 45_000;
 
 function indexSnapRoads(roads) {
   const index = new Map();
@@ -15826,8 +15792,38 @@ function snapCandidatesNear(lat, lng, radiusM) {
 }
 
 function setSnapRoads(roads) {
-  snapRoads = Array.isArray(roads) ? roads : [];
-  snapRoadIndex = indexSnapRoads(snapRoads);
+  snapRoadBatches = [Array.isArray(roads) ? roads : []];
+  rebuildSnapRoads();
+}
+
+/**
+ * A whole-journey tail (AT1-AT3 Alton Towers -> Fenton is ~20km) needs road data
+ * far outside the current viewport. Loading it must not throw away the detailed
+ * streets already loaded for the town the map is looking at, otherwise the snap
+ * runs against coarse route-wide tiles and most fixes fail. Merged batches keep
+ * both, with the oldest dropped once the set grows too large.
+ */
+function mergeSnapRoads(roads) {
+  const batch = (Array.isArray(roads) ? roads : []).filter(
+    (road) => road && !snapRoadSeen.has(road),
+  );
+  if (!batch.length) return;
+  snapRoadBatches.push(batch);
+  if (snapRoadBatches.length > SNAP_ROAD_BATCH_LIMIT) snapRoadBatches.shift();
+  rebuildSnapRoads();
+}
+
+function rebuildSnapRoads() {
+  let all = snapRoadBatches.flat();
+  while (snapRoadBatches.length > 1 && all.length > SNAP_ROAD_MAX_FEATURES) {
+    snapRoadBatches.shift();
+    all = snapRoadBatches.flat();
+  }
+  snapRoads = all;
+  // Tiles are cached, so a re-warmed tile hands back the very same feature
+  // objects: identity is enough to keep the set free of duplicates.
+  snapRoadSeen = new Set(all);
+  snapRoadIndex = indexSnapRoads(all);
 }
 
 function snapHit(lat, lng, heading, maxDist = MAX_SNAP_M) {
@@ -16118,6 +16114,12 @@ function alignTrailToRoadsLocal(latlngs, breakOpts = {}) {
   // invented as a line across a block.
   const snapNear = staffs ? 180 : 160;
   const snapFar = staffs ? 320 : 280;
+  // A recorded fix that no road matches is still the truth about where the bus
+  // was, so it is kept (within a plausible step) rather than thrown away.
+  // Dropping it shredded long journeys - AT1-AT3 Alton Towers to Fenton - into
+  // fragments whose surviving ends were then joined by straight chords.
+  const keepUnsnapped = !breakOpts.plannedRoute;
+  const UNSNAPPED_KEEP_M = 140;
   const inputSegs = splitLatLngsByGaps(latlngs, limits.gapM, breakOpts);
   // The grid index makes each snap a local lookup, so a long tail can be matched
   // in full — that is what keeps it on the carriageway instead of bridging gaps.
@@ -16142,8 +16144,15 @@ function alignTrailToRoadsLocal(latlngs, breakOpts = {}) {
       let hit = snapHit(cur[0], cur[1], heading, snapNear) || snapHit(cur[0], cur[1], heading, snapFar);
       if (hit && cur[3] != null && Number.isFinite(Number(cur[3]))) hit = { ...hit, t: Number(cur[3]) };
       if (!hit) {
-        if (out.length >= 2) {
-          alignedSegs.push(out.slice());
+        const last = out[out.length - 1];
+        const keep =
+          keepUnsnapped &&
+          last &&
+          haversineMeters(last[0], last[1], cur[0], cur[1]) <= UNSNAPPED_KEEP_M;
+        if (keep) {
+          out.push([cur[0], cur[1]]);
+        } else {
+          if (out.length >= 2) alignedSegs.push(out.slice());
           out.length = 0;
         }
         prevHit = null;
@@ -16634,7 +16643,7 @@ async function ensureSnapRoadsForBounds(bounds, signal) {
     tiles.map((tile) => decodeRoadTile(template, tile.z, tile.x, tile.y, signal)),
   );
   if (signal?.aborted) return;
-  setSnapRoads(decoded.flat());
+  mergeSnapRoads(decoded.flat());
 }
 
 async function ensureSnapRoadsForPath(latlngs, signal) {
