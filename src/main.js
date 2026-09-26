@@ -6,6 +6,7 @@ import { createFleetBrowser, isSchoolBusLive, isStokeFcShuttleLive, isStokeFcLin
 import { normalizeUkFeedTimestamp, isSimonNoteActive } from "./time.js";
 import { setupPlus, isPlus, requirePlus, syncPlusFromAccount } from "./plus.js";
 import { getUser } from "./auth.js";
+import { createLongtonCamera } from "./longton-camera.js";
 import {
   atStopsInBounds,
   atStopByAtco,
@@ -12717,6 +12718,8 @@ let cameraGalleryLoaded = false;
 let cameraGallerySig = "";
 let camerasRefreshTimer = null;
 let camerasRefreshBusy = false;
+/** Built on first open of the Cameras tab; see syncCameraGalleryPolling. */
+let longtonCamera = null;
 let camerasUpdatedAt = 0;
 const CAMERAS_REFRESH_MS = 30_000;
 
@@ -12888,6 +12891,18 @@ async function loadCameraGallery({ force = false, quiet = false } = {}) {
  */
 function syncCameraGalleryPolling() {
   const wanted = appTab === "cameras" && !document.hidden;
+  // The virtual camera over Longton lives on this tab too, so it follows the same
+  // on-screen rule. It is built once, lazily: the map container is display:none
+  // until the tab opens, and a Leaflet map created against a hidden element
+  // measures itself as zero and renders as a grey block.
+  if (wanted && !longtonCamera) {
+    longtonCamera = createLongtonCamera(document.getElementById("longton-camera"));
+  }
+  if (wanted) {
+    longtonCamera?.start();
+  } else {
+    longtonCamera?.stop();
+  }
   if (wanted && !camerasRefreshTimer) {
     // Catch up straight away rather than making someone who has just opened the
     // tab stare at a stale grid for half a minute.

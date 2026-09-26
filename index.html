@@ -249,6 +249,39 @@
           hidden
         >
           <div class="cameras-inner">
+            <section class="lcam" aria-labelledby="lcam-title">
+              <div class="lcam-head">
+                <h3 class="lcam-title" id="lcam-title">
+                  Longton town centre
+                  <span class="lcam-tag">virtual camera</span>
+                </h3>
+                <p class="lcam-where">The Strand / Market Street &middot; 1.2 km view</p>
+              </div>
+              <p class="lcam-disclaimer">
+                <strong>Not CCTV.</strong> There is no public camera feed for Longton, so this is
+                a fixed view drawn from live bus GPS positions &mdash; a map, not a photograph.
+                Nothing here is a picture of the street.
+              </p>
+              <div class="lcam-frame">
+                <div
+                  id="longton-camera"
+                  class="lcam-map"
+                  role="img"
+                  aria-label="Virtual camera over Longton town centre showing live bus positions on a map. This is not CCTV footage."
+                ></div>
+                <div class="lcam-overlay lcam-overlay-top">
+                  <span class="lcam-clock" data-lcam-clock>--:--:--</span>
+                  <span class="lcam-live"><span class="lcam-live-dot" aria-hidden="true"></span>live</span>
+                </div>
+                <div class="lcam-overlay lcam-overlay-bottom">
+                  <span class="lcam-countwrap">
+                    <strong data-lcam-count>0</strong> buses in view
+                  </span>
+                  <span class="lcam-updated">updated <span data-lcam-updated>--:--:--</span></span>
+                </div>
+              </div>
+              <p class="lcam-status" data-lcam-status hidden></p>
+            </section>
             <header class="cameras-head">
               <h2 class="cameras-title">Coach camera photos</h2>
               <p class="cameras-sub">
