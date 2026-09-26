@@ -34,8 +34,14 @@ const ATTRIBUTION = "Camera imagery © National Highways (Crown copyright)";
 const NEAR_M = 250;
 /** Closer than this and the close-up is worth trusting. */
 const CLOSE_M = 150;
-/** Two frames this far apart, so a moving vehicle can be seen to move. */
-const FRAME_GAP_MS = 12_000;
+/**
+ * Two frames this far apart. The camera publishes a new picture roughly every
+ * 30 seconds, so anything shorter compares a frame with itself: in stopped or
+ * slow traffic nothing appears to move and every shot gets thrown out as "no
+ * motion". Thirty seconds is also long enough for a coach at 60mph to cover
+ * 500m, which is what makes the movement check work at all.
+ */
+const FRAME_GAP_MS = 30_000;
 /** Ignore a coach that is clearly driving away from the camera. */
 const RECEDING_M = 30;
 /** Never re-capture the same coach more often than this. */

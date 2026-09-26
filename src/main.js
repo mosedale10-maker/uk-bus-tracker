@@ -12260,6 +12260,20 @@ const CAMERA_DIFF_W = 120;
 const CAMERA_DIFF_H = 90;
 const cameraCropCache = new Map();
 
+/*
+ * Tried and rejected: matching the coach's livery colour in the picture. Grey
+ * tarmac sits within any sane tolerance of National Express navy, so road
+ * surface scored an 80% "livery match" while a real white coach scored 0.25%
+ * white - the test rejected genuine sightings and passed the road. At 720x576
+ * with JPEG chroma subsampling, colour is not a usable signal.
+ *
+ * What is left is shape. A coach crossing the frame between two shots leaves a
+ * long streak; a car leaves a short one. That at least separates "a long
+ * vehicle went past" from "a queue of cars shuffled", which is the most this
+ * feed can honestly support.
+ */
+const COACH_STREAK_MIN_AR = 1.6;
+
 function loadFrameCanvas(url, w, h) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -12342,19 +12356,16 @@ async function cameraMotionCrop(frameA, frameB) {
   if (covered > 0.55) return null;
 
   /*
-   * Only treat this as "a vehicle moved" if the change is where a vehicle would
-   * be: on the carriageway, in the lower part of the picture, and shaped like a
-   * blob rather than a band across the whole frame. Wind in the trees, rain, or
-   * a headlight flare all change pixels too, and cropping one of those would put
-   * a meaningless close-up on the card.
+   * Decide whether this looks like a long vehicle going past, rather than
+   * weather, glare or a queue of cars shuffling. Traffic can sit high in the
+   * frame when it is far up the road, so the only rejections are the sky and a
+   * change spread across the whole picture.
    */
-  const boxTop = y0 / rows;
-  const boxLeft = x0 / cols;
   const boxW = (x1 - x0 + 1) / cols;
   const boxH = (y1 - y0 + 1) / rows;
-  const onCarriageway = boxTop >= 0.3;
-  const blobLike = boxW <= 0.7 && boxH <= 0.6;
-  if (!onCarriageway || !blobLike) return "nothing-on-road";
+  if (y0 / rows < 0.12) return "nothing-in-view";
+  if (boxW > 0.85) return "nothing-in-view";
+  if (boxW / Math.max(boxH, 1 / rows) < COACH_STREAK_MIN_AR) return "short-vehicle";
 
   // Map the block box back to full resolution and give it room around the change.
   const sx = a.width / CAMERA_DIFF_W;
@@ -12385,7 +12396,7 @@ async function cameraMotionCrop(frameA, frameB) {
   octx.imageSmoothingEnabled = true;
   octx.imageSmoothingQuality = "high";
   octx.drawImage(full.canvas, left, top, w, h, 0, 0, out.width, out.height);
-  return out.toDataURL("image/jpeg", 0.82);
+  return { dataUrl: out.toDataURL("image/jpeg", 0.82), streak: boxW / Math.max(boxH, 1 / rows) };
 }
 
 /**
@@ -12411,30 +12422,31 @@ async function paintCameraCrop(host, frames) {
   const key = frames.join("|");
   let work = cameraCropCache.get(key);
   if (!work) {
-    work = cameraMotionCrop(frames[0], frames[1]).catch(() => "nothing-on-road");
+    work = cameraMotionCrop(frames[0], frames[1]).catch(() => "nothing-in-view");
     cameraCropCache.set(key, work);
   }
-  const dataUrl = await work;
+  const result = await work;
   if (!host.isConnected) return;
-  if (!dataUrl || dataUrl === "nothing-on-road") {
-    // Say so rather than pasting a crop of nothing.
-    const note = host.querySelector(".popup-camera-crop-note");
-    if (note) {
-      note.hidden = false;
-      note.textContent = "nothing in view moved enough to photograph";
-    }
+  const note = host.querySelector(".popup-camera-crop-note");
+  const say = (text) => {
+    if (!note) return;
+    note.hidden = false;
+    note.textContent = text;
+  };
+  if (!result || typeof result === "string") {
+    say(
+      result === "short-vehicle"
+        ? "only short vehicles moved in view - no coach-length streak"
+        : "nothing in view moved enough to photograph",
+    );
     return;
   }
   const img = document.createElement("img");
   img.className = "popup-camera-crop-img";
-  img.alt = "Close-up of the part of the camera view that changed between the two frames";
-  img.src = dataUrl;
-  const note = host.querySelector(".popup-camera-crop-note");
+  img.alt = "Close-up of the camera view where a long vehicle moved between the two frames";
+  img.src = result.dataUrl;
   host.prepend(img);
-  if (note) {
-    note.hidden = false;
-    note.textContent = "close-up of what moved on the carriageway between the two frames";
-  }
+  say("close-up of a long vehicle that moved between the two frames");
 }
 
 /**
