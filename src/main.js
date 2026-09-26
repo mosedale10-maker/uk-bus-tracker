@@ -7547,6 +7547,40 @@ async function hydrateLiveTrailFromServer(key) {
     const pts = trailMem.get(String(k)) || [];
     if (pts.length) merged = mergeTrailPoints(merged, pts);
   }
+
+  // Last resort: some vehicles are only recorded under a key we cannot guess from
+  // the live marker (fleet-number keys, opaque staff refs). Ask the server which
+  // keys this route/operator actually holds and take the first that has points, so
+  // no bus ends up with no tail at all.
+  if (merged.length < 2) {
+    const line = String(bus?.service?.line_name || extra.line || "").trim();
+    const op = String(extra.operatorNoc || trailOperatorForBus(bus) || "").trim();
+    const params = new URLSearchParams({ days: "2" });
+    if (line) params.set("lines", line);
+    if (op) params.set("operators", op);
+    if (line || op) {
+      try {
+        const res = await fetch(`/api/trails/keys?${params}`);
+        const data = res.ok ? await res.json() : null;
+        const candidates = (data?.keys || [])
+          .map((row) => (typeof row === "string" ? row : row?.key || ""))
+          .filter(Boolean)
+          .filter((k) => !keys.includes(k))
+          .slice(0, 12);
+        if (candidates.length) {
+          await fetchServerTrailsChunked(candidates, { force: true });
+          for (const k of candidates) {
+            if (merged.length >= 2) break;
+            const pts = trailMem.get(String(k)) || [];
+            if (pts.length) merged = mergeTrailPoints(merged, pts);
+          }
+        }
+      } catch {
+        /* keep whatever we have */
+      }
+    }
+  }
+
   if (merged.length) trailMem.set(id, merged);
   if (String(liveTrailKey) === id) refreshLiveTrailLine(id);
 }
