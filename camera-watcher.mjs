@@ -70,8 +70,21 @@ const CAPTURE_INTERVAL_MS = 60 * 1000;
 const MAX_SHOTS_PER_COACH = 12;
 /** Stop following a coach once it has been away from the cameras this long. */
 const RUN_IDLE_MS = 45 * 60 * 1000;
-/** Snapshots older than this are deleted rather than shown. */
-const SNAPSHOT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+/**
+ * How long a captured photo is kept on disk and offered in the gallery: 5 days.
+ *
+ * This is deliberately not the same number as SNAPSHOT_FRESH_MS below. Keeping a
+ * photo for five days and calling it the coach's *current* camera are different
+ * claims - a coach photographed at a junction on Tuesday is history, and the bus
+ * card must not present it as where the coach is now.
+ */
+const SNAPSHOT_KEEP_MS = 5 * 24 * 60 * 60 * 1000;
+/**
+ * How recent a photo must be before the bus card will show it as the coach's
+ * current camera view. Anything older is still in the gallery, just not on the
+ * card, because a coach not seen for six hours is not being tracked right now.
+ */
+const SNAPSHOT_FRESH_MS = 6 * 60 * 60 * 1000;
 /** Coaches are polled for live positions on this cadence. */
 const POLL_MS = 30 * 1000;
 const FETCH_TIMEOUT_MS = 10_000;
@@ -219,7 +232,7 @@ function pruneOldSnapshots(now) {
     } catch {
       continue;
     }
-    if (age > SNAPSHOT_MAX_AGE_MS) {
+    if (age > SNAPSHOT_KEEP_MS) {
       try {
         unlinkSync(full);
       } catch {
@@ -228,7 +241,7 @@ function pruneOldSnapshots(now) {
     }
   }
   for (const [reg, snap] of snapshots) {
-    if (now - snap.takenAt > SNAPSHOT_MAX_AGE_MS) {
+    if (now - snap.takenAt > SNAPSHOT_KEEP_MS) {
       snapshots.delete(reg);
       for (const ext of ["jpg", "json"]) {
         try {
@@ -247,7 +260,7 @@ export function cameraSnapshotFor(reg, now = Date.now()) {
   if (!key) return null;
   const snap = snapshots.get(key);
   if (!snap) return null;
-  if (now - snap.takenAt > SNAPSHOT_MAX_AGE_MS) return null;
+  if (now - snap.takenAt > SNAPSHOT_FRESH_MS) return null;
   return snap;
 }
 
