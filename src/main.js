@@ -15510,6 +15510,76 @@ function placeOnRoad(marker, snapped) {
   keepFollowedInView(marker);
 }
 
+/**
+ * Spatial index over the decoded road segments.
+ *
+ * Scanning every road segment for every GPS point is O(points × segments) and
+ * froze the map on long runs. Indexing each segment into ~150m cells turns a snap
+ * into a short local lookup, so a whole tail can be matched against real roads
+ * fast enough that the tail can stay on them.
+ */
+const SNAP_CELL_DEG = 0.002; // ~140m lat / ~110m lng at UK latitudes
+let snapRoadIndex = new Map();
+
+function indexSnapRoads(roads) {
+  const index = new Map();
+  for (const road of roads || []) {
+    const pts = road?.latlngs;
+    if (!Array.isArray(pts) || pts.length < 2) continue;
+    for (let i = 0; i < pts.length - 1; i += 1) {
+      const a = pts[i];
+      const b = pts[i + 1];
+      if (!Number.isFinite(a?.[0]) || !Number.isFinite(b?.[0])) continue;
+      const minLat = Math.min(a[0], b[0]);
+      const maxLat = Math.max(a[0], b[0]);
+      const minLng = Math.min(a[1], b[1]);
+      const maxLng = Math.max(a[1], b[1]);
+      for (let cx = Math.floor(minLng / SNAP_CELL_DEG); cx <= Math.floor(maxLng / SNAP_CELL_DEG); cx += 1) {
+        for (let cy = Math.floor(minLat / SNAP_CELL_DEG); cy <= Math.floor(maxLat / SNAP_CELL_DEG); cy += 1) {
+          const key = `${cx}:${cy}`;
+          let bucket = index.get(key);
+          if (!bucket) {
+            bucket = [];
+            index.set(key, bucket);
+          }
+          bucket.push({ road, i });
+        }
+      }
+    }
+  }
+  return index;
+}
+
+/** Road segments within `radiusM` of a point, straight off the grid. */
+function snapCandidatesNear(lat, lng, radiusM) {
+  if (!snapRoadIndex.size) return null;
+  const latPad = radiusM / 111320;
+  const lngPad = radiusM / (111320 * Math.max(0.2, Math.cos((lat * Math.PI) / 180)));
+  const x0 = Math.floor((lng - lngPad) / SNAP_CELL_DEG);
+  const x1 = Math.floor((lng + lngPad) / SNAP_CELL_DEG);
+  const y0 = Math.floor((lat - latPad) / SNAP_CELL_DEG);
+  const y1 = Math.floor((lat + latPad) / SNAP_CELL_DEG);
+  const out = [];
+  const seen = new Set();
+  for (let cx = x0; cx <= x1; cx += 1) {
+    for (let cy = y0; cy <= y1; cy += 1) {
+      const bucket = snapRoadIndex.get(`${cx}:${cy}`);
+      if (!bucket) continue;
+      for (const entry of bucket) {
+        if (seen.has(entry)) continue;
+        seen.add(entry);
+        out.push(entry);
+      }
+    }
+  }
+  return out;
+}
+
+function setSnapRoads(roads) {
+  snapRoads = Array.isArray(roads) ? roads : [];
+  snapRoadIndex = indexSnapRoads(snapRoads);
+}
+
 function snapHit(lat, lng, heading, maxDist = MAX_SNAP_M) {
   const roads = roadsForSnap();
   if (!roads.length) return null;
@@ -15517,30 +15587,37 @@ function snapHit(lat, lng, heading, maxDist = MAX_SNAP_M) {
   let best = null;
   let bestScore = Infinity;
   const pad = 0.0016;
-  for (const road of roads) {
+  const consider = (road, i) => {
     if (
       lat < road.bbox.minLat - pad ||
       lat > road.bbox.maxLat + pad ||
       lng < road.bbox.minLng - pad ||
       lng > road.bbox.maxLng + pad
     ) {
-      continue;
+      return;
     }
     const pts = road.latlngs;
-    for (let i = 0; i < pts.length - 1; i += 1) {
-      const hit = closestOnSegment(p, pts[i], pts[i + 1]);
-      if (hit.dist > maxDist) continue;
-      let score = hit.dist;
-      if (Number.isFinite(heading)) {
-        const diff = Math.min(angleDiff(heading, hit.bearing), angleDiff(heading, hit.bearing + 180));
-        if (diff > 70 && hit.dist > 14) continue;
-        score += diff * 0.18;
-      }
-      if (road.class === "service" || road.class === "track") score += 8;
-      if (score < bestScore) {
-        bestScore = score;
-        best = { ...hit, limitMph: road.limitMph, road, i };
-      }
+    if (!pts[i] || !pts[i + 1]) return;
+    const hit = closestOnSegment(p, pts[i], pts[i + 1]);
+    if (hit.dist > maxDist) return;
+    let score = hit.dist;
+    if (Number.isFinite(heading)) {
+      const diff = Math.min(angleDiff(heading, hit.bearing), angleDiff(heading, hit.bearing + 180));
+      if (diff > 70 && hit.dist > 14) return;
+      score += diff * 0.18;
+    }
+    if (road.class === "service" || road.class === "track") score += 8;
+    if (score < bestScore) {
+      bestScore = score;
+      best = { ...hit, limitMph: road.limitMph, road, i };
+    }
+  };
+  const candidates = snapCandidatesNear(lat, lng, Math.max(maxDist, 60) + 60);
+  if (candidates && candidates.length) {
+    for (const entry of candidates) consider(entry.road, entry.i);
+  } else {
+    for (const road of roads) {
+      for (let i = 0; i < road.latlngs.length - 1; i += 1) consider(road, i);
     }
   }
   if (!best) return null;
@@ -15562,21 +15639,29 @@ function nextRoadSegment(pos, heading, fromRoad, fromI) {
   const roads = roadsForSnap();
   let best = null;
   let bestScore = Infinity;
-  for (const road of roads) {
+  const consider = (road, i) => {
     const pts = road.latlngs;
-    for (let i = 0; i < pts.length - 1; i += 1) {
-      if (road === fromRoad && i === fromI) continue;
-      const hit = closestOnSegment([pos.lat, pos.lng], pts[i], pts[i + 1]);
-      if (hit.dist > JUNCTION_M) continue;
-      const dFwd = angleDiff(heading, hit.bearing);
-      const dRev = angleDiff(heading, hit.bearing + 180);
-      const align = Math.min(dFwd, dRev);
-      if (align > 78) continue;
-      const score = hit.dist + align * 0.35;
-      if (score < bestScore) {
-        bestScore = score;
-        best = { road, i, forward: dFwd <= dRev, lat: hit.lat, lng: hit.lng, heading: dFwd <= dRev ? hit.bearing : (hit.bearing + 180) % 360 };
-      }
+    if (road === fromRoad && i === fromI) return;
+    if (!pts[i] || !pts[i + 1]) return;
+    const hit = closestOnSegment([pos.lat, pos.lng], pts[i], pts[i + 1]);
+    if (hit.dist > JUNCTION_M) return;
+    const dFwd = angleDiff(heading, hit.bearing);
+    const dRev = angleDiff(heading, hit.bearing + 180);
+    const align = Math.min(dFwd, dRev);
+    if (align > 78) return;
+    const score = hit.dist + align * 0.35;
+    if (score < bestScore) {
+      bestScore = score;
+      best = { road, i, forward: dFwd <= dRev, lat: hit.lat, lng: hit.lng, heading: dFwd <= dRev ? hit.bearing : (hit.bearing + 180) % 360 };
+    }
+  };
+  // Junctions are always local, so one small ring of cells around the point is enough.
+  const candidates = snapCandidatesNear(pos.lat, pos.lng, JUNCTION_M + 40);
+  if (candidates && candidates.length) {
+    for (const entry of candidates) consider(entry.road, entry.i);
+  } else {
+    for (const road of roads) {
+      for (let i = 0; i < road.latlngs.length - 1; i += 1) consider(road, i);
     }
   }
   return best;
@@ -15778,15 +15863,15 @@ function alignTrailToRoadsLocal(latlngs, breakOpts = {}) {
     isStaffsTrailOperator(breakOpts.operator) ||
     isAltonLine(breakOpts.line);
   // A wide snap radius is what makes a tail drift over buildings: a fix 300m away
-  // still "finds" a road, just the wrong one. Stay close to the carriageway and
-  // drop anything further out rather than inventing a line across a block.
-  const snapNear = staffs ? 200 : 180;
-  const snapFar = staffs ? 320 : 300;
+  // still "finds" a road, just the wrong one. With the grid index these tight
+  // radii are affordable, and anything further out is dropped rather than
+  // invented as a line across a block.
+  const snapNear = staffs ? 120 : 110;
+  const snapFar = staffs ? 200 : 180;
   const inputSegs = splitLatLngsByGaps(latlngs, limits.gapM, breakOpts);
-  // Snapping is O(points × roads) on the main thread, so the input must stay
-  // bounded or the whole map locks up. 1,200 fixes is still ~2 fixes per second
-  // over a long journey — plenty to follow the carriageway without freezing.
-  const MAX_SNAP_INPUT = 1200;
+  // The grid index makes each snap a local lookup, so a long tail can be matched
+  // in full — that is what keeps it on the carriageway instead of bridging gaps.
+  const MAX_SNAP_INPUT = 3000;
   const sourceSegs = (inputSegs.length ? inputSegs : [latlngs]).map((seg) => {
     if (seg.length <= MAX_SNAP_INPUT) return seg;
     const step = Math.ceil(seg.length / MAX_SNAP_INPUT);
@@ -16256,7 +16341,7 @@ async function ensureSnapRoadsForBounds(bounds, signal) {
     tiles.map((tile) => decodeRoadTile(template, tile.z, tile.x, tile.y, signal)),
   );
   if (signal?.aborted) return;
-  snapRoads = decoded.flat();
+  setSnapRoads(decoded.flat());
 }
 
 async function ensureSnapRoadsForPath(latlngs, signal) {
@@ -16448,7 +16533,7 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
 
 async function ensureSnapRoads(signal) {
   if (map.getZoom() < MIN_ZOOM) {
-    snapRoads = [];
+    setSnapRoads([]);
     snapRoadsKey = "";
     snapRoadsAt = 0;
     return false;
@@ -16469,7 +16554,7 @@ async function ensureSnapRoads(signal) {
     tiles.map((tile) => decodeRoadTile(template, tile.z, tile.x, tile.y, signal)),
   );
   if (signal?.aborted) return;
-  snapRoads = decoded.flat();
+  setSnapRoads(decoded.flat());
   snapRoadsKey = key;
   snapRoadsAt = Date.now();
   return true;
