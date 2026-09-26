@@ -5281,6 +5281,48 @@ function trailPairNeedsRoadMatch(breakOpts = {}, opts = {}) {
 }
 
 /**
+ * TEMPORARY diagnostic (?traildiag=1): shows which path a tail came from and how
+ * many points it had, so the un-snapped source can be identified in one load.
+ * Remove once the source is fixed.
+ */
+function trailDiagEnabled() {
+  try {
+    return new URLSearchParams(location.search).has("traildiag");
+  } catch {
+    return false;
+  }
+}
+
+function recordTrailDiag(stage, data = {}) {
+  if (!trailDiagEnabled()) return;
+  const state = (window.__trailDiag = window.__trailDiag || { events: [] });
+  const entry = { stage, at: new Date().toISOString().slice(11, 19), ...data };
+  state.events.push(entry);
+  if (state.events.length > 40) state.events.shift();
+  state.last = entry;
+  let el = document.getElementById("trail-diag");
+  if (!el) {
+    el = document.createElement("pre");
+    el.id = "trail-diag";
+    el.style.cssText =
+      "position:fixed;left:8px;bottom:8px;z-index:99999;margin:0;padding:8px 10px;" +
+      "background:rgba(2,6,23,.92);color:#e2e8f0;font:11px/1.45 ui-monospace,monospace;" +
+      "border:1px solid #334155;border-radius:8px;max-width:520px;max-height:46vh;overflow:auto;white-space:pre-wrap";
+    document.body.appendChild(el);
+  }
+  el.textContent = state.events
+    .slice(-14)
+    .map((e) => {
+      const { stage, at, ...rest } = e;
+      const bits = Object.entries(rest)
+        .map(([k, v]) => `${k}=${typeof v === "number" ? v : JSON.stringify(v)}`)
+        .join(" ");
+      return `${at} ${stage.padEnd(14)} ${bits}`;
+    })
+    .join("\n");
+}
+
+/**
  * Last gate before anything is painted. Whatever produced the geometry — live
  * tail, pinned tail, replay, planned route or staff AVL — a line that is not
  * actually on the road is never drawn. This is the invariant that stops tails
@@ -5310,6 +5352,19 @@ function trailPathIsOnRoad(path, radiusM = 70, minRatio = 0.9) {
 function makeTrailPair(path, layer, opts = {}) {
   const breakOpts = trailPairBreakOpts(opts);
   const roadAligned = Boolean(opts.roadAligned);
+  recordTrailDiag("makePair", {
+    src: flattenTrailLatLngs(path).length,
+    gps: (opts.gpsPoints || []).length,
+    aligned: roadAligned,
+    roads: roadsForSnap().length,
+    onRoad: trailPathIsOnRoad(path),
+    planned: Boolean(breakOpts.plannedRoute),
+    guide: Boolean(breakOpts.plannedGuide),
+    actual: Boolean(breakOpts.actualRoute),
+    staffs: Boolean(breakOpts.staffs),
+    op: breakOpts.operator || "",
+    line: breakOpts.line || "",
+  });
   const latlngs =
     (trailPairNeedsRoadMatch(breakOpts, opts) && !roadAligned) || !trailPathIsOnRoad(path)
       ? []
@@ -6032,6 +6087,16 @@ function refreshPinnedTrailLine(key) {
     }
   }
   path = applyStaffsHanleyDiversion(path, { ...breakOpts, key: id });
+  recordTrailDiag("pinned", {
+    id: String(id).slice(0, 28),
+    gps: gpsPoints.length,
+    path: flattenTrailLatLngs(path).length,
+    roads: roadsForSnap().length,
+    live: Boolean(filter.live),
+    planned: Boolean(breakOpts.plannedRoute),
+    op: breakOpts.operator || "",
+    line: breakOpts.line || "",
+  });
   const existing = pinnedTrailLines.get(id);
   if (flattenTrailLatLngs(path).length < 2) {
     if (existing && (filter.live || filter.follow)) {
@@ -6189,6 +6254,16 @@ function refreshLiveTrailLine(key) {
   }
   // Show GPS immediately so the tail keeps following even when OSM match is slow/fails.
   const immediate = preferRoadMatchedTrail(path, [], breakOpts);
+  recordTrailDiag("live", {
+    key: String(key).slice(0, 28),
+    gps: gpsPoints.length,
+    path: flattenTrailLatLngs(path).length,
+    immediate: flattenTrailLatLngs(immediate).length,
+    roads: roadsForSnap().length,
+    op: breakOpts.operator || "",
+    line: breakOpts.line || "",
+    staffs: Boolean(breakOpts.staffs),
+  });
   if (!liveTrailLine) {
     liveTrailLine = makeTrailPair(immediate, liveTrailLayer, {
       gpsPoints,
@@ -16041,8 +16116,8 @@ function alignTrailToRoadsLocal(latlngs, breakOpts = {}) {
   // still "finds" a road, just the wrong one. With the grid index these tight
   // radii are affordable, and anything further out is dropped rather than
   // invented as a line across a block.
-  const snapNear = staffs ? 120 : 110;
-  const snapFar = staffs ? 200 : 180;
+  const snapNear = staffs ? 180 : 160;
+  const snapFar = staffs ? 320 : 280;
   const inputSegs = splitLatLngsByGaps(latlngs, limits.gapM, breakOpts);
   // The grid index makes each snap a local lookup, so a long tail can be matched
   // in full — that is what keeps it on the carriageway instead of bridging gaps.
@@ -16549,12 +16624,12 @@ async function ensureSnapRoadsForBounds(bounds, signal) {
   let z = Math.min(Math.max(map.getZoom(), 13), 14);
   if (span > 0.09) z = 12;
   let tiles = tilesForBounds(bounds, z);
-  const cap = z <= 12 ? 40 : 28;
+  const cap = z <= 12 ? 60 : 44;
   if (tiles.length > cap) {
     z = Math.max(11, z - 1);
     tiles = tilesForBounds(bounds, z);
   }
-  tiles = tiles.slice(0, z <= 12 ? 40 : 28);
+  tiles = tiles.slice(0, z <= 12 ? 60 : 44);
   const decoded = await Promise.all(
     tiles.map((tile) => decodeRoadTile(template, tile.z, tile.x, tile.y, signal)),
   );
@@ -16648,11 +16723,11 @@ async function prepareRoadTrail(latlngs, signal, breakOpts = {}) {
   if (trailAlignPending.has(key)) return trailAlignPending.get(key);
   const pending = (async () => {
     try {
-      // Warm the local road tiles in the background. Awaiting this froze the map
-      // on long runs (Alton Towers → Fenton is thousands of points), so the snap
-      // below runs on whatever roads are already cached and the next pass picks
-      // up the rest.
-      ensureSnapRoadsForPath(latlngs, signal).catch(() => {});
+      // Warm the local road tiles first. With the grid index the snap itself is
+      // cheap, so waiting briefly for coverage avoids snapping against a partial
+      // road set — that was dropping ~60% of fixes and leaving straight jumps.
+      const warm = ensureSnapRoadsForPath(latlngs, signal).catch(() => {});
+      await Promise.race([warm, new Promise((resolve) => setTimeout(resolve, 3000))]);
       const flat = Array.isArray(latlngs?.[0]?.[0]) ? latlngs.flat() : latlngs;
       let aligned = null;
       let segs = [];
