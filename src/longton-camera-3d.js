@@ -609,7 +609,17 @@ function buildBuildings(scene, camAt = [0, 0]) {
     plinth: new THREE.MeshLambertMaterial({ color: 0x6a6157 }),
     cornice: new THREE.MeshLambertMaterial({ color: 0xb9ac9a }),
     pipe: new THREE.MeshLambertMaterial({ color: 0x555049 }),
+    shopGlass: new THREE.MeshLambertMaterial({ color: 0x1d2a33 }),
   };
+  // Shop fascias are the one place a bit of colour is right: on a real high
+  // street they are the signage, and they are what your eye reads as "shops".
+  const fasciaMats = [
+    new THREE.MeshLambertMaterial({ color: 0x7a1f28 }),
+    new THREE.MeshLambertMaterial({ color: 0x1d3557 }),
+    new THREE.MeshLambertMaterial({ color: 0x14503c }),
+    new THREE.MeshLambertMaterial({ color: 0x3d2f6b }),
+  ];
+  const roofMatsShared = new THREE.MeshLambertMaterial({ color: 0x5c4438 });
   /*
    * One material per colour, and the texture is generated only when a new colour
    * appears. Passing a factory rather than a texture matters: 239 buildings share
@@ -706,17 +716,17 @@ function buildBuildings(scene, camAt = [0, 0]) {
       group.add(roofMesh);
 
       /*
-       * The bits that make a box read as a building rather than a block.
-       *
-       * Windows are in the wall texture, but at street distance the texture is a
-       * wash and what actually gives a building away is its silhouette: a base
-       * it stands on, a lip at the top, and a downpipe breaking the corner.
-       * Those are geometry, so they survive at any distance and in flat light.
-       *
-       * Deliberately only three elements per building. Sills, lintels and
-       * gutters were considered and dropped: below about two pixels each they
-       * cost a draw call per building and cannot be seen.
+       * Detail is only worth paying for where it can be seen. A plinth or a
+       * shopfront on a building 300m away is under a pixel, but it is still a
+       * draw call every frame, so buildings beyond DETAIL_REACH get a plain
+       * wall and a plain roof and nothing else.
        */
+      const distToCamera = Math.hypot(
+        ring[0][0] - camAt[0],
+        ring[0][1] - camAt[1],
+      );
+      const detailed = distToCamera < DETAIL_REACH;
+
       if (h > 3.2) {
         // Plinth: a wider, darker base course.
         const plinth = new THREE.Mesh(
@@ -750,13 +760,52 @@ function buildBuildings(scene, camAt = [0, 0]) {
             nearestCorner = p;
           }
         }
-        const pipe = new THREE.Mesh(
-          new THREE.BoxGeometry(0.16, h - 0.5, 0.16),
-          trimMats.pipe,
-        );
+        const pipe = new THREE.Mesh(new THREE.BoxGeometry(0.16, h - 0.5, 0.16), trimMats.pipe);
         pipe.position.set(nearestCorner[0] * 1.014, (h - 0.5) / 2 + 0.1, nearestCorner[1] * 1.014);
         pipe.castShadow = true;
         group.add(pipe);
+      }
+
+      /*
+       * A shopfront, which is what actually makes a British high street read as
+       * one. A glazed front across the whole ground floor with a painted fascia
+       * band above it, and a door pushed back into it. The Strand is a shopping
+       * street, so this is the single highest-value thing to model.
+       */
+      const isShop = kind === "retail" || kind === "commercial" || kind === "supermarket" || kind === "pub";
+      if (detailed && isShop && h > 4) {
+        const span = Math.max(...ring.map(([x, z]) => Math.hypot(x, z))) * 2;
+        if (span > 4) {
+          const shopH = Math.min(3.4, h * 0.62);
+          const shop = new THREE.Mesh(
+            new THREE.BoxGeometry(span * 1.006, shopH, span * 1.006),
+            trimMats.shopGlass,
+          );
+          shop.position.y = 0.35 + shopH / 2;
+          group.add(shop);
+          const fascia = new THREE.Mesh(
+            new THREE.BoxGeometry(span * 1.02, 0.72, span * 1.02),
+            fasciaMats[seed % fasciaMats.length],
+          );
+          fascia.position.y = 0.35 + shopH + 0.36;
+          fascia.castShadow = true;
+          group.add(fascia);
+        }
+      }
+
+      /*
+       * Pitched roofs for the houses. Almost everything on this street that is
+       * not a shop is a Victorian terrace or a cottage, and a flat slab where a
+       * pitched roof belongs is one of the clearest signs the model is wrong.
+       * Four triangles along the footprint's longest axis, as one mesh.
+       */
+      const isHouse = kind === "residential" || kind === "terrace" || kind === "house" || kind === "yes";
+      if (detailed && isHouse && h < 12) {
+        const pitch = buildPitchedRoof(ring, h, 1.7 + (seed % 5) * 0.18);
+        if (pitch) {
+          pitch.castShadow = true;
+          group.add(pitch);
+        }
       }
 
       built += 1;
@@ -826,6 +875,79 @@ function sunDirection(hour) {
     y: Math.max(30, Math.sin(altitude) * 320),
     z: Math.cos(altitude) * Math.cos(azimuth) * 320,
   };
+}
+
+/** Beyond this the facade detail is under a pixel, so it is not built at all. */
+const DETAIL_REACH = 130;
+
+/**
+ * A pitched roof over a footprint: a ridge along the longest axis with two
+ * slopes down to the eaves, built as one mesh of four triangles.
+ *
+ * The alternative - a flat cap on every building - is what makes a street of
+ * terraces look like a car park. Only the footprint's longest edge decides which
+ * way the ridge runs, which is right often enough for a row of houses and costs
+ * nothing to compute.
+ */
+function buildPitchedRoof(ring, wallTop, rise) {
+  if (ring.length < 3) return null;
+  let longest = null;
+  let longestLen = 0;
+  for (let i = 0; i < ring.length; i += 1) {
+    const a = ring[i];
+    const b = ring[(i + 1) % ring.length];
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (len > longestLen) {
+      longestLen = len;
+      longest = [a, b];
+    }
+  }
+  if (!longest || longestLen < 4) return null;
+
+  // Centre of the footprint, and the direction of the ridge.
+  let cx = 0;
+  let cz = 0;
+  for (const [x, z] of ring) {
+    cx += x;
+    cz += z;
+  }
+  cx /= ring.length;
+  cz /= ring.length;
+  const ux = (longest[1][0] - longest[0][0]) / longestLen;
+  const uz = (longest[1][1] - longest[0][1]) / longestLen;
+  // Perpendicular, for the eave offset.
+  const px = -uz;
+  const pz = ux;
+  const halfSpan = Math.max(2.2, Math.sqrt(
+    ring.reduce((m, [x, z]) => Math.max(m, Math.hypot(x - cx, z - cz)), 0),
+  ) + 0.35);
+
+  const ridgeY = wallTop + rise;
+  const a = [cx - ux * (longestLen / 2 + 0.3), wallTop, cz - uz * (longestLen / 2 + 0.3)];
+  const b = [cx + ux * (longestLen / 2 + 0.3), wallTop, cz + uz * (longestLen / 2 + 0.3)];
+  const r0 = [cx - ux * (longestLen / 2 + 0.3), ridgeY, cz - uz * (longestLen / 2 + 0.3)];
+  const r1 = [cx + ux * (longestLen / 2 + 0.3), ridgeY, cz + uz * (longestLen / 2 + 0.3)];
+  const e0 = [a[0] + px * halfSpan, wallTop - 0.35, a[2] + pz * halfSpan];
+  const e1 = [b[0] + px * halfSpan, wallTop - 0.35, b[2] + pz * halfSpan];
+  const f0 = [a[0] - px * halfSpan, wallTop - 0.35, a[2] - pz * halfSpan];
+  const f1 = [b[0] - px * halfSpan, wallTop - 0.35, b[2] - pz * halfSpan];
+
+  const pos = [];
+  const push = (p, q, r) => {
+    for (const v of [p, q, r]) pos.push(v[0], v[1], v[2]);
+  };
+  push(e0, e1, r1);
+  push(e0, r1, r0);
+  push(f1, f0, r0);
+  push(f1, r0, r1);
+  // Gable ends, so the roof is not open when seen from the side.
+  push(a, r0, f0);
+  push(b, f1, r1);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.computeVertexNormals();
+  return new THREE.Mesh(geo, roofMatsShared);
 }
 
 /**

@@ -365,6 +365,13 @@ ok("replaced geometry is disposed", /disposeTree/.test(mod));
  * something under two pixels.
  */
 ok("buildings get a plinth", /plinth/.test(mod));
+ok("shops get a glazed front and a fascia", /shopGlass/.test(mod) && /fasciaMats/.test(mod));
+ok("the fascia is coloured like real signage", fasciaColoursAreDistinct(mod));
+ok("houses get a pitched roof, not a flat slab", /buildPitchedRoof/.test(mod));
+ok("a pitched roof is one mesh, not four", /const pos = \[\];/.test(mod));
+ok("detail stops where it cannot be seen", /DETAIL_REACH/.test(mod) && /const detailed =/.test(mod));
+ok("the sky is only built once", (mod.match(/paintSky\(true\);/g) || []).length === 1,
+  `${(mod.match(/paintSky\(true\);/g) || []).length} calls`);
 ok("buildings get a cornice", /cornice/.test(mod));
 ok("buildings get a downpipe", /pipe/.test(mod));
 ok("the trim is only added to buildings tall enough to show it", /if \(h > 3\.2\)/.test(mod));
@@ -536,6 +543,13 @@ function pointSegDist(px, pz, a, b) {
   let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / len2;
   t = Math.max(0, Math.min(1, t));
   return Math.hypot(p[0] - (a[0] + dx * t), p[1] - (a[1] + dz * t));
+}
+
+/** Shop fascias should be more than one colour, or the street reads as one shop. */
+function fasciaColoursAreDistinct(source) {
+  const block = /const fasciaMats = \[([\s\S]*?)\];/.exec(source)?.[1] || "";
+  const colours = block.match(/0x[0-9a-f]{6}/gi) || [];
+  return new Set(colours).size >= 3;
 }
 
 console.log(failed ? `\n${failed} failure(s)` : "\nlongton 3D camera scene and data are sound");
