@@ -193,17 +193,71 @@ function buildScene(geo) {
   const chain = chainOf(strand.length ? strand : fallback);
   const view = chain.length >= 2 ? viewTowardExchange(chain, origin) : null;
 
+  /*
+   * Drop buildings that stand in the carriageway.
+   *
+   * Rendering the scene showed two buildings 1m and 2m from the camera's sight
+   * line, filling half the frame. Their mapped footprints reach across the road:
+   * the camera stands on the centreline of a 13m carriageway, so anything whose
+   * footprint gets within the road's own half-width is either mis-mapped or a
+   * building recorded before the road was laid out. Extruded as given, it becomes
+   * a wall in the middle of the street.
+   *
+   * A wall correctly positioned ON the kerb is at the half-width and is kept -
+   * that is a building that should be there. Only footprints that genuinely
+   * reach inside the carriageway go.
+   */
+  const corridors = roads.filter(
+    (r) => r.type !== "service" && r.type !== "footway" && r.type !== "path" && r.type !== "pedestrian",
+  );
+  let overlapping = 0;
+  const kept = [];
+  for (const b of buildings) {
+    let inside = false;
+    for (const road of corridors) {
+      const half = road.width / 2 - 0.5;
+      for (let i = 0; i < road.points.length - 1 && !inside; i += 1) {
+        for (const p of b.ring) {
+          if (pointSegDist(p, road.points[i], road.points[i + 1]) < half) {
+            inside = true;
+            break;
+          }
+        }
+      }
+      if (inside) break;
+    }
+    if (inside) {
+      overlapping += 1;
+      continue;
+    }
+    kept.push(b);
+  }
+  if (overlapping) {
+    console.log(`  dropped ${overlapping} building(s) whose footprints stand in the carriageway`);
+  }
+
   return {
     generated: new Date().toISOString(),
     source: "OpenStreetMap via Overpass API (ODbL)",
     imagery: "Esri World Imagery (aerial roof colours)",
     origin,
     bbox: BBOX,
-    counts: { roads: roads.length, buildings: buildings.length },
+    counts: { roads: roads.length, buildings: kept.length, droppedOverlapping: overlapping },
     camera: view,
     roads,
-    buildings,
+    buildings: kept,
   };
+}
+
+/** Shortest distance from a point to a line segment. */
+function pointSegDist(p, a, b) {
+  const dx = b[0] - a[0];
+  const dz = b[1] - a[1];
+  const l2 = dx * dx + dz * dz;
+  if (!l2) return Math.hypot(p[0] - a[0], p[1] - a[1]);
+  let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p[0] - (a[0] + dx * t), p[1] - (a[1] + dz * t));
 }
 
 /**
@@ -223,6 +277,11 @@ function buildScene(geo) {
  * have: you see the approach and the stand.
  */
 const STAND_BACK_M = 170;
+/**
+ * How far from the centreline the camera stands. The Strand is 13m wide, so its
+ * kerb is 6.5m out; 9m puts the camera on the footway, inboard of the buildings.
+ */
+const KERB_OFFSET_M = 9;
 
 function viewTowardExchange(points, origin) {
   // Nearest point on the chain to the scene origin.
@@ -251,6 +310,9 @@ function viewTowardExchange(points, origin) {
   const segLen = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
   let budget = STAND_BACK_M;
   let atPoint = at;
+  // Which chain segment we ended up on, so the kerb offset can use that
+  // segment's direction of travel.
+  let standIndex = bestI;
   for (let i = bestI; i < points.length - 1 && budget > 0; i += 1) {
     const len = segLen(points[i], points[i + 1]);
     if (len <= 0) continue;
@@ -261,20 +323,41 @@ function viewTowardExchange(points, origin) {
         points[i][0] + (points[i + 1][0] - points[i][0]) * t,
         points[i][1] + (points[i + 1][1] - points[i][1]) * t,
       ];
+      standIndex = i;
       budget = 0;
       break;
     }
     budget -= len;
+    standIndex = i + 1;
     atPoint = points[i + 1];
   }
 
   const lengthM = points.reduce((sum, p, i) => (i ? sum + dist(points[i - 1], p) : 0), 0);
+
+  /*
+   * Stand at the kerb, not in the middle of the road.
+   *
+   * Dead centre on a 13m carriageway puts the buildings on both sides equally in
+   * the way: rendering the scene showed a 9m retail block 8m from the camera
+   * filling half the frame, with two more 1-2m off the sight line. A real camera
+   * covering a bus station is on a bracket at the edge of the footway, not in the
+   * traffic. Offsetting to the kerb and angling back along the street is both more
+   * realistic and a much better composition.
+   */
+  const aheadIdx = Math.min(standIndex + 1, points.length - 1);
+  const dirX = points[aheadIdx][0] - atPoint[0];
+  const dirZ = points[aheadIdx][1] - atPoint[1];
+  const dirLen = Math.hypot(dirX, dirZ) || 1;
+  // Left-hand normal of the direction of travel: the near-side pavement.
+  const kerb = [atPoint[0] - (dirZ / dirLen) * KERB_OFFSET_M, atPoint[1] + (dirX / dirLen) * KERB_OFFSET_M];
+
   return {
-    at: [round(atPoint[0], 2), round(atPoint[1], 2)],
+    at: [round(kerb[0], 2), round(kerb[1], 2)],
     towards: [round(at[0], 2), round(at[1], 2)],
     along: points,
     lengthM: round(lengthM, 0),
-    standBackM: round(Math.hypot(atPoint[0] - at[0], atPoint[1] - at[1]), 0),
+    standBackM: round(Math.hypot(kerb[0] - at[0], kerb[1] - at[1]), 0),
+    kerbOffsetM: KERB_OFFSET_M,
     looksAt: "Longton Exchange",
   };
 }

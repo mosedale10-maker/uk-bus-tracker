@@ -91,20 +91,60 @@ if (cam) {
   ok("the camera has something in view", dist > 80, `${dist.toFixed(0)} m`);
   ok("the view is street-length, not a wall", dist < 900, `${dist.toFixed(0)} m`);
 
-  // Is the camera standing on a road? Every point within a road's half width of
-  // the camera means it is in the road, which is where a real camera would be
-  // mounted - on a bracket above it.
-  let onRoad = false;
+  // The camera should stand on the footway, not in the traffic. Dead centre on a
+  // 13m carriageway put a 9m shop 8m away filling half the frame, so the scene
+  // generator now offsets to the kerb. That makes "just outside the
+  // carriageway" the requirement - the opposite of the old assertion, which is
+  // why the test changed rather than being loosened.
   let nearest = Infinity;
+  let halfWidth = null;
   for (const r of scene.roads) {
     for (let i = 0; i < r.points.length - 1; i += 1) {
       const d = pointSegDist(cam.at[0], cam.at[1], r.points[i], r.points[i + 1]);
-      nearest = Math.min(nearest, d);
-      if (d <= r.width / 2 + 1) onRoad = true;
+      if (d < nearest) {
+        nearest = d;
+        halfWidth = r.width / 2;
+      }
     }
   }
-  ok("the camera is standing on a road", onRoad, `nearest road centreline ${nearest.toFixed(1)} m`);
-  ok("the camera is not floating in the countryside", nearest < 30, `${nearest.toFixed(1)} m`);
+  ok("the camera is beside a road, not in open country", nearest < 30, `${nearest.toFixed(1)} m`);
+  ok(
+    "the camera is on the footway, clear of the carriageway",
+    nearest > halfWidth,
+    `${nearest.toFixed(1)} m from the centreline, half-width ${halfWidth} m`,
+  );
+  ok("the camera is not absurdly far from the kerb", nearest - halfWidth < 6,
+    `${(nearest - halfWidth).toFixed(1)} m beyond the kerb`);
+
+  // And nothing should be standing IN the carriageway. Testing "near the sight
+  // line" was wrong once the camera moved to the footway: the sight line then
+  // runs past the kerb, so a building correctly standing at the kerb is 1m from
+  // it. What must not happen is a footprint reaching into the road it borders.
+  {
+    const corridors = scene.roads.filter(
+      (r) => !["service", "footway", "path", "pedestrian"].includes(r.type),
+    );
+    let inRoad = 0;
+    for (const b of scene.buildings) {
+      for (const road of corridors) {
+        const half = road.width / 2 - 0.5;
+        let hit = false;
+        for (let i = 0; i < road.points.length - 1 && !hit; i += 1) {
+          for (const [x, z] of b.ring) {
+            if (pointSegDist([x, z], road.points[i], road.points[i + 1]) < half) {
+              hit = true;
+              break;
+            }
+          }
+        }
+        if (hit) {
+          inRoad += 1;
+          break;
+        }
+      }
+    }
+    ok("no building footprint stands in a carriageway", inRoad === 0, `${inRoad} overlapping`);
+  }
 
   // Does it look ALONG the street rather than across it? A view across the road
   // would be pointed at a wall and would show nothing.
@@ -456,14 +496,25 @@ if (fs.existsSync(photoPath)) {
 ok("the accessible name says it is a model", /not CCTV footage/.test(html));
 ok("the scene is served without a build step", /longton-scene\.generated\.json/.test(mod));
 
+/** Shortest distance from a point to a segment. Accepts (x, z, a, b) or (p, a, b). */
 function pointSegDist(px, pz, a, b) {
+  let p;
+  if (Array.isArray(px)) {
+    p = px;
+    a = pz;
+    b = arguments[2];
+    px = p[0];
+    pz = p[1];
+  } else {
+    p = [px, pz];
+  }
   const dx = b[0] - a[0];
   const dz = b[1] - a[1];
   const len2 = dx * dx + dz * dz;
-  if (!len2) return Math.hypot(px - a[0], pz - a[1]);
-  let t = ((px - a[0]) * dx + (pz - a[1]) * dz) / len2;
+  if (!len2) return Math.hypot(p[0] - a[0], p[1] - a[1]);
+  let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / len2;
   t = Math.max(0, Math.min(1, t));
-  return Math.hypot(px - (a[0] + dx * t), pz - (a[1] + dz * t));
+  return Math.hypot(p[0] - (a[0] + dx * t), p[1] - (a[1] + dz * t));
 }
 
 console.log(failed ? `\n${failed} failure(s)` : "\nlongton 3D camera scene and data are sound");
