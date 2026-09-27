@@ -264,13 +264,20 @@ function buildGround(origin, extentM, uvBox) {
 }
 
 /**
- * Road surface, plus the markings and kerbs that make it read as a street.
+ * Road surface, markings and kerbs.
  *
- * Markings are drawn as thin unlit strips just above the tarmac rather than
- * baked into a texture, so they follow the real OSM geometry instead of a
- * guessed texture, and so they cost nothing to generate.
+ * IMPORTANT: the aerial photograph already contains the real road, with its real
+ * surface, its real painted lines, the real kerb and the shadows of whatever was
+ * standing there that day. Drawing an opaque grey road on top of it hides the
+ * single most convincing thing in the frame - the actual street - and replaces it
+ * with a diagram. So when the photograph is present, the road geometry is only
+ * used for a subtle kerb line and the tarmac and the markings are left off
+ * entirely; the photograph is the road.
+ *
+ * Without the photograph, the full stylised road is drawn, because a bare ground
+ * plane with no road is worse than a plain one.
  */
-function buildRoads(scene) {
+function buildRoads(scene, { withAerial }) {
   const group = new THREE.Group();
   const tarmac = { pos: [], uv: [] };
   const paint = { pos: [], uv: [] };
@@ -303,22 +310,19 @@ function buildRoads(scene) {
     for (let i = 0; i < road.points.length - 1; i += 1) {
       const [ax, az] = road.points[i];
       const [bx, bz] = road.points[i + 1];
-      push(tarmac, ax, az, bx, bz, half, 0);
-      // Kerb line each side, slightly proud of the tarmac.
-      push(kerb, ax, az, bx, bz, half + 0.28, 0.06);
-      if (big) {
-        // Centre line, dashed by drawing short runs.
+      if (!withAerial) push(tarmac, ax, az, bx, bz, half, 0);
+      // Kerb line each side, slightly proud. Kept even over the photograph: it is
+      // the one thing that reliably reads correctly in model geometry.
+      push(kerb, ax, az, bx, bz, half + 0.3, 0.05);
+      if (big && !withAerial) {
         const len = Math.hypot(bx - ax, bz - az);
-        const dash = 3;
-        const gap = 3;
-        const step = dash + gap;
+        const step = 6;
         for (let d = 0; d < len; d += step) {
           const t0 = d / len;
-          const t1 = Math.min(1, (d + dash) / len);
+          const t1 = Math.min(1, (d + 3) / len);
           push(paint, ax + (bx - ax) * t0, az + (bz - az) * t0,
             ax + (bx - ax) * t1, az + (bz - az) * t1, 0.09, 0.03);
         }
-        // Edge lines.
         for (const side of [1, -1]) {
           const ox = side * (half - 0.35);
           const dx = bx - ax;
@@ -340,13 +344,171 @@ function buildRoads(scene) {
     return new THREE.Mesh(geo, mat);
   };
 
-  group.add(mesh(tarmac, new THREE.MeshLambertMaterial({ color: 0x33383f })));
-  group.add(mesh(kerb, new THREE.MeshLambertMaterial({ color: 0x6b7078 })));
+  if (tarmac.pos.length) group.add(mesh(tarmac, new THREE.MeshLambertMaterial({ color: 0x33383f })));
+  if (kerb.pos.length) group.add(mesh(kerb, new THREE.MeshLambertMaterial({ color: 0x707680 })));
   if (paint.pos.length) {
-    // Unlit: paint is retroreflective and stays bright whatever the sun is doing.
     group.add(mesh(paint, new THREE.MeshBasicMaterial({ color: 0xe8e6df })));
   }
   return group;
+}
+
+/**
+ * Street furniture: lamp posts and trees along the pavement edge.
+ *
+ * A street with nothing standing on it reads as a model no matter how good the
+ * buildings are. Lamp posts are the cheapest possible win: one thin cylinder and
+ * a head, instanced down both sides of the main street, and the eye reads scale
+ * and depth immediately.
+ */
+function buildStreetFurniture(scene) {
+  const group = new THREE.Group();
+  const SPACING = 26;
+  const postGeo = new THREE.CylinderGeometry(0.11, 0.15, 8, 6);
+  const postMat = new THREE.MeshLambertMaterial({ color: 0x2f343a });
+  const headGeo = new THREE.SphereGeometry(0.32, 8, 6);
+  const headMat = new THREE.MeshBasicMaterial({ color: 0xffe9b8 });
+  const trunkGeo = new THREE.CylinderGeometry(0.18, 0.26, 3.4, 6);
+  const trunkMat = new THREE.MeshLambertMaterial({ color: 0x4a3a2c });
+  const crownGeo = new THREE.IcosahedronGeometry(2.1, 0);
+  const crownMat = new THREE.MeshLambertMaterial({ color: 0x3f5c34 });
+
+  const mainRoads = scene.roads.filter(
+    (r) => r.type === "primary" || r.type === "secondary" || r.type === "tertiary",
+  );
+  let lamps = 0;
+  let trees = 0;
+  for (const road of mainRoads) {
+    const half = road.width / 2;
+    for (let i = 0; i < road.points.length - 1; i += 1) {
+      const [ax, az] = road.points[i];
+      const [bx, bz] = road.points[i + 1];
+      const dx = bx - ax;
+      const dz = bz - az;
+      const len = Math.hypot(dx, dz);
+      if (len < SPACING) continue;
+      const ux = dx / len;
+      const uz = dz / len;
+      const nx = -uz;
+      const nz = ux;
+      for (let d = SPACING / 2; d < len; d += SPACING) {
+        const px = ax + ux * d;
+        const pz = az + uz * d;
+        const side = lamps % 2 === 0 ? 1 : -1;
+        const ox = px + nx * (half + 1.4) * side;
+        const oz = pz + nz * (half + 1.4) * side;
+        const post = new THREE.Mesh(postGeo, postMat);
+        post.position.set(ox, 4, oz);
+        post.castShadow = true;
+        group.add(post);
+        const head = new THREE.Mesh(headGeo, headMat);
+        head.position.set(ox, 8.2, oz);
+        group.add(head);
+        lamps += 1;
+        // One tree in four gaps, opposite side, so the street is not a corridor
+        // of identical posts.
+        if (lamps % 4 === 0) {
+          const tx = px + nx * (half + 2.2) * -side;
+          const tz = pz + nz * (half + 2.2) * -side;
+          const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+          trunk.position.set(tx, 1.7, tz);
+          trunk.castShadow = true;
+          group.add(trunk);
+          const crown = new THREE.Mesh(crownGeo, crownMat);
+          crown.position.set(tx, 4.6, tz);
+          crown.castShadow = true;
+          group.add(crown);
+          trees += 1;
+        }
+      }
+    }
+  }
+  group.userData = { lamps, trees };
+  return group;
+}
+
+/**
+ * A wall texture: brick courses with window openings.
+ *
+ * Flat-coloured boxes are the clearest tell that a thing is a model, and 239
+ * buildings of them made the street look like a diagram. This draws a patch of
+ * wall instead, generated on a canvas so it needs no download.
+ *
+ * The patch represents TEXTURE_M metres of wall, and the UVs are scaled to match,
+ * so a window is a window's real size whatever the building's dimensions. That
+ * matters: a texture tiled at the wrong scale gives you two-metre windows, which
+ * looks worse than no windows at all.
+ */
+const TEXTURE_M = 4.5;
+
+function makeWallTexture(baseColor) {
+  const S = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = S;
+  canvas.height = S;
+  const ctx = canvas.getContext("2d");
+
+  const base = new THREE.Color(baseColor);
+  const toCss = (c, f = 1) =>
+    `rgb(${Math.round(Math.min(255, c.r * 255 * f))},${Math.round(Math.min(255, c.g * 255 * f))},${Math.round(Math.min(255, c.b * 255 * f))})`;
+
+  ctx.fillStyle = toCss(base);
+  ctx.fillRect(0, 0, S, S);
+
+  // Brick courses. Brick is about 75mm high, so at 4.5m over 256px there are
+  // roughly 20 courses; drawn at a visible scale so the wall is not a flat field.
+  const courses = 22;
+  const ch = S / courses;
+  ctx.strokeStyle = toCss(base, 0.86);
+  ctx.lineWidth = 1;
+  for (let i = 1; i < courses; i += 1) {
+    ctx.beginPath();
+    ctx.moveTo(0, i * ch);
+    ctx.lineTo(S, i * ch);
+    ctx.stroke();
+  }
+
+  // Two rows of windows in the patch, which is three storeys in 4.5m - close
+  // enough to a Victorian terrace for the eye, and the ground floor is handled
+  // by the plinth below.
+  const rows = 2;
+  const cols = 2;
+  const pad = S * 0.16;
+  const wW = (S - pad * (cols + 1)) / cols;
+  const wH = (S - pad * (rows + 1)) / rows;
+  for (let r = 0; r < rows; r += 1) {
+    for (let c = 0; c < cols; c += 1) {
+      const x = pad + c * (wW + pad);
+      const y = pad + r * (wH + pad);
+      // Recess: a dark reveal, then the glass, then a pale sill.
+      ctx.fillStyle = "rgba(0,0,0,0.42)";
+      ctx.fillRect(x - 2, y - 2, wW + 4, wH + 4);
+      const g = ctx.createLinearGradient(x, y, x + wW, y + wH);
+      g.addColorStop(0, "#2b3a47");
+      g.addColorStop(0.5, "#4a5f70");
+      g.addColorStop(1, "#1d2831");
+      ctx.fillStyle = g;
+      ctx.fillRect(x, y, wW, wH);
+      // Glazing bars.
+      ctx.strokeStyle = "rgba(230,230,225,0.55)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x + wW / 2, y);
+      ctx.lineTo(x + wW / 2, y + wH);
+      ctx.moveTo(x, y + wH / 2);
+      ctx.lineTo(x + wW, y + wH / 2);
+      ctx.stroke();
+      // Sill.
+      ctx.fillStyle = toCss(base, 1.18);
+      ctx.fillRect(x - 3, y + wH + 2, wW + 6, 4);
+    }
+  }
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 4;
+  return tex;
 }
 
 /**
@@ -370,11 +532,19 @@ function buildBuildings(scene) {
   // state changes a frame for no visual gain.
   const wallMats = [];
   const roofMats = [];
-  const pick = (bucket, color) => {
+  /*
+   * One material per colour, and the texture is generated only when a new colour
+   * appears. Passing a factory rather than a texture matters: 239 buildings share
+   * about six colours, and eagerly drawing 239 canvases to throw 233 away costs
+   * real milliseconds on a phone.
+   */
+  const pick = (bucket, color, makeMap) => {
     const key = color.getHexString();
     let entry = bucket.find((m) => m.userData.key === key);
     if (!entry) {
-      entry = new THREE.MeshLambertMaterial({ color });
+      entry = new THREE.MeshLambertMaterial(
+        makeMap ? { map: makeMap(), color: 0xffffff } : { color },
+      );
       entry.userData.key = key;
       bucket.push(entry);
     }
@@ -408,7 +578,19 @@ function buildBuildings(scene) {
 
       const wallGeo = new THREE.ExtrudeGeometry(shape, { depth: h - 0.4, bevelEnabled: false });
       wallGeo.rotateX(-Math.PI / 2);
-      const wallMesh = new THREE.Mesh(wallGeo, pick(wallMats, wall));
+      /*
+       * ExtrudeGeometry's side UVs are in metres - it uses raw vertex positions.
+       * Dividing by TEXTURE_M therefore makes the wall texture cover exactly
+       * TEXTURE_M metres, whatever the building's size, and a window stays a
+       * window's size. Scaling the UVs rather than setting texture.repeat keeps
+       * one shared material per colour instead of one per building.
+       */
+      const uv = wallGeo.attributes.uv;
+      for (let i = 0; i < uv.count; i += 1) {
+        uv.setXY(i, uv.getX(i) / TEXTURE_M, uv.getY(i) / TEXTURE_M);
+      }
+      uv.needsUpdate = true;
+      const wallMesh = new THREE.Mesh(wallGeo, pick(wallMats, wall, makeWallTexture(wall)));
       wallMesh.position.y = 0.02;
       wallMesh.castShadow = true;
       wallMesh.receiveShadow = true;
@@ -444,6 +626,16 @@ function buildBuildings(scene) {
 }
 
 /** A wide plain beyond the photographed area, so the horizon is not a hard edge. */
+/** Release the GPU memory of a group that is being replaced. */
+function disposeTree(root) {
+  root.traverse((obj) => {
+    if (obj.geometry) obj.geometry.dispose();
+    const m = obj.material;
+    if (Array.isArray(m)) m.forEach((x) => x?.dispose?.());
+    else m?.dispose?.();
+  });
+}
+
 function buildFarGround() {
   const geo = new THREE.PlaneGeometry(4200, 4200);
   geo.rotateX(-Math.PI / 2);
@@ -538,7 +730,32 @@ export function createLongtonCamera3d(container, opts = {}) {
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0b1120);
+  // A gradient sky rather than a flat fill. A flat sky behind a street of
+  // extruded boxes is one of the things that makes a render look like a render;
+  // a gradient costs one small canvas.
+  const skyCanvas = document.createElement("canvas");
+  skyCanvas.width = 4;
+  skyCanvas.height = 128;
+  const skyTex = new THREE.CanvasTexture(skyCanvas);
+  skyTex.colorSpace = THREE.SRGBColorSpace;
+  function paintSky(night) {
+    const ctx = skyCanvas.getContext("2d");
+    const g = ctx.createLinearGradient(0, 0, 0, 128);
+    if (night) {
+      g.addColorStop(0, "#05080f");
+      g.addColorStop(0.7, "#0b1220");
+      g.addColorStop(1, "#161d29");
+    } else {
+      g.addColorStop(0, "#6f9fd0");
+      g.addColorStop(0.6, "#a8c4e0");
+      g.addColorStop(1, "#d8dfe2");
+    }
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 4, 128);
+    skyTex.needsUpdate = true;
+  }
+  paintSky(true);
+  scene.background = skyTex;
   scene.fog = new THREE.Fog(0x0b1120, 260, 900);
 
   const camera = new THREE.PerspectiveCamera(52, 16 / 9, 0.5, 3000);
@@ -625,8 +842,8 @@ export function createLongtonCamera3d(container, opts = {}) {
   function applyDaylight() {
     const hour = new Date().getHours();
     const night = hour < 6 || hour >= 19;
-    scene.background.set(night ? 0x070c16 : 0x9fb6d4);
-    scene.fog.color.set(night ? 0x070c16 : 0x9fb6d4);
+    paintSky(night);
+    scene.fog.color.set(night ? 0x0b1120 : 0xb9cbdd);
     hemi.intensity = night ? 0.5 : 1.05;
     sun.intensity = night ? 0.22 : 0.85;
     // Move the sun with the time of day, and keep the shadow camera centred on
@@ -704,9 +921,12 @@ export function createLongtonCamera3d(container, opts = {}) {
     // not a hard edge with sky under it.
     scene.add(buildFarGround());
 
-    scene.add(buildRoads(data));
+    state.roads = buildRoads(data, { withAerial: false });
+    scene.add(state.roads);
     const buildings = buildBuildings(data);
     scene.add(buildings);
+    const furniture = buildStreetFurniture(data);
+    scene.add(furniture);
     aim();
     applyDaylight();
     if (els.note) {
@@ -731,6 +951,15 @@ export function createLongtonCamera3d(container, opts = {}) {
           textured.receiveShadow = true;
           scene.add(textured);
           state.aerial = res;
+          // Now the photograph is the road: swap the stylised tarmac and its
+          // painted lines for kerbs only, so the real street shows through
+          // instead of being covered by a grey slab.
+          if (state.sceneData && state.roads) {
+            scene.remove(state.roads);
+            disposeTree(state.roads);
+            state.roads = buildRoads(state.sceneData, { withAerial: true });
+            scene.add(state.roads);
+          }
         }
         if (els.note) {
           const bits = [`aerial imagery: ${res?.loaded ?? 0} tiles`];
@@ -860,6 +1089,7 @@ export function createLongtonCamera3d(container, opts = {}) {
       stop();
       globalThis.removeEventListener?.("resize", onResize);
       try {
+        disposeTree(scene);
         renderer.dispose();
       } catch {
         /* ignore */

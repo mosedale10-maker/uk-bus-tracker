@@ -209,6 +209,15 @@ ok("the note says why z19 is the limit", /z20 and above return/.test(mod));
 ok("the real photographs are credited", /CC BY-SA/.test(mod));
 ok("photographs are linked to their file page", /p\.page/.test(mod));
 ok("the photo list says it is photographs, not textures", /not pasted onto the buildings/i.test(mod));
+ok("the aerial photograph is allowed to BE the road", /withAerial/.test(mod));
+ok("the code says why the tarmac comes off", /photograph is the road/i.test(mod));
+ok("walls get a brick-and-window texture", /makeWallTexture/.test(mod));
+ok("the wall texture has a known physical size", /TEXTURE_M/.test(mod));
+ok("UVs are scaled in metres, not guessed", /uv\.getX\(i\) \/ TEXTURE_M/.test(mod));
+ok("wall textures are generated once per colour, not per building", /makeMap/.test(mod));
+ok("there are street lamps and trees", /buildStreetFurniture/.test(mod));
+ok("the sky is a gradient, not a flat fill", /paintSky/.test(mod));
+ok("replaced geometry is disposed", /disposeTree/.test(mod));
 
 // The scene must actually carry the sampled colours, or the renderer is reading
 // a field that is never populated.
