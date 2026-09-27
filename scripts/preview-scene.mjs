@@ -337,6 +337,35 @@ for (const b of scene.buildings) {
     const n = [-ez / len, 0, ex / len];
     addFace([[ax, 0, az], [bx, 0, bz], [bx, h, bz], [ax, h, az]], n, wc);
   }
+  // The silhouette trim the site adds: a wider plinth and a projecting cornice.
+  // Drawn from the same ring, scaled out slightly, so what is visible here is
+  // what the page draws.
+  if (h > 3.2) {
+    const scaled = ring.map(([x, z]) => [x * 1.012, z * 1.012]);
+    const plinthH = Math.min(1.1, h * 0.28);
+    for (let i = 0; i < scaled.length; i += 1) {
+      const [ax, az] = scaled[i];
+      const [bx, bz] = scaled[(i + 1) % scaled.length];
+      const ex = bx - ax;
+      const ez = bz - az;
+      const len = Math.hypot(ex, ez);
+      if (len < 0.2) continue;
+      addFace([[ax, 0, az], [bx, 0, bz], [bx, plinthH, bz], [ax, plinthH, az]],
+        [-ez / len, 0, ex / len], [106, 97, 87]);
+    }
+    const cs = ring.map(([x, z]) => [x * 1.022, z * 1.022]);
+    for (let i = 0; i < cs.length; i += 1) {
+      const [ax, az] = cs[i];
+      const [bx, bz] = cs[(i + 1) % cs.length];
+      const ex = bx - ax;
+      const ez = bz - az;
+      const len = Math.hypot(ex, ez);
+      if (len < 0.2) continue;
+      addFace([[ax, h - 0.4, az], [bx, h - 0.4, bz], [bx, h - 0.06, bz], [ax, h - 0.06, az]],
+        [-ez / len, 0, ex / len], [185, 172, 154]);
+    }
+  }
+
   // Roof, fanned from the centroid.
   let cx = 0;
   let cz = 0;

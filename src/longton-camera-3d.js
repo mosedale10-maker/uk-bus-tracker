@@ -594,7 +594,7 @@ function makeWallTexture(baseColor) {
  * something is a model; giving the roof its own darker material and adding a
  * thin eaves lip is what makes extruded boxes look like buildings.
  */
-function buildBuildings(scene) {
+function buildBuildings(scene, camAt = [0, 0]) {
   const group = new THREE.Group();
   let built = 0;
   let skipped = 0;
@@ -603,6 +603,13 @@ function buildBuildings(scene) {
   // state changes a frame for no visual gain.
   const wallMats = [];
   const roofMats = [];
+  // Trim is shared by every building: one plinth, one cornice, one downpipe, so
+  // the extra silhouette costs three materials rather than three per building.
+  const trimMats = {
+    plinth: new THREE.MeshLambertMaterial({ color: 0x6a6157 }),
+    cornice: new THREE.MeshLambertMaterial({ color: 0xb9ac9a }),
+    pipe: new THREE.MeshLambertMaterial({ color: 0x555049 }),
+  };
   /*
    * One material per colour, and the texture is generated only when a new colour
    * appears. Passing a factory rather than a texture matters: 239 buildings share
@@ -643,8 +650,15 @@ function buildBuildings(scene) {
       } else if (kind === "church") {
         wall = new THREE.Color().setHSL(0.1, 0.06, 0.52);
       } else {
-        // Terraced housing and everything else: brick reds and buff stone.
-        wall = new THREE.Color().setHSL(0.02 + (seed % 8) / 100, 0.22, 0.36 + (seed % 14) / 100);
+        // Terraced housing and everything else: brick reds and buff stone. The
+        // lightness is nudged by the sampled roof colour so a terrace does not
+        // come out as six identical houses, while staying in the right family.
+        const jitter = b.roofColour ? (seed % 9) / 100 - 0.04 : 0;
+        wall = new THREE.Color().setHSL(
+          0.02 + (seed % 8) / 100,
+          0.22,
+          Math.max(0.24, Math.min(0.62, 0.36 + (seed % 14) / 100 + jitter)),
+        );
       }
 
       const wallGeo = new THREE.ExtrudeGeometry(shape, { depth: h - 0.4, bevelEnabled: false });
@@ -690,6 +704,60 @@ function buildBuildings(scene) {
       roofMesh.castShadow = true;
       roofMesh.receiveShadow = true;
       group.add(roofMesh);
+
+      /*
+       * The bits that make a box read as a building rather than a block.
+       *
+       * Windows are in the wall texture, but at street distance the texture is a
+       * wash and what actually gives a building away is its silhouette: a base
+       * it stands on, a lip at the top, and a downpipe breaking the corner.
+       * Those are geometry, so they survive at any distance and in flat light.
+       *
+       * Deliberately only three elements per building. Sills, lintels and
+       * gutters were considered and dropped: below about two pixels each they
+       * cost a draw call per building and cannot be seen.
+       */
+      if (h > 3.2) {
+        // Plinth: a wider, darker base course.
+        const plinth = new THREE.Mesh(
+          new THREE.ExtrudeGeometry(shape, { depth: Math.min(1.1, h * 0.28), bevelEnabled: false }),
+          trimMats.plinth,
+        );
+        plinth.geometry.rotateX(-Math.PI / 2);
+        plinth.scale.set(1.012, 1, 1.012);
+        plinth.position.y = 0.0;
+        plinth.receiveShadow = true;
+        group.add(plinth);
+
+        // Cornice: a projecting lip all the way round at eaves level.
+        const cornice = new THREE.Mesh(
+          new THREE.ExtrudeGeometry(shape, { depth: 0.34, bevelEnabled: false }),
+          trimMats.cornice,
+        );
+        cornice.geometry.rotateX(-Math.PI / 2);
+        cornice.scale.set(1.022, 1, 1.022);
+        cornice.position.y = 0.02 + h - 0.4;
+        cornice.castShadow = true;
+        group.add(cornice);
+
+        // Downpipe on the corner nearest the camera, so it reads against the sky.
+        let nearestCorner = ring[0];
+        let bestD = Infinity;
+        for (const p of ring) {
+          const d = (p[0] - camAt[0]) ** 2 + (p[1] - camAt[1]) ** 2;
+          if (d < bestD) {
+            bestD = d;
+            nearestCorner = p;
+          }
+        }
+        const pipe = new THREE.Mesh(
+          new THREE.BoxGeometry(0.16, h - 0.5, 0.16),
+          trimMats.pipe,
+        );
+        pipe.position.set(nearestCorner[0] * 1.014, (h - 0.5) / 2 + 0.1, nearestCorner[1] * 1.014);
+        pipe.castShadow = true;
+        group.add(pipe);
+      }
 
       built += 1;
     } catch (err) {
@@ -1096,7 +1164,7 @@ export function createLongtonCamera3d(container, opts = {}) {
 
     state.roads = buildRoads(data, { withAerial: false });
     scene.add(state.roads);
-    const buildings = buildBuildings(data);
+    const buildings = buildBuildings(data, data.camera?.at || [0, 0]);
     scene.add(buildings);
     const furniture = buildStreetFurniture(data, data.camera?.at || [0, 0]);
     scene.add(furniture);

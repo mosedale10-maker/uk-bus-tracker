@@ -355,6 +355,27 @@ ok("replaced geometry is disposed", /disposeTree/.test(mod));
     west.map((n) => n.toFixed(2)).join(","));
 
   ok("the bus has a windscreen and a rear screen", (mod.match(/slab\(0\.1,/g) || []).length >= 2);
+
+/* ---- the facade trim, which is what reads at street distance ------------- */
+/*
+ * Windows live in the wall texture, and at 100m+ they are a wash. What gives a
+ * box away as a box is its silhouette, so the plinth, cornice and downpipe are
+ * geometry. The count is asserted because the temptation is always to add sills,
+ * gutters and lintels, and each one costs a draw call per building for
+ * something under two pixels.
+ */
+ok("buildings get a plinth", /plinth/.test(mod));
+ok("buildings get a cornice", /cornice/.test(mod));
+ok("buildings get a downpipe", /pipe/.test(mod));
+ok("the trim is only added to buildings tall enough to show it", /if \(h > 3\.2\)/.test(mod));
+ok("the trim is shared, not per building", /const trimMats = \{/.test(mod));
+ok("the downpipe goes on the corner nearest the camera", /nearestCorner/.test(mod));
+ok("buildings are told where the camera is", /buildBuildings\(scene, camAt/.test(mod));
+ok("wall colour varies with the sampled roof", /jitter/.test(mod));
+// Three extra solids per building, not fifteen.
+const trimDraws = (mod.match(/new THREE\.(ExtrudeGeometry|BoxGeometry)\(shape/g) || []).length;
+ok("the trim adds a handful of meshes per building, not dozens", trimDraws <= 5,
+  `${trimDraws} extruded parts per building`);
   ok("the bus has a destination display", /dest\b/.test(mod));
   ok("the bus has headlights", /\blamp\b/.test(mod));
   ok("the wheels have hubs, not black discs", /hub/.test(mod));
