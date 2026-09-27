@@ -254,6 +254,72 @@ ok("replaced geometry is disposed", /disposeTree/.test(mod));
   ok("the furniture reach is not the whole scene", /const REACH = 260/.test(mod));
 }
 
+/* ---- the bus, checked as numbers rather than as words --------------------- */
+/*
+ * Rendering the bus offline found two things no source-grep would have: a roof
+ * floating a metre above the body, and a 72cm hole straight through the side
+ * between the waistline and the window sill. Both read as "the code looks
+ * right". So the vertical stack is asserted as arithmetic instead.
+ */
+{
+  const num = (name) => {
+    const m = new RegExp(`const ${name} = ([0-9.]+)`).exec(mod);
+    return m ? Number(m[1]) : NaN;
+  };
+  const L = num("L");
+  const W = num("W");
+  const R = num("WHEEL_R");
+  const FLOOR = num("FLOOR");
+  const SILL = num("SILL");
+  const HEAD = num("HEAD");
+  const ROOF = num("ROOF");
+  const ROOF_TOP = num("ROOF_TOP");
+
+  ok("the bus dimensions are real numbers",
+    [L, W, R, FLOOR, SILL, HEAD, ROOF, ROOF_TOP].every(Number.isFinite),
+    JSON.stringify({ L, W, R, FLOOR, SILL, HEAD, ROOF, ROOF_TOP }));
+  ok("a single-decker is about 11-12m long", L > 10 && L < 12.5, `${L} m`);
+  ok("a bus is about 2.4-2.6m wide", W > 2.4 && W < 2.6, `${W} m`);
+  ok("a bus is roughly 3.2-3.5m to the roof", ROOF_TOP > 3.2 && ROOF_TOP < 3.5, `${ROOF_TOP} m`);
+  ok("the wheels are a realistic size", R > 0.45 && R < 0.6, `${R} m`);
+  ok("the stack is continuous: floor to sill", SILL > FLOOR, `${FLOOR} -> ${SILL}`);
+  ok("the stack is continuous: sill to head", HEAD > SILL, `${SILL} -> ${HEAD}`);
+  ok("the stack is continuous: head to roof", ROOF >= HEAD, `${HEAD} -> ${ROOF}`);
+  ok("the roof cap has thickness", ROOF_TOP > ROOF, `${ROOF} -> ${ROOF_TOP}`);
+  ok("the window band is a realistic height", HEAD - SILL > 0.8 && HEAD - SILL < 1.5,
+    `${(HEAD - SILL).toFixed(2)} m`);
+  ok("the body below the windows is a realistic height", SILL - FLOOR > 1.0 && SILL - FLOOR < 1.6,
+    `${(SILL - FLOOR).toFixed(2)} m`);
+  // The bug: the roof hovered a metre above the body.
+  ok("the roof sits on the body, not above it", ROOF - HEAD < 0.35,
+    `${(ROOF - HEAD).toFixed(2)} m above the glazing`);
+
+  // Heading: a compass bearing needs a quarter turn, because the model faces +X
+  // (east) and north is -Z. Without it every bus was drawn driving sideways.
+  ok("the heading rotation includes the quarter turn", /\(90 - bearing\)/.test(mod));
+  ok("the comment explains why", /driving sideways/.test(mod));
+  const faces = (bearing) => {
+    // Rotate the model's +X axis by the yaw the site applies.
+    const t = ((90 - bearing) * Math.PI) / 180;
+    return [Math.cos(t), -Math.sin(t)];
+  };
+  const near = (v, target) => Math.abs(v - target) < 0.01;
+  const north = faces(0);
+  ok("a north-heading bus points north (-Z)", near(north[0], 0) && north[1] < -0.99,
+    north.map((n) => n.toFixed(2)).join(","));
+  const east = faces(90);
+  ok("an east-heading bus points east (+X)", east[0] > 0.99 && near(east[1], 0),
+    east.map((n) => n.toFixed(2)).join(","));
+  const west = faces(270);
+  ok("a west-heading bus points west (-X)", west[0] < -0.99,
+    west.map((n) => n.toFixed(2)).join(","));
+
+  ok("the bus has a windscreen and a rear screen", (mod.match(/slab\(0\.1,/g) || []).length >= 2);
+  ok("the bus has a destination display", /dest\b/.test(mod));
+  ok("the bus has headlights", /\blamp\b/.test(mod));
+  ok("the wheels have hubs, not black discs", /hub/.test(mod));
+}
+
 /* ---- the material contract, executed -------------------------------------- */
 /*
  * The bug this guards: a material factory was passed where its result was

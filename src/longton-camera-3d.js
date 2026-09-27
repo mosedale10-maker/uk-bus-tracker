@@ -760,33 +760,102 @@ function sunDirection(hour) {
   };
 }
 
-/** A bus: body, glazing band, and a route plate on the side. */
+/**
+ * A single-deck bus.
+ *
+ * Built to real dimensions so it reads correctly next to the buildings: 11.6m
+ * long, 2.5m wide, 3.35m to the roof, which is about right for the Plaxton
+ *-bodied buses that actually run the Potteries routes.
+ *
+ * The first version of this was three boxes and rendered as a red brick with a
+ * roof floating a metre above it and no front or back to it. It now has a dark
+ * skirt below the waistline, a continuous glazed band, a windscreen, a rear
+ * screen, a destination display, headlights and a roof that sits ON the body.
+ */
 function buildBusMesh(bus) {
   const group = new THREE.Group();
-  const L = 12.5;
-  const W = 2.55;
-  const H = 3.2;
-  const body = new THREE.MeshLambertMaterial({ color: new THREE.Color(bus.colour || "#c8102e") });
-  const glass = new THREE.MeshLambertMaterial({ color: 0x1b2733 });
+  const L = 11.6;
+  const W = 2.5;
+  const WHEEL_R = 0.5;
+  const FLOOR = 0.45;
+  const SILL = 1.72;   // bottom of the glazing
+  const HEAD = 2.92;   // top of the glazing
+  const ROOF = 3.2;    // underside of the roof cap
+  const ROOF_TOP = 3.38;
 
-  const hull = new THREE.Mesh(new THREE.BoxGeometry(L, H - 1.0, W), body);
-  hull.position.y = 0.55 + (H - 1.0) / 2;
-  group.add(hull);
+  const livery = new THREE.Color(bus.colour || "#c8102e");
+  const body = new THREE.MeshLambertMaterial({ color: livery });
+  const dark = new THREE.MeshLambertMaterial({ color: 0x1a1f26 });
+  const glass = new THREE.MeshLambertMaterial({ color: 0x24313d });
+  const pale = new THREE.MeshLambertMaterial({ color: 0xd8dde2 });
+  const tyre = new THREE.MeshLambertMaterial({ color: 0x14181d });
+  const lamp = new THREE.MeshBasicMaterial({ color: 0xfff2c4 });
+  const dest = new THREE.MeshBasicMaterial({ color: 0xffd166 });
 
-  const band = new THREE.Mesh(new THREE.BoxGeometry(L - 0.6, 0.85, W + 0.04), glass);
-  band.position.y = hull.position.y + 0.35;
-  group.add(band);
+  const slab = (w, h, d, x, y, z, mat) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(x, y, z);
+    m.castShadow = true;
+    group.add(m);
+    return m;
+  };
 
-  // A pale roof so the vehicle reads from the camera's slightly raised angle.
-  const roof = new THREE.Mesh(new THREE.BoxGeometry(L - 1.2, 0.18, W - 0.5), body);
-  roof.position.y = H + 0.5;
-  group.add(roof);
+  /*
+   * The stack has to be continuous from the skirt to the roof, or you can see
+   * straight through the vehicle. An earlier version painted the body only up to
+   * a waistline at 1.0m and started the glazing at 1.72m, leaving a 72cm gap
+   * along both sides - the bus rendered as three floating plates.
+   */
+  // Dark skirt at the very bottom, so the vehicle has a bottom edge.
+  slab(L - 0.1, 0.34, W - 0.08, 0, FLOOR + 0.05, 0, dark);
+  // Painted side from the skirt up to the window line.
+  slab(L, SILL - (FLOOR + 0.2), W, 0, (FLOOR + 0.2 + SILL) / 2, 0, body);
+  // Painted side above the glazing, up to the roof.
+  slab(L, ROOF - HEAD, W, 0, (HEAD + ROOF) / 2, 0, body);
 
-  for (const [dx, dz] of [[-L / 2 + 1.2, W / 2 - 0.35], [-L / 2 + 1.2, -W / 2 + 0.35], [L / 2 - 1.6, W / 2 - 0.35], [L / 2 - 1.6, -W / 2 + 0.35]]) {
-    const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.52, 0.52, 0.3, 10), new THREE.MeshLambertMaterial({ color: 0x14181d }));
-    wheel.rotation.z = Math.PI / 2;
-    wheel.position.set(dx, 0.5, dz);
-    group.add(wheel);
+  // Glazing: a continuous band down both sides, standing a hair proud so it is
+  // not z-fighting with the body, and stopped short of each end.
+  const GL = L - 1.5;
+  slab(GL, HEAD - SILL, W + 0.03, -0.15, (SILL + HEAD) / 2, 0, glass);
+  // Windscreen and rear screen, angled back a little by being set in from the ends.
+  slab(0.1, HEAD - SILL + 0.06, W - 0.34, L / 2 - 0.16, (SILL + HEAD) / 2 + 0.03, 0, glass);
+  slab(0.1, HEAD - SILL - 0.2, W - 0.4, -(L / 2 - 0.1), (SILL + HEAD) / 2 - 0.08, 0, glass);
+
+  // Roof cap, sitting on the body rather than hovering over it.
+  slab(L - 0.5, ROOF_TOP - ROOF, W - 0.22, -0.1, (ROOF + ROOF_TOP) / 2, 0, pale);
+
+  // Destination display above the windscreen, and a second at the rear.
+  slab(0.08, 0.24, W - 0.9, L / 2 - 0.06, ROOF - 0.18, 0, dest);
+  slab(0.08, 0.2, W - 1.0, -(L / 2 - 0.02), ROOF - 0.16, 0, dest);
+
+  // Headlights, low on the front panel.
+  for (const sz of [1, -1]) {
+    slab(0.09, 0.2, 0.34, L / 2 - 0.05, FLOOR + 0.32, sz * (W / 2 - 0.34), lamp);
+  }
+  // Bumpers.
+  slab(0.12, 0.22, W - 0.1, L / 2 - 0.02, FLOOR - 0.16, 0, dark);
+  slab(0.12, 0.22, W - 0.1, -(L / 2 - 0.02), FLOOR - 0.16, 0, dark);
+
+  // Wheels: two axles, inset from the ends.
+  for (const dx of [L / 2 - 2.5, -(L / 2 - 2.6)]) {
+    for (const dz of [W / 2 - 0.16, -(W / 2 - 0.16)]) {
+      const wheel = new THREE.Mesh(
+        new THREE.CylinderGeometry(WHEEL_R, WHEEL_R, 0.3, 14),
+        tyre,
+      );
+      wheel.rotation.z = Math.PI / 2;
+      wheel.position.set(dx, WHEEL_R, dz);
+      wheel.castShadow = true;
+      group.add(wheel);
+      // Hub, so the wheel is not a black disc.
+      const hub = new THREE.Mesh(
+        new THREE.CylinderGeometry(WHEEL_R * 0.45, WHEEL_R * 0.45, 0.34, 10),
+        pale,
+      );
+      hub.rotation.z = Math.PI / 2;
+      hub.position.set(dx, WHEEL_R, dz);
+      group.add(hub);
+    }
   }
 
   group.userData.bus = bus;
@@ -959,9 +1028,19 @@ export function createLongtonCamera3d(container, opts = {}) {
     for (const bus of state.buses.values()) {
       const mesh = buildBusMesh(bus);
       mesh.position.set(bus.x, 0, bus.z);
-      // Screen-space heading: 0 is north, which is -Z, so subtract from the
-      // model's default facing along +X after rotating it flat.
-      mesh.rotation.y = -((bus.heading || 0) * Math.PI) / 180;
+      /*
+       * Heading is a compass bearing: 0 is north, 90 is east. In this scene north
+       * is -Z (see project(), where latitude increases towards -Z), and the model
+       * is built facing +X, which is east.
+       *
+       * So a bearing needs a quarter turn before anything else: at heading 0 the
+       * bus must point at -Z, and rotating by 0 left it pointing at +X - every
+       * bus was drawn driving sideways, straight across the road. The previous
+       * formula, -heading, omitted that quarter turn and could only ever face the
+       * bus along the X axis.
+       */
+      const bearing = Number(bus.heading) || 0;
+      mesh.rotation.y = ((90 - bearing) * Math.PI) / 180;
       busLayer.add(mesh);
     }
     if (els.count) els.count.textContent = String(state.buses.size);
