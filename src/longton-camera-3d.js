@@ -37,6 +37,9 @@ const REFRESH_MS = 20_000;
 /** How far from the camera a bus is still drawn. */
 const VIEW_RANGE_M = 420;
 
+/** Metres per degree of longitude at a given latitude. */
+const mLonFor = (lat) => 111_320 * Math.cos((lat * Math.PI) / 180);
+
 function project(lat, lon, origin) {
   const mLat = 111_320;
   const mLon = 111_320 * Math.cos((origin.lat * Math.PI) / 180);
@@ -135,14 +138,33 @@ async function loadBuses(origin) {
 const IMAGERY = {
   url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
   credit: "Imagery &copy; Esri, Maxar, Earthstar Geographics",
-  // z19 is the highest zoom with real imagery for Longton - z20 and above return
-  // Esri's 2.5KB "nothing here" placeholder. z19 doubles the ground detail over
-  // z18, which is the difference between tarmac and kerbs.
-  zoom: 19,
+  /*
+   * Zoom is chosen at runtime by walking down until the tile count fits.
+   *
+   * z19 is the highest zoom with real imagery here - z20 and above return Esri's
+   * 2.5KB "nothing here" placeholder. z19 is what we want, but z19 over a 300m
+   * square is 196 tiles and asking a free service for 196 requests on every page
+   * load is not reasonable. The earlier fixed cap of 48 was the bug: z19 over
+   * 400m needs 324 tiles and even z18 over 460m needs 121, so the cap was always
+   * exceeded and the aerial photograph was quietly dropped. The view rendered as
+   * flat grey and nothing said why. The endpoint was verified to work; the
+   * budget never was.
+   *
+   * So: start high, step down until it fits, and always deliver something.
+   */
+  zoomStart: 19,
+  zoomFloor: 17,
   tile: 256,
-  /** Half-width of the area to photograph, in metres either side of the origin. */
-  extentM: 400,
-  maxTiles: 48,
+  /**
+   * Half-width of the photographed area, centred on the middle of the view
+   * rather than on the scene origin.
+   *
+   * The camera stands 165m from the Exchange, which is the origin. Centring the
+   * mosaic on the origin put the camera on its very edge, so the ground the
+   * camera was standing on was the least detailed and most likely to be clipped.
+   */
+  extentM: 300,
+  maxTiles: 64,
 };
 
 /** Local metres to Web Mercator pixels at a given zoom. */
@@ -164,14 +186,14 @@ function latLonFrom(origin, x, z) {
   };
 }
 
-function loadAerialTexture(origin, onReady) {
+function loadAerialTexture(origin, zoom) {
   const half = IMAGERY.extentM;
   const corners = [
     latLonFrom(origin, -half, -half),
     latLonFrom(origin, half, -half),
     latLonFrom(origin, half, half),
     latLonFrom(origin, -half, half),
-  ].map((c) => mercatorPx(c.lat, c.lon, origin, IMAGERY.zoom));
+  ].map((c) => mercatorPx(c.lat, c.lon, origin, zoom));
 
   const minX = Math.min(...corners.map((c) => c.x));
   const maxX = Math.max(...corners.map((c) => c.x));
@@ -184,12 +206,7 @@ function loadAerialTexture(origin, onReady) {
   const r1 = Math.floor((maxY - 1) / IMAGERY.tile);
   const cols = t1 - t0 + 1;
   const rows = r1 - r0 + 1;
-
-  // A very large scene area at a high zoom would mean hundreds of requests to a
-  // free service. Shrink the zoom rather than hammer it.
-  if (cols * rows > IMAGERY.maxTiles) {
-    return { texture: null, skipped: "too many tiles" };
-  }
+  const total = cols * rows;
 
   const canvas = document.createElement("canvas");
   canvas.width = cols * IMAGERY.tile;
@@ -201,19 +218,29 @@ function loadAerialTexture(origin, onReady) {
 
   let loaded = 0;
   let failed = 0;
-  const total = cols * rows;
   return new Promise((resolve) => {
     const finish = () => {
       const texture = new THREE.CanvasTexture(canvas);
       texture.colorSpace = THREE.SRGBColorSpace;
       texture.anisotropy = 8;
       texture.needsUpdate = true;
-      resolve({ texture, loaded, failed, total, uv: { minX, minY, w: canvas.width, h: canvas.height } });
+      resolve({
+        texture,
+        loaded,
+        failed,
+        total,
+        zoom,
+        uv: { minX, minY, w: canvas.width, h: canvas.height },
+      });
     };
+    if (total === 0) {
+      finish();
+      return;
+    }
     for (let r = 0; r < rows; r += 1) {
       for (let c = 0; c < cols; c += 1) {
         const url = IMAGERY.url
-          .replace("{z}", String(IMAGERY.zoom))
+          .replace("{z}", String(zoom))
           .replace("{x}", String(t0 + c))
           .replace("{y}", String(r0 + r));
         const img = new Image();
@@ -231,6 +258,39 @@ function loadAerialTexture(origin, onReady) {
       }
     }
   });
+}
+
+/** How many tiles a given zoom would need for the current extent. */
+function tileCountFor(origin, zoom) {
+  const half = IMAGERY.extentM;
+  const corners = [
+    latLonFrom(origin, -half, -half),
+    latLonFrom(origin, half, half),
+  ].map((c) => mercatorPx(c.lat, c.lon, origin, zoom));
+  const minX = Math.min(...corners.map((c) => c.x));
+  const maxX = Math.max(...corners.map((c) => c.x));
+  const minY = Math.min(...corners.map((c) => c.y));
+  const maxY = Math.max(...corners.map((c) => c.y));
+  const cols = Math.floor((maxX - 1) / IMAGERY.tile) - Math.floor(minX / IMAGERY.tile) + 1;
+  const rows = Math.floor((maxY - 1) / IMAGERY.tile) - Math.floor(minY / IMAGERY.tile) + 1;
+  return Math.max(1, cols) * Math.max(1, rows);
+}
+
+/**
+ * Fetch the aerial photograph at the best zoom that fits the tile budget.
+ *
+ * Never gives up: z19 if it fits, otherwise step down. Handing back a coarser
+ * photograph is a much better outcome than handing back none, and the zoom
+ * actually used is reported so the frame can say so.
+ */
+async function loadBestAerial(origin) {
+  for (let z = IMAGERY.zoomStart; z >= IMAGERY.zoomFloor; z -= 1) {
+    const n = tileCountFor(origin, z);
+    if (n > IMAGERY.maxTiles) continue;
+    const res = await loadAerialTexture(origin, z);
+    return { ...res, wanted: n };
+  }
+  return { texture: null, loaded: 0, failed: 0, total: 0, zoom: 0, uv: null };
 }
 
 /**
@@ -360,9 +420,16 @@ function buildRoads(scene, { withAerial }) {
  * a head, instanced down both sides of the main street, and the eye reads scale
  * and depth immediately.
  */
-function buildStreetFurniture(scene) {
+function buildStreetFurniture(scene, camAt) {
   const group = new THREE.Group();
-  const SPACING = 26;
+  const SPACING = 30;
+  /*
+   * Only furniture near enough to be in shot. The scene holds nearly 12km of
+   * main road, and placing a lamp post every 26m along all of it made 231 posts
+   * and 576 meshes - every one of them a draw call, and all but a handful behind
+   * the camera where nobody will ever see them. A phone pays for all of them.
+   */
+  const REACH = 260;
   const postGeo = new THREE.CylinderGeometry(0.11, 0.15, 8, 6);
   const postMat = new THREE.MeshLambertMaterial({ color: 0x2f343a });
   const headGeo = new THREE.SphereGeometry(0.32, 8, 6);
@@ -377,6 +444,7 @@ function buildStreetFurniture(scene) {
   );
   let lamps = 0;
   let trees = 0;
+  let skippedFar = 0;
   for (const road of mainRoads) {
     const half = road.width / 2;
     for (let i = 0; i < road.points.length - 1; i += 1) {
@@ -393,6 +461,10 @@ function buildStreetFurniture(scene) {
       for (let d = SPACING / 2; d < len; d += SPACING) {
         const px = ax + ux * d;
         const pz = az + uz * d;
+        if (Math.hypot(px - camAt[0], pz - camAt[1]) > REACH) {
+          skippedFar += 1;
+          continue;
+        }
         const side = lamps % 2 === 0 ? 1 : -1;
         const ox = px + nx * (half + 1.4) * side;
         const oz = pz + nz * (half + 1.4) * side;
@@ -404,9 +476,7 @@ function buildStreetFurniture(scene) {
         head.position.set(ox, 8.2, oz);
         group.add(head);
         lamps += 1;
-        // One tree in four gaps, opposite side, so the street is not a corridor
-        // of identical posts.
-        if (lamps % 4 === 0) {
+        if (lamps % 3 === 0) {
           const tx = px + nx * (half + 2.2) * -side;
           const tz = pz + nz * (half + 2.2) * -side;
           const trunk = new THREE.Mesh(trunkGeo, trunkMat);
@@ -422,7 +492,7 @@ function buildStreetFurniture(scene) {
       }
     }
   }
-  group.userData = { lamps, trees };
+  group.userData = { lamps, trees, skippedFar };
   return group;
 }
 
@@ -949,7 +1019,7 @@ export function createLongtonCamera3d(container, opts = {}) {
     scene.add(state.roads);
     const buildings = buildBuildings(data);
     scene.add(buildings);
-    const furniture = buildStreetFurniture(data);
+    const furniture = buildStreetFurniture(data, data.camera?.at || [0, 0]);
     scene.add(furniture);
     aim();
     applyDaylight();
@@ -975,10 +1045,19 @@ export function createLongtonCamera3d(container, opts = {}) {
     }
 
     // Now the photography, and swap it in when it is all there.
-    loadAerialTexture(origin)
+    //
+    // Centred on the middle of the view, not on the scene origin. The camera
+    // stands 165m from the origin, so a mosaic centred there put the camera on
+    // its edge - the least detailed corner, and the most likely to be clipped.
+    const camAt = data.camera?.at || [0, 0];
+    const camTo = data.camera?.towards || [0, 0];
+    const viewCentre = [(camAt[0] + camTo[0]) / 2, (camAt[1] + camTo[1]) / 2];
+    const viewOrigin = { lat: origin.lat - viewCentre[1] / 111_320, lon: origin.lon + viewCentre[0] / mLonFor(origin.lat) };
+
+    loadBestAerial(viewOrigin)
       .then((res) => {
         if (res?.texture && res.uv) {
-          const textured = buildGround(origin, IMAGERY.extentM, res.uv);
+          const textured = buildGround(viewOrigin, IMAGERY.extentM, res.uv);
           textured.position.y = -0.05;
           textured.receiveShadow = true;
           scene.add(textured);
@@ -994,16 +1073,21 @@ export function createLongtonCamera3d(container, opts = {}) {
           }
         }
         if (els.note) {
-          const bits = [`aerial imagery: ${res?.loaded ?? 0} tiles`];
-          if (res?.failed) bits.push(`${res.failed} unavailable`);
+          const bits = [];
+          if (res?.texture) {
+            bits.push(`aerial imagery ${res.loaded}/${res.total} tiles at z${res.zoom}`);
+            if (res.failed) bits.push(`${res.failed} unavailable`);
+          } else {
+            bits.push("aerial imagery unavailable, plain ground shown");
+          }
           els.note.textContent = `${els.note.textContent.replace(" · loading aerial imagery…", "")} · ${bits.join(", ")}`;
         }
       })
-      .catch(() => {
+      .catch((err) => {
         if (els.note) {
           els.note.textContent = els.note.textContent.replace(
             " · loading aerial imagery…",
-            " · aerial imagery unavailable, plain ground shown",
+            ` · aerial imagery failed (${err?.message || err}), plain ground shown`,
           );
         }
       });

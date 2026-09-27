@@ -204,8 +204,8 @@ ok("tone mapping is on so the photo and the render match",
   /ACESFilmicToneMapping/.test(mod) && /SRGBColorSpace/.test(mod));
 ok("there is only one buildGround", (mod.match(/function buildGround\b/g) || []).length === 1);
 ok("roofs wear the real sampled colour", /b\.roofColour/.test(mod));
-ok("the ground uses the highest available zoom", /zoom: 19/.test(mod));
-ok("the note says why z19 is the limit", /z20 and above return/.test(mod));
+ok("the zoom starts at the highest with real imagery", /zoomStart:\s*19/.test(mod));
+ok("the code says why z19 is the ceiling", /z20 and above return/.test(mod));
 ok("the real photographs are credited", /CC BY-SA/.test(mod));
 ok("photographs are linked to their file page", /p\.page/.test(mod));
 ok("the photo list says it is photographs, not textures", /not pasted onto the buildings/i.test(mod));
@@ -218,6 +218,41 @@ ok("wall textures are generated once per colour, not per building", /makeMap/.te
 ok("there are street lamps and trees", /buildStreetFurniture/.test(mod));
 ok("the sky is a gradient, not a flat fill", /paintSky/.test(mod));
 ok("replaced geometry is disposed", /disposeTree/.test(mod));
+
+/* ---- the tile budget, which is why the street rendered grey --------------- */
+/*
+ * The aerial photograph was being dropped silently. A fixed cap of 48 tiles was
+ * set, and z19 over 400m needs 324 while even z18 over 460m needs 121 - so the
+ * cap was always exceeded and the ground fell back to flat grey. The endpoint was
+ * verified to work; the budget never was. So the budget itself is now asserted,
+ * and the zoom is chosen by walking down until it fits rather than by giving up.
+ */
+{
+  const extent = Number(/extentM:\s*(\d+)/.exec(mod)?.[1]);
+  const cap = Number(/maxTiles:\s*(\d+)/.exec(mod)?.[1]);
+  ok("the imagery extent is a real number", Number.isFinite(extent) && extent > 50, String(extent));
+  ok("the tile cap is a real number", Number.isFinite(cap) && cap > 0, String(cap));
+
+  // Resolution at this latitude, and the tile count for each zoom.
+  const lat = scene.origin.lat;
+  const res = (z) => (156543.03392 * Math.cos((lat * Math.PI) / 180)) / 2 ** z;
+  let anyFits = false;
+  for (let z = 19; z >= 17; z -= 1) {
+    const px = Math.ceil((extent * 2) / res(z));
+    const tiles = Math.ceil(px / 256) ** 2;
+    const fits = tiles <= cap;
+    if (fits) anyFits = true;
+    console.log(`        z${z}: ${px}px -> ${tiles} tiles  ${fits ? "fits" : "over cap"}`);
+  }
+  ok("at least one zoom fits inside the tile cap", anyFits);
+  ok("the zoom steps down until something fits", /zoomStart/.test(mod) && /zoomFloor/.test(mod));
+  ok("coarser imagery is preferred over none", /loadBestAerial/.test(mod));
+  ok("a failed fetch says so in the frame", /aerial imagery unavailable/.test(mod));
+  ok("the zoom actually used is reported", /at z\$\{res\.zoom\}/.test(mod));
+  ok("the mosaic is centred on the view, not the origin", /viewOrigin/.test(mod));
+  ok("furniture is limited to what is in shot", /REACH/.test(mod) && /skippedFar/.test(mod));
+  ok("the furniture reach is not the whole scene", /const REACH = 260/.test(mod));
+}
 
 /* ---- the material contract, executed -------------------------------------- */
 /*
