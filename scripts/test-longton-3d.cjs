@@ -219,6 +219,104 @@ ok("there are street lamps and trees", /buildStreetFurniture/.test(mod));
 ok("the sky is a gradient, not a flat fill", /paintSky/.test(mod));
 ok("replaced geometry is disposed", /disposeTree/.test(mod));
 
+/* ---- the material contract, executed -------------------------------------- */
+/*
+ * The bug this guards: a material factory was passed where its result was
+ * expected. pick() then called a THREE.Texture as if it were a function, which
+ * threw on every building, and the per-building catch swallowed it - so the
+ * street rendered with a road and no buildings and nothing said why. Grepping
+ * the source for the right words cannot catch that; running the code can.
+ */
+{
+  // Extract pick() exactly as the module defines it, by brace matching rather
+  // than a fixed slice - a slice cut the function in half.
+  const start = mod.indexOf("const pick = (bucket, color, makeMap)");
+  if (start < 0) {
+    console.log("  FAIL  could not find the material picker");
+    failed += 1;
+  } else {
+    const open = mod.indexOf("{", start);
+    let depth = 0;
+    let close = -1;
+    for (let i = open; i < mod.length; i += 1) {
+      if (mod[i] === "{") depth += 1;
+      else if (mod[i] === "}") {
+        depth -= 1;
+        if (depth === 0) { close = i; break; }
+      }
+    }
+    const src = mod.slice(start, close + 1);
+    // Minimal stand-ins for the THREE types it touches.
+    const stub = new Function(
+      "THREE",
+      `${src}
+       return pick;`,
+    )({
+      MeshLambertMaterial: function (opts) {
+        this.opts = opts;
+        this.userData = {};
+        this.dispose = () => {};
+      },
+    });
+    const bucket = [];
+    let textureCalls = 0;
+    const factory = () => {
+      textureCalls += 1;
+      return { isTexture: true };
+    };
+    const got = stub(bucket, { getHexString: () => "abc123" }, factory);
+    ok("a factory is accepted and called once", textureCalls === 1 && got.opts.map.isTexture === true);
+    const again = stub(bucket, { getHexString: () => "abc123" }, factory);
+    ok("the same colour reuses its material", again === got && textureCalls === 1,
+      `textureCalls ${textureCalls}`);
+    const other = stub(bucket, { getHexString: () => "def456" }, factory);
+    ok("a new colour gets its own material", other !== got);
+    // The failure mode: handing it a texture rather than a factory.
+    let threw = null;
+    try {
+      stub([], { getHexString: () => "aaa" }, { isTexture: true });
+    } catch (e) {
+      threw = e;
+    }
+    ok("passing a texture instead of a factory is a detectable error", Boolean(threw),
+      "it did not throw, so this guard would not have caught the bug");
+    ok("roofs ask for no texture at all", /pick\(roofMats, roofColor\)/.test(mod));
+
+/*
+ * The executed contract test above proves pick() works; it cannot prove the call
+ * site uses it correctly, because the bug was at the call site and not inside
+ * pick. Putting the bug back proved the guard did not fire. So the call shape is
+ * checked directly: the third argument must be a function, never the result of
+ * calling one.
+ */
+{
+  const wallCall = /pick\(wallMats,\s*wall,\s*([^)]{0,40})/g;
+  let m;
+  let calls = 0;
+  let allFactories = true;
+  while ((m = wallCall.exec(mod)) !== null) {
+    calls += 1;
+    const arg = m[1].trim();
+    const isFactory = /^(function|\(|\w+\s*=>)/.test(arg);
+    if (!isFactory) {
+      allFactories = false;
+      console.log(`        call site passes a value, not a factory: ${arg.slice(0, 40)}`);
+    }
+  }
+  ok("there is a wall material call site", calls > 0, `${calls} found`);
+  ok("every wall call site passes a factory, not a texture", allFactories);
+  ok("no call site passes a texture result directly",
+    !/pick\([^,]+,[^,]+,\s*make[A-Za-z]*\w*\(/.test(mod));
+}
+  }
+}
+
+// And the scene must not be able to fail silently any more.
+ok("a building failure is recorded, not just counted", /firstError/.test(mod));
+ok("losing every building is reported as a fault",
+  /all \$\{skippedNow\} buildings failed/.test(mod) || /buildings failed to build/.test(mod));
+ok("the note reports how many buildings actually drew", /\$\{builtNow\} buildings/.test(mod));
+
 // The scene must actually carry the sampled colours, or the renderer is reading
 // a field that is never populated.
 const withColour = scene.buildings.filter((b) => b.roofColour).length;

@@ -528,6 +528,7 @@ function buildBuildings(scene) {
   const group = new THREE.Group();
   let built = 0;
   let skipped = 0;
+  let firstError = null;
   // Materials are shared per colour bucket. 125 unique materials is 125 shader
   // state changes a frame for no visual gain.
   const wallMats = [];
@@ -590,7 +591,11 @@ function buildBuildings(scene) {
         uv.setXY(i, uv.getX(i) / TEXTURE_M, uv.getY(i) / TEXTURE_M);
       }
       uv.needsUpdate = true;
-      const wallMesh = new THREE.Mesh(wallGeo, pick(wallMats, wall, makeWallTexture(wall)));
+      // The factory, not its result. Passing the texture itself made pick() call
+      // a THREE.Texture as if it were a function, which threw inside the
+      // per-building try below - and that catch silently skipped every building
+      // in the scene, so the street rendered with a road and no buildings at all.
+      const wallMesh = new THREE.Mesh(wallGeo, pick(wallMats, wall, () => makeWallTexture(wall)));
       wallMesh.position.y = 0.02;
       wallMesh.castShadow = true;
       wallMesh.receiveShadow = true;
@@ -617,11 +622,30 @@ function buildBuildings(scene) {
       group.add(roofMesh);
 
       built += 1;
-    } catch {
+    } catch (err) {
+      /*
+       * One bad outline should not cost the other 238. But swallowing the error
+       * is how a genuine bug reached production: a material factory was passed
+       * where its result was expected, this threw on every building, and the
+       * result was a street with a road and no buildings at all - reported
+       * nowhere except a count in a small label.
+       *
+       * So the first failure is recorded and shown, and if most of the scene
+       * fails to build that is treated as a fault to report rather than a
+       * partial success to shrug at.
+       */
       skipped += 1;
+      if (skipped === 1) {
+        firstError = err;
+        try {
+          console.error("[longton] first building failed to build:", err);
+        } catch {
+          /* console may be absent */
+        }
+      }
     }
   }
-  group.userData = { built, skipped };
+  group.userData = { built, skipped, firstError: firstError ? String(firstError.message || firstError) : "" };
   return group;
 }
 
@@ -929,16 +953,24 @@ export function createLongtonCamera3d(container, opts = {}) {
     scene.add(furniture);
     aim();
     applyDaylight();
+    const builtNow = buildings.userData?.built || 0;
+    const skippedNow = buildings.userData?.skipped || 0;
+    if (skippedNow > 4 && builtNow === 0) {
+      // Every building failed. That is a fault, not a partial success, and it
+      // must not be presented as a finished view.
+      showError(
+        `The 3D street could not be drawn: all ${skippedNow} buildings failed to build` +
+          (buildings.userData?.firstError ? ` (${buildings.userData.firstError})` : "") +
+          ". The coach photo gallery below still works.",
+      );
+      return false;
+    }
     if (els.note) {
       const n = data.counts || {};
-      // Say if any outlines failed, rather than quietly rendering fewer
-      // buildings than the model holds and leaving the viewer to assume it is
-      // an accurate skyline.
-      const skipped = buildings.userData?.skipped || 0;
       els.note.dataset.locked = "1";
       els.note.textContent =
-        `OpenStreetMap 3D model · ${n.buildings || 0} buildings · ${n.roads || 0} road sections` +
-        (skipped ? ` · ${skipped} outline(s) could not be drawn` : "") +
+        `OpenStreetMap 3D model · ${builtNow} buildings · ${n.roads || 0} road sections` +
+        (skippedNow ? ` · ${skippedNow} outline(s) could not be drawn` : "") +
         " · loading aerial imagery…";
     }
 
