@@ -605,6 +605,23 @@ app.get("/longton-scene.generated.json", (req, res) => {
 });
 
 /*
+ * Freely-licensed photographs of the actual street, from Wikimedia Commons.
+ * Every image carries its author and licence, which CC BY-SA requires be credited.
+ */
+app.get("/longton-photos.generated.json", (req, res) => {
+  const file = path.join(__dirname, "longton-photos.generated.json");
+  if (!fs.existsSync(file)) {
+    res.status(503).json({
+      error: "photo list not built",
+      detail: "run: node scripts/fetch-longton-photos.mjs",
+    });
+    return;
+  }
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  res.sendFile(file);
+});
+
+/*
  * National Highways camera snapshots. The watcher decides when a coach is near a
  * camera and stores the picture with the vehicle's registration; these endpoints
  * only read what it already captured, so a page view never triggers a fetch from

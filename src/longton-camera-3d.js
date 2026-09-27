@@ -29,6 +29,7 @@ export const LONGTON_VIEW = {
   lon: -2.137064,
   eyeHeight: 6.5,
   sceneUrl: "/longton-scene.generated.json",
+  photosUrl: "/longton-photos.generated.json",
 };
 
 const STAFFS_OPS = ["FPOT", "DAGC", "CRDR", "SLBS"];
@@ -134,10 +135,13 @@ async function loadBuses(origin) {
 const IMAGERY = {
   url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
   credit: "Imagery &copy; Esri, Maxar, Earthstar Geographics",
-  zoom: 18,
+  // z19 is the highest zoom with real imagery for Longton - z20 and above return
+  // Esri's 2.5KB "nothing here" placeholder. z19 doubles the ground detail over
+  // z18, which is the difference between tarmac and kerbs.
+  zoom: 19,
   tile: 256,
   /** Half-width of the area to photograph, in metres either side of the origin. */
-  extentM: 460,
+  extentM: 400,
   maxTiles: 48,
 };
 
@@ -411,11 +415,19 @@ function buildBuildings(scene) {
       group.add(wallMesh);
 
       // Roof: a flat cap plus a thin lip, so the top edge is not a hard cut.
+      // Where the scene generator managed to sample the real roof colour out of
+      // the aerial photography, use that - the buildings then wear the colour of
+      // the actual Longton roof they stand where, rather than an invented one.
       const roofGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.4, bevelEnabled: false });
       roofGeo.rotateX(-Math.PI / 2);
-      const roofColor = kind === "industrial" || kind === "warehouse"
-        ? new THREE.Color().setHSL(0.58, 0.08, 0.34)
-        : new THREE.Color().setHSL(0.09, 0.14, 0.2 + (seed % 8) / 100);
+      let roofColor;
+      if (b.roofColour) {
+        roofColor = new THREE.Color(b.roofColour);
+      } else if (kind === "industrial" || kind === "warehouse") {
+        roofColor = new THREE.Color().setHSL(0.58, 0.08, 0.34);
+      } else {
+        roofColor = new THREE.Color().setHSL(0.09, 0.14, 0.2 + (seed % 8) / 100);
+      }
       const roofMesh = new THREE.Mesh(roofGeo, pick(roofMats, roofColor));
       roofMesh.position.y = 0.02 + h - 0.4;
       roofMesh.castShadow = true;
@@ -559,11 +571,15 @@ export function createLongtonCamera3d(container, opts = {}) {
     status: container.querySelector("[data-lcam3d-status]"),
     clock: container.querySelector("[data-lcam3d-clock]"),
     note: container.querySelector("[data-lcam3d-note]"),
+    photos: container.querySelector("[data-lcam3d-photos]"),
+    photosList: container.querySelector("[data-lcam3d-photos-list]"),
+    photosNote: container.querySelector("[data-lcam3d-photos-note]"),
+    photosCredit: container.querySelector("[data-lcam3d-photos-credit]"),
   };
 
   const state = {
     running: false,
-    raf: 0,
+    photosShown: false,
     timer: 0,
     inflight: false,
     sceneData: null,
@@ -734,6 +750,60 @@ export function createLongtonCamera3d(container, opts = {}) {
     return true;
   }
 
+  /**
+   * The real photographs of the street, nearest first, each credited.
+   *
+   * These are Geograph pictures of the actual Longton taken under CC BY-SA 2.0 -
+   * the Superdrug and Ryman frontage, the Potteries Oatcake Company, the view
+   * from Gold Street. They are shown as photographs with their author named,
+   * not pasted onto the buildings: a Geograph shot is a view along a street from
+   * one spot, and stretched across a box it would read as a poster stuck on a
+   * wall rather than as the building it actually shows. Attribution is not
+   * optional under CC BY-SA, so the author and licence travel with every image.
+   */
+  async function loadPhotos() {
+    if (state.photosShown || !els.photosList) return;
+    state.photosShown = true;
+    const data = await fetchJson(view.photosUrl);
+    const photos = Array.isArray(data?.photos) ? data.photos.slice(0, 6) : [];
+    if (!photos.length) {
+      if (els.photos) els.photos.hidden = true;
+      return;
+    }
+    const mLon = 111_320 * Math.cos(((state.sceneData?.origin?.lat || view.lat) * Math.PI) / 180);
+    const origin = state.sceneData?.origin || { lat: view.lat, lon: view.lon };
+    const camAt = state.sceneData?.camera?.at || [0, 0];
+    const camLat = origin.lat - camAt[1] / 111_320;
+    const camLon = origin.lon + camAt[0] / mLon;
+
+    els.photosList.innerHTML = photos
+      .map((p) => {
+        const d = Math.round(
+          Math.hypot((p.lat - camLat) * 111_320, (p.lon - camLon) * mLon),
+        );
+        return `<li class="lcam-photo">
+          <a href="${esc(p.page)}" target="_blank" rel="noopener noreferrer">
+            <img src="${esc(p.thumb)}" alt="${esc(p.title)}" loading="lazy" decoding="async" width="240" height="180" />
+          </a>
+          <div class="lcam-photo-meta">
+            <a class="lcam-photo-title" href="${esc(p.page)}" target="_blank" rel="noopener noreferrer">${esc(p.title)}</a>
+            <span>${esc(p.author)} &middot; ${esc(p.licence)} &middot; ${d} m from the camera</span>
+          </div>
+        </li>`;
+      })
+      .join("");
+
+    if (els.photosNote) {
+      els.photosNote.textContent = `${data.count} freely-licensed pictures of this street, showing the ${photos.length} nearest`;
+    }
+    if (els.photosCredit) {
+      els.photosCredit.textContent =
+        "Photographs from Wikimedia Commons, reused under CC BY-SA / CC BY. " +
+        "Each links to its file page, where the author and licence are recorded in full.";
+    }
+    if (els.photos) els.photos.hidden = false;
+  }
+
   function frame() {
     renderer.render(scene, camera);
     state.raf = requestAnimationFrame(frame);
@@ -754,6 +824,7 @@ export function createLongtonCamera3d(container, opts = {}) {
     aim();
     resize();
     await refreshBuses();
+    loadPhotos();
     // invalidateSize matters: the container was display:none until the tab
     // opened, so without this the first frame is rendered at the wrong size.
     requestAnimationFrame(resize);

@@ -203,6 +203,48 @@ ok("shadows are enabled", /shadowMap\.enabled = true/.test(mod));
 ok("tone mapping is on so the photo and the render match",
   /ACESFilmicToneMapping/.test(mod) && /SRGBColorSpace/.test(mod));
 ok("there is only one buildGround", (mod.match(/function buildGround\b/g) || []).length === 1);
+ok("roofs wear the real sampled colour", /b\.roofColour/.test(mod));
+ok("the ground uses the highest available zoom", /zoom: 19/.test(mod));
+ok("the note says why z19 is the limit", /z20 and above return/.test(mod));
+ok("the real photographs are credited", /CC BY-SA/.test(mod));
+ok("photographs are linked to their file page", /p\.page/.test(mod));
+ok("the photo list says it is photographs, not textures", /not pasted onto the buildings/i.test(mod));
+
+// The scene must actually carry the sampled colours, or the renderer is reading
+// a field that is never populated.
+const withColour = scene.buildings.filter((b) => b.roofColour).length;
+ok("the scene carries real roof colours", withColour > scene.buildings.length * 0.5,
+  `${withColour} of ${scene.buildings.length}`);
+ok("every roof colour is a real hex triplet",
+  scene.buildings.every((b) => !b.roofColour || /^#[0-9a-f]{6}$/.test(b.roofColour)));
+ok("the camera looks at the Exchange", /Exchange/.test(scene.camera?.looksAt || ""),
+  scene.camera?.looksAt);
+ok("the camera is stood back a real distance", (scene.camera?.standBackM || 0) > 80,
+  `${scene.camera?.standBackM} m`);
+
+// The photo list, if it has been built.
+const photoPath = path.join(__dirname, "..", "longton-photos.generated.json");
+if (fs.existsSync(photoPath)) {
+  const photos = JSON.parse(fs.readFileSync(photoPath, "utf8"));
+  ok("photographs were collected", photos.count > 5, `${photos.count}`);
+  ok("every photograph is freely licensed",
+    photos.photos.every((p) => /^(CC0|CC BY|PD|Public domain)/i.test(p.licence)),
+    [...new Set(photos.photos.map((p) => p.licence))].join(", "));
+  ok("every photograph names an author to credit",
+    photos.photos.every((p) => p.author && p.author !== "unknown"));
+  ok("every photograph has coordinates to place it", photos.photos.every((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon)));
+  ok("every photograph links to its Commons page", photos.photos.every((p) => /commons\.wikimedia\.org/.test(p.page)));
+  ok("the photographs are near the camera", photos.photos.every((p) => p.distanceM <= 500),
+    `furthest ${Math.max(...photos.photos.map((p) => p.distanceM))} m`);
+  ok("some photographs are of The Strand itself",
+    photos.photos.filter((p) => /strand/i.test(p.title)).length >= 3,
+    `${photos.photos.filter((p) => /strand/i.test(p.title)).length}`);
+  const gen = fs.readFileSync(path.join(__dirname, "..", "scripts", "fetch-longton-photos.mjs"), "utf8");
+  ok("the photo fetcher rejects licences that do not permit reuse", /CC0|CC BY/.test(gen) && /fair use/i.test(gen));
+  ok("the photo fetcher explains why not Google", /not licensed for reuse/.test(gen));
+} else {
+  console.log("  SKIP  no photo list built yet - run scripts/fetch-longton-photos.mjs");
+}
 ok("the accessible name says it is a model", /not CCTV footage/.test(html));
 ok("the scene is served without a build step", /longton-scene\.generated\.json/.test(mod));
 

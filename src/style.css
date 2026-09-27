@@ -1346,6 +1346,61 @@ html[data-plus="1"] .plus-tag {
   width: 100% !important;
   height: 100% !important;
 }
+/* Real photographs of the street, credited. */
+.lcam-photos {
+  margin-top: 16px;
+}
+.lcam-photos-title {
+  margin: 0 0 8px;
+  font-size: 0.92rem;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.lcam-photos-note {
+  font-size: 0.76rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+.lcam-photos-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+.lcam-photo img {
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+  border-radius: 7px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  display: block;
+}
+.lcam-photo-meta {
+  margin-top: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.lcam-photo-title {
+  color: #bae6fd;
+  text-decoration: none;
+  line-height: 1.3;
+}
+.lcam-photo-title:hover {
+  text-decoration: underline;
+}
+.lcam-photos-credit {
+  margin: 10px 0 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
 .lcam3d-error {
   margin: 0;
   padding: 16px;

@@ -183,23 +183,99 @@ function buildScene(geo) {
     }
   }
 
-  // The camera looks down The Strand, the main street through the town centre.
-  // Find it from the fetched data rather than hard-coding a point, so the camera
-  // follows the road if OSM renames or resegments it.
+  // The camera looks along The Strand, the main street through the town centre,
+  // from beside Longton Exchange - the bus station where 16 services converge,
+  // so it is the one spot in town where buses are certain to pass. Found from
+  // the fetched data rather than hard-coded, so it follows the road if OSM
+  // renames or resegments it.
   const strand = roads.filter((r) => r.name === "The Strand");
   const fallback = roads.filter((r) => r.type === "primary");
   const chain = chainOf(strand.length ? strand : fallback);
-  const view = chain.length >= 2 ? viewDownStreet(chain) : null;
+  const view = chain.length >= 2 ? viewTowardExchange(chain, origin) : null;
 
   return {
     generated: new Date().toISOString(),
     source: "OpenStreetMap via Overpass API (ODbL)",
+    imagery: "Esri World Imagery (aerial roof colours)",
     origin,
     bbox: BBOX,
     counts: { roads: roads.length, buildings: buildings.length },
     camera: view,
     roads,
     buildings,
+  };
+}
+
+/**
+ * Stand the camera on the street a short way back from the Exchange, looking at
+ * it, so buses pulling in and turning are in shot.
+ *
+ * The Exchange is the scene origin, taken from our stops table, so "the point on
+ * the street nearest the origin" is the kerb outside the bus station without
+ * anyone typing a coordinate.
+ */
+/**
+ * How far up the street to stand from the Exchange.
+ *
+ * 42m put the camera close enough that the shot was just the bus station and a
+ * shelter. 170m puts a length of The Strand in frame with the Exchange at the
+ * far end, which is the composition a real camera covering a bus station would
+ * have: you see the approach and the stand.
+ */
+const STAND_BACK_M = 170;
+
+function viewTowardExchange(points, origin) {
+  // Nearest point on the chain to the scene origin.
+  let bestI = 0;
+  let bestD = Infinity;
+  points.forEach(([x, z], i) => {
+    const d = Math.hypot(x, z);
+    if (d < bestD) {
+      bestD = d;
+      bestI = i;
+    }
+  });
+  const at = points[bestI];
+  if (!at) return null;
+
+  /*
+   * Stand STAND_BACK_M further along the street from the Exchange, and look back
+   * at it.
+   *
+   * Walking *backwards* from the Exchange does not work, and did not: chainOf
+   * deliberately starts the chain at whichever end is nearest the scene origin,
+   * which is the Exchange, so the nearest point is index 0 and there is nothing
+   * behind it to walk into. The camera ended up 14m from its target, filming a
+   * bus shelter. So it goes forwards along the chain and turns to face back.
+   */
+  const segLen = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+  let budget = STAND_BACK_M;
+  let atPoint = at;
+  for (let i = bestI; i < points.length - 1 && budget > 0; i += 1) {
+    const len = segLen(points[i], points[i + 1]);
+    if (len <= 0) continue;
+    if (len >= budget) {
+      // Part of the way along this segment.
+      const t = budget / len;
+      atPoint = [
+        points[i][0] + (points[i + 1][0] - points[i][0]) * t,
+        points[i][1] + (points[i + 1][1] - points[i][1]) * t,
+      ];
+      budget = 0;
+      break;
+    }
+    budget -= len;
+    atPoint = points[i + 1];
+  }
+
+  const lengthM = points.reduce((sum, p, i) => (i ? sum + dist(points[i - 1], p) : 0), 0);
+  return {
+    at: [round(atPoint[0], 2), round(atPoint[1], 2)],
+    towards: [round(at[0], 2), round(at[1], 2)],
+    along: points,
+    lengthM: round(lengthM, 0),
+    standBackM: round(Math.hypot(atPoint[0] - at[0], atPoint[1] - at[1]), 0),
+    looksAt: "Longton Exchange",
   };
 }
 
@@ -273,6 +349,113 @@ function chainOf(ways) {
   return take;
 }
 
+/**
+ * Sample the real roof colour of each building from Esri aerial imagery.
+ *
+ * A model painted in invented colours is the giveaway that it is a model. The
+ * aerial photograph already knows what colour every roof in Longton actually is,
+ * so read it: fetch the z19 tile over each roof, take the pixel at the centroid,
+ * and store it. The 3D buildings then wear the colour of the real roof they
+ * stand where.
+ *
+ * This is a rooftop sample from a near-vertical photograph, so it cannot see
+ * walls - walls keep their by-use palette. z20 and above return a 2.5KB blank
+ * tile for this area, so z19 is the highest useful zoom and is what the ground
+ * texture uses too.
+ */
+const IMAGERY_ZOOM = 19;
+const IMAGERY_TILE = 256;
+const IMAGERY_URL =
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
+
+function mercatorPx(lat, lon, zoom) {
+  const n = 2 ** zoom;
+  const x = ((lon + 180) / 360) * n * IMAGERY_TILE;
+  const r = (lat * Math.PI) / 180;
+  const y = ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * n * IMAGERY_TILE;
+  return { x, y };
+}
+
+async function fetchTile(z, col, row) {
+  const key = `${z}/${col}/${row}`;
+  if (tileCache.has(key)) return tileCache.get(key);
+  const url = IMAGERY_URL.replace("{z}", String(z)).replace("{x}", String(col)).replace("{y}", String(row));
+  const promise = (async () => {
+    try {
+      const res = await fetch(url, { headers: { "User-Agent": "uk-bus-tracker/1.0 (Longton scene)" } });
+      if (!res.ok) return null;
+      const buf = Buffer.from(await res.arrayBuffer());
+      // 2.5KB is Esri's "no imagery here" placeholder, not a real tile.
+      if (buf.length < 4000) return null;
+    const { default: sharp } = await import("sharp");
+    const { data, info } = await sharp(buf)
+        .removeAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      return { data, w: info.width, h: info.height };
+    } catch {
+      return null;
+    }
+  })();
+  tileCache.set(key, promise);
+  return promise;
+}
+
+const tileCache = new Map();
+
+/** Mean colour of a small patch, so one shadowed pixel does not decide a roof. */
+function samplePatch(tile, px, py, radius = 3) {
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let n = 0;
+  for (let dy = -radius; dy <= radius; dy += 1) {
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      const x = Math.round(px) + dx;
+      const y = Math.round(py) + dy;
+      if (x < 0 || y < 0 || x >= tile.w || y >= tile.h) continue;
+      const i = (y * tile.w + x) * 3;
+      r += tile.data[i];
+      g += tile.data[i + 1];
+      b += tile.data[i + 2];
+      n += 1;
+    }
+  }
+  if (!n) return null;
+  const hex = (v) => Math.round(v / n).toString(16).padStart(2, "0");
+  return `#${hex(r)}${hex(g)}${hex(b)}`;
+}
+
+async function sampleRoofColours(buildings, origin) {
+  const mLon = 111_320 * Math.cos((origin.lat * Math.PI) / 180);
+  let done = 0;
+  let got = 0;
+  for (const b of buildings) {
+    b.roofColour = null;
+    // Footprint centroid in local metres, then back to lat/lon.
+    let sx = 0;
+    let sz = 0;
+    for (const [x, z] of b.ring) {
+      sx += x;
+      sz += z;
+    }
+    const lat = origin.lat - sz / b.ring.length / 111_320;
+    const lon = origin.lon + sx / b.ring.length / mLon;
+    const p = mercatorPx(lat, lon, IMAGERY_ZOOM);
+    const col = Math.floor(p.x / IMAGERY_TILE);
+    const row = Math.floor(p.y / IMAGERY_TILE);
+    const tile = await fetchTile(IMAGERY_ZOOM, col, row);
+    done += 1;
+    if (!tile) continue;
+    const colour = samplePatch(tile, p.x - col * IMAGERY_TILE, p.y - row * IMAGERY_TILE);
+    if (colour) {
+      b.roofColour = colour;
+      got += 1;
+    }
+  }
+  return { done, got };
+}
+
 /** Stand the camera a little into the street and look along it. */
 function viewDownStreet(points) {
   const total = points.reduce((sum, p, i) => (i ? sum + dist(points[i - 1], p) : 0), 0);
@@ -319,6 +502,12 @@ const scene = buildScene(geo);
 
 if (!scene.roads.length) throw new Error("no usable roads in the response");
 if (!scene.buildings.length) throw new Error("no usable buildings in the response");
+
+// Read the real roof colour of every building off the aerial photography.
+console.log(`sampling real roof colours from Esri imagery at z${IMAGERY_ZOOM}...`);
+const roof = await sampleRoofColours(scene.buildings, scene.origin);
+console.log(`  ${roof.got} of ${roof.done} buildings got a colour from the aerial photo`);
+scene.counts.roofColours = roof.got;
 if (!scene.camera) throw new Error("could not work out where to point the camera");
 
 const { writeFileSync: write } = await import("node:fs");
