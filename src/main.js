@@ -6,7 +6,6 @@ import { createFleetBrowser, isSchoolBusLive, isStokeFcShuttleLive, isStokeFcLin
 import { normalizeUkFeedTimestamp, isSimonNoteActive } from "./time.js";
 import { setupPlus, isPlus, requirePlus, syncPlusFromAccount } from "./plus.js";
 import { getUser } from "./auth.js";
-import { createLongtonCamera3d } from "./longton-camera-3d.js";
 import {
   atStopsInBounds,
   atStopByAtco,
@@ -12718,8 +12717,6 @@ let cameraGalleryLoaded = false;
 let cameraGallerySig = "";
 let camerasRefreshTimer = null;
 let camerasRefreshBusy = false;
-/** Built on first open of the Cameras tab; see syncCameraGalleryPolling. */
-let longtonCamera = null;
 let camerasUpdatedAt = 0;
 const CAMERAS_REFRESH_MS = 30_000;
 
@@ -12891,18 +12888,6 @@ async function loadCameraGallery({ force = false, quiet = false } = {}) {
  */
 function syncCameraGalleryPolling() {
   const wanted = appTab === "cameras" && !document.hidden;
-  // The 3D virtual camera over Longton lives on this tab too, so it follows the
-  // same on-screen rule. It is built once, lazily: the canvas container is
-  // display:none until the tab opens, and a renderer created against a hidden
-  // element measures itself as zero and draws nothing.
-  if (wanted && !longtonCamera) {
-    longtonCamera = createLongtonCamera3d(document.getElementById("longton-camera-3d"));
-  }
-  if (wanted) {
-    longtonCamera?.start();
-  } else {
-    longtonCamera?.stop();
-  }
   if (wanted && !camerasRefreshTimer) {
     // Catch up straight away rather than making someone who has just opened the
     // tab stare at a stale grid for half a minute.

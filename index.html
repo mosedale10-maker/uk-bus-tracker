@@ -1,9 +1,9 @@
-ï»¿<!doctype html>
+<!doctype html>
 <html lang="en-GB">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>UK Bus Tracker â€” Live bus map across Britain</title>
+    <title>UK Bus Tracker — Live bus map across Britain</title>
     <meta
       name="description"
       content="Free live UK bus tracker. See buses on a map in real time, search by place, postcode or registration, and follow fleet movements across Britain."
@@ -16,7 +16,7 @@
     <link rel="apple-touch-icon" href="/logos/ukbustracker-logo.jpg" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="UK Bus Tracker" />
-    <meta property="og:title" content="UK Bus Tracker â€” Live bus map across Britain" />
+    <meta property="og:title" content="UK Bus Tracker — Live bus map across Britain" />
     <meta
       property="og:description"
       content="Free live UK bus tracker. See buses on a map in real time, search by place, postcode or registration."
@@ -25,7 +25,7 @@
     <meta property="og:image" content="https://ukbustracker.co.uk/logos/ukbustracker-logo.jpg" />
     <meta property="og:locale" content="en_GB" />
     <meta name="twitter:card" content="summary" />
-    <meta name="twitter:title" content="UK Bus Tracker â€” Live bus map across Britain" />
+    <meta name="twitter:title" content="UK Bus Tracker — Live bus map across Britain" />
     <meta
       name="twitter:description"
       content="Free live UK bus tracker. See buses on a map in real time across Britain."
@@ -73,18 +73,18 @@
       <aside id="site-moved-banner" class="site-moved-banner" hidden role="region" aria-label="Site moved">
         <div class="site-moved-banner-inner">
           <p>
-            <strong>Weâ€™ve moved.</strong>
-            This Railway address shuts down on <strong>25 September at 3pm UK time</strong> â€”
+            <strong>We’ve moved.</strong>
+            This Railway address shuts down on <strong>25 September at 3pm UK time</strong> —
             head to the new site
             <a href="https://ukbustracker.co.uk/">https://ukbustracker.co.uk</a>
-            (same tracker, now running on the ownerâ€™s PC).
+            (same tracker, now running on the owner’s PC).
           </p>
           <a class="site-moved-banner-go" href="https://ukbustracker.co.uk/">Go to new site</a>
         </div>
       </aside>
       <aside id="connection-issues-banner" class="connection-issues-banner" hidden role="status" aria-live="polite">
         <div class="connection-issues-banner-inner">
-          <p><strong>Connection issues.</strong> Weâ€™re having trouble reaching the live map host. Retryingâ€¦</p>
+          <p><strong>Connection issues.</strong> We’re having trouble reaching the live map host. Retrying…</p>
         </div>
       </aside>
       <header class="topbar">
@@ -158,10 +158,10 @@
         <button type="button" id="follow-chip" class="follow-chip" hidden></button>
         <div id="playback-bar" class="playback-bar" hidden>
           <span id="playback-label" class="playback-label"></span>
-          <button type="button" id="playback-replay" class="playback-btn" hidden title="Replay the recorded GPS pings">â–¶ Replay</button>
+          <button type="button" id="playback-replay" class="playback-btn" hidden title="Replay the recorded GPS pings">? Replay</button>
           <input type="range" id="playback-scrub" class="playback-scrub" min="0" max="1000" value="0" hidden aria-label="Replay position" />
           <span id="playback-clock" class="playback-clock" hidden></span>
-          <button type="button" id="playback-speed" class="playback-btn" hidden title="Replay speed">Ã—60</button>
+          <button type="button" id="playback-speed" class="playback-btn" hidden title="Replay speed">×60</button>
           <button type="button" id="playback-stop" class="playback-btn">Close tail</button>
         </div>
         <p id="message" class="message" hidden></p>
@@ -178,8 +178,8 @@
             decoding="async"
           />
           <p class="home-brand">UK Bus Tracker</p>
-          <p class="home-lead">Live buses across Britain â€” map, fleet and stop boards in one place.</p>
-          <p id="home-live-count" class="home-live-count" aria-live="polite">Counting UK busesâ€¦</p>
+          <p class="home-lead">Live buses across Britain — map, fleet and stop boards in one place.</p>
+          <p id="home-live-count" class="home-live-count" aria-live="polite">Counting UK buses…</p>
           <form id="home-search-form" class="home-search">
             <label class="sr-only" for="home-query">Search place, postcode or registration</label>
             <input
@@ -213,7 +213,7 @@
         <aside id="journey-panel" class="journey-panel" hidden aria-label="Selected bus or journey">
           <header class="journey-panel-head">
             <p id="journey-panel-crumb" class="journey-panel-crumb"></p>
-            <button type="button" id="journey-panel-close" class="journey-panel-close" aria-label="Close panel">Ã—</button>
+            <button type="button" id="journey-panel-close" class="journey-panel-close" aria-label="Close panel">×</button>
           </header>
           <div id="journey-panel-detail" class="journey-panel-detail"></div>
           <section id="journey-panel-timetable" class="journey-panel-timetable" hidden>
@@ -249,56 +249,6 @@
           hidden
         >
           <div class="cameras-inner">
-            <section class="lcam lcam3d" aria-labelledby="lcam3d-title">
-              <div class="lcam-head">
-                <h3 class="lcam-title" id="lcam3d-title">
-                  The Strand, Longton
-                  <span class="lcam-tag">3D virtual camera</span>
-                </h3>
-                <p class="lcam-where">
-                  Stoke-on-Trent &middot; fixed view down the street &middot;
-                  <span data-lcam3d-note>loading the model&hellip;</span>
-                </p>
-              </div>
-              <p class="lcam-disclaimer">
-                <strong>Not CCTV footage.</strong> There is no public camera feed for Longton. This
-                is a 3D model of the street, built from OpenStreetMap geometry over real aerial
-                photography, with buses placed at their live GPS positions. It is a model, not a
-                photograph &mdash; the buildings are only as accurate as the day they were surveyed.
-                Ground imagery &copy; Esri, Maxar, Earthstar Geographics; street geometry &copy;
-                OpenStreetMap contributors.
-              </p>
-              <div class="lcam-frame">
-                <div
-                  id="longton-camera-3d"
-                  class="lcam3d-stage"
-                  role="img"
-                  aria-label="3D model of The Strand in Longton, with buses drawn at their live GPS positions. This is a rendered model, not CCTV footage."
-                ></div>
-                <div class="lcam-overlay lcam-overlay-top">
-                  <span class="lcam-clock" data-lcam3d-clock>--:--:--</span>
-                  <span class="lcam-live"><span class="lcam-live-dot" aria-hidden="true"></span>live</span>
-                </div>
-                <div class="lcam-overlay lcam-overlay-bottom">
-                  <span class="lcam-countwrap">
-                    <strong data-lcam3d-count>0</strong> buses in view
-                  </span>
-                  <span class="lcam-updated">updated <span data-lcam3d-updated>--:--:--</span></span>
-                </div>
-              </div>
-              <p class="lcam-status" data-lcam3d-status hidden></p>
-              <div class="lcam-photos" data-lcam3d-photos hidden>
-                <h4 class="lcam-photos-title">
-                  Photographs of this street
-                  <span
-                    class="lcam-photos-note"
-                    data-lcam3d-photos-note
-                  >freely-licensed pictures of the real Longton, nearest first</span>
-                </h4>
-                <ul class="lcam-photos-list" data-lcam3d-photos-list></ul>
-                <p class="lcam-photos-credit" data-lcam3d-photos-credit></p>
-              </div>
-            </section>
             <header class="cameras-head">
               <h2 class="cameras-title">Coach camera photos</h2>
               <p class="cameras-sub">
@@ -325,7 +275,7 @@
         </section>
         <button type="button" id="tail-close" class="tail-close-chip" hidden>Close tail</button>
         <aside id="map-welcome" class="map-welcome" hidden>
-          <button type="button" id="map-welcome-close" class="map-welcome-close" aria-label="Dismiss">Ã—</button>
+          <button type="button" id="map-welcome-close" class="map-welcome-close" aria-label="Dismiss">×</button>
           <img
             class="map-welcome-logo"
             src="/logos/ukbustracker-logo.jpg"
@@ -344,9 +294,9 @@
           <button type="button" id="map-welcome-gotit" class="map-welcome-gotit">Got it</button>
         </aside>
         <aside id="road-notice-alert" class="road-notice-alert" hidden role="dialog" aria-labelledby="road-notice-alert-title" aria-modal="true">
-          <button type="button" class="road-notice-alert-close" data-road-alert-close aria-label="Dismiss">Ã—</button>
+          <button type="button" class="road-notice-alert-close" data-road-alert-close aria-label="Dismiss">×</button>
           <p class="road-notice-alert-kicker">Service notice</p>
-          <p id="road-notice-alert-title" class="road-notice-alert-title" data-road-alert-title>Road closing Â· Longton</p>
+          <p id="road-notice-alert-title" class="road-notice-alert-title" data-road-alert-title>Road closing · Longton</p>
           <p class="road-notice-alert-body" data-road-alert-body></p>
           <div class="road-notice-alert-actions">
             <button type="button" class="road-notice-alert-map" data-road-alert-map>Show on map</button>
@@ -354,7 +304,7 @@
           </div>
         </aside>
         <aside id="control-room-alert" class="control-room-alert" hidden role="dialog" aria-labelledby="control-room-alert-title" aria-modal="true">
-          <button type="button" class="control-room-alert-close" data-control-alert-close aria-label="Dismiss">Ã—</button>
+          <button type="button" class="control-room-alert-close" data-control-alert-close aria-label="Dismiss">×</button>
           <p class="control-room-alert-kicker">Control room</p>
           <p id="control-room-alert-title" class="control-room-alert-title"></p>
           <p class="control-room-alert-body" data-control-alert-body></p>
@@ -369,7 +319,7 @@
               <p class="alerts-panel-kicker">Stoke-on-Trent</p>
               <h2 class="alerts-panel-title">Service alerts</h2>
             </div>
-            <button type="button" id="alerts-panel-close" class="alerts-panel-close" aria-label="Close alerts">Ã—</button>
+            <button type="button" id="alerts-panel-close" class="alerts-panel-close" aria-label="Close alerts">×</button>
           </header>
           <p class="alerts-panel-note">Control-room messages plus public updates from First Potteries and D&amp;G Bus for the Stoke area. Buses on a diversion are listed here and announced out loud while <strong>Announcements</strong> is on.</p>
           <div id="alerts-panel-list" class="alerts-panel-list"></div>
@@ -407,7 +357,7 @@
               />
               <button type="submit">Add</button>
             </form>
-            <p class="fleet-scope">Staffs operators Â· UK-wide reg Â· 5-day history</p>
+            <p class="fleet-scope">Staffs operators · UK-wide reg · 5-day history</p>
           </div>
           <div id="fleet-content" class="fleet-content"></div>
           <nav class="fleet-bottom-tabs" aria-label="Fleet sections">
@@ -434,7 +384,7 @@
                 <time id="stop-board-clock-stoke" class="stop-board-clock stop-board-clock-stoke" datetime="">00:00</time>
               </aside>
               <div class="stop-board-main">
-                <button type="button" id="stop-board-close" class="stop-board-close" aria-label="Close stop board">Ã—</button>
+                <button type="button" id="stop-board-close" class="stop-board-close" aria-label="Close stop board">×</button>
                 <header class="stop-board-header">
                   <p id="stop-board-name" class="stop-board-stopname">Bus stop</p>
                   <time id="stop-board-clock" class="stop-board-clock" datetime="">00:00</time>
@@ -469,7 +419,7 @@
           decoding="async"
         />
         <h1 class="about-title">UK Bus Tracker</h1>
-        <p class="about-lead">Free, live bus tracking across Britain â€” map, fleet and stop boards in one place.</p>
+        <p class="about-lead">Free, live bus tracking across Britain — map, fleet and stop boards in one place.</p>
 
         <section class="about-section">
           <h2>What is this?</h2>
@@ -479,10 +429,10 @@
         <section class="about-section">
           <h2>How to use it</h2>
           <ol class="about-steps">
-            <li><strong>Search</strong> â€” type a town, postcode or bus registration in the search box.</li>
-            <li><strong>Map</strong> â€” zoom into any area to see live buses. Tap a bus pin for details, route and timing.</li>
-            <li><strong>Fleet</strong> â€” browse all Staffordshire operators and tracked vehicles.</li>
-            <li><strong>Stop board</strong> â€” tap a bus stop on the map for a live departure board (Plus feature).</li>
+            <li><strong>Search</strong> — type a town, postcode or bus registration in the search box.</li>
+            <li><strong>Map</strong> — zoom into any area to see live buses. Tap a bus pin for details, route and timing.</li>
+            <li><strong>Fleet</strong> — browse all Staffordshire operators and tracked vehicles.</li>
+            <li><strong>Stop board</strong> — tap a bus stop on the map for a live departure board (Plus feature).</li>
           </ol>
         </section>
 
@@ -495,14 +445,14 @@
             <li>3-day and 7-day vehicle history</li>
             <li>Add bus photos (after approval)</li>
           </ul>
-          <p>Plus is <strong>Â£1.99&nbsp;/&nbsp;month</strong>, billed through PayPal, and can be cancelled any time.</p>
+          <p>Plus is <strong>£1.99&nbsp;/&nbsp;month</strong>, billed through PayPal, and can be cancelled any time.</p>
         </section>
 
         <section class="about-section">
           <h2>Data sources</h2>
           <ul class="about-list">
-            <li><a href="https://www.bus-data.dft.gov.uk/" target="_blank" rel="noopener noreferrer">Bus Open Data Service (BODS)</a> â€” DfT national AVL feed</li>
-            <li><a href="https://www.openstreetmap.org/" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> â€” map tiles</li>
+            <li><a href="https://www.bus-data.dft.gov.uk/" target="_blank" rel="noopener noreferrer">Bus Open Data Service (BODS)</a> — DfT national AVL feed</li>
+            <li><a href="https://www.openstreetmap.org/" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> — map tiles</li>
           </ul>
         </section>
 
@@ -510,32 +460,32 @@
           <h2>Thank you</h2>
           <p>UK Bus Tracker is built on the work of many open-data projects, services and volunteers. Thank you to:</p>
           <ul class="about-list">
-            <li><a href="https://www.bus-data.dft.gov.uk/" target="_blank" rel="noopener noreferrer">Bus Open Data Service</a> and the <a href="https://www.gov.uk/government/organisations/department-for-transport" target="_blank" rel="noopener noreferrer">Department for Transport</a> â€” national AVL data</li>
-            <li><a href="https://www.openstreetmap.org/" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a> â€” map data and road information</li>
-            <li><a href="https://openfreemap.org/" target="_blank" rel="noopener noreferrer">OpenFreeMap</a> â€” map tiles and open map services</li>
-            <li><a href="https://project-osrm.org/" target="_blank" rel="noopener noreferrer">Project OSRM</a> and the <a href="https://overpass-api.de/" target="_blank" rel="noopener noreferrer">Overpass API</a> â€” route matching and map queries</li>
-            <li><a href="https://www.esri.com/" target="_blank" rel="noopener noreferrer">Esri</a> â€” satellite imagery for the map layer</li>
-            <li><a href="https://railway.app/" target="_blank" rel="noopener noreferrer">Railway</a> â€” hosting and deployment support</li>
-            <li><a href="https://www.paypal.com/" target="_blank" rel="noopener noreferrer">PayPal</a> and <a href="https://resend.com/" target="_blank" rel="noopener noreferrer">Resend</a> â€” Plus payments and account emails</li>
+            <li><a href="https://www.bus-data.dft.gov.uk/" target="_blank" rel="noopener noreferrer">Bus Open Data Service</a> and the <a href="https://www.gov.uk/government/organisations/department-for-transport" target="_blank" rel="noopener noreferrer">Department for Transport</a> — national AVL data</li>
+            <li><a href="https://www.openstreetmap.org/" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a> — map data and road information</li>
+            <li><a href="https://openfreemap.org/" target="_blank" rel="noopener noreferrer">OpenFreeMap</a> — map tiles and open map services</li>
+            <li><a href="https://project-osrm.org/" target="_blank" rel="noopener noreferrer">Project OSRM</a> and the <a href="https://overpass-api.de/" target="_blank" rel="noopener noreferrer">Overpass API</a> — route matching and map queries</li>
+            <li><a href="https://www.esri.com/" target="_blank" rel="noopener noreferrer">Esri</a> — satellite imagery for the map layer</li>
+            <li><a href="https://railway.app/" target="_blank" rel="noopener noreferrer">Railway</a> — hosting and deployment support</li>
+            <li><a href="https://www.paypal.com/" target="_blank" rel="noopener noreferrer">PayPal</a> and <a href="https://resend.com/" target="_blank" rel="noopener noreferrer">Resend</a> — Plus payments and account emails</li>
           </ul>
           <p>A special thank you also goes to the bus operators, drivers, dispatchers, maintainers and open-data volunteers who keep these services moving.</p>
         </section>
 
         <section class="about-section">
           <h2>Contact &amp; feedback</h2>
-          <p>UK Bus Tracker is an independent hobby project focused on Staffordshire and the wider UK network. Feedback, corrections and bus photos are welcome â€” use the Account section to sign in and get in touch.</p>
+          <p>UK Bus Tracker is an independent hobby project focused on Staffordshire and the wider UK network. Feedback, corrections and bus photos are welcome — use the Account section to sign in and get in touch.</p>
         </section>
 
-        <p class="about-version">UK Bus Tracker Â· <a href="https://ukbustracker.co.uk/" target="_blank" rel="noopener noreferrer">ukbustracker.co.uk</a></p>
+        <p class="about-version">UK Bus Tracker · <a href="https://ukbustracker.co.uk/" target="_blank" rel="noopener noreferrer">ukbustracker.co.uk</a></p>
       </div>
     </section>
     </div>
     <div id="plus-modal" class="plus-modal" hidden role="dialog" aria-modal="true" aria-labelledby="plus-modal-title">
       <div class="plus-dialog">
-        <button type="button" class="plus-dialog-close" data-plus-close aria-label="Close">Ã—</button>
+        <button type="button" class="plus-dialog-close" data-plus-close aria-label="Close">×</button>
         <p class="plus-kicker">UK Bus Tracker</p>
         <h2 id="plus-modal-title" class="plus-dialog-title">Go Plus</h2>
-        <p class="plus-dialog-lead">Free keeps the live map and fleet. Plus unlocks the extras â€” sign in so it works on every device.</p>
+        <p class="plus-dialog-lead">Free keeps the live map and fleet. Plus unlocks the extras — sign in so it works on every device.</p>
         <p class="plus-feature-note" data-plus-feature hidden></p>
         <p class="plus-expiry" data-plus-expiry hidden></p>
         <div class="plus-account" data-plus-account></div>
@@ -545,12 +495,12 @@
             <ul>
               <li>Live map &amp; search</li>
               <li>Fleet browser</li>
-              <li>Todayâ€™s vehicle history</li>
+              <li>Today’s vehicle history</li>
               <li>Bus stops on the map</li>
             </ul>
           </div>
           <div class="plus-col plus-col-on">
-            <h3>Plus Â· <span data-plus-price>Â£1.99/month</span></h3>
+            <h3>Plus · <span data-plus-price>£1.99/month</span></h3>
             <ul>
               <li>Live spoken announcements</li>
               <li>Virtual stop board</li>
@@ -560,7 +510,7 @@
             </ul>
           </div>
         </div>
-        <button type="button" class="plus-checkout-btn" data-plus-checkout>Pay with PayPal Â· <span data-plus-price>Â£1.99/month</span></button>
+        <button type="button" class="plus-checkout-btn" data-plus-checkout>Pay with PayPal · <span data-plus-price>£1.99/month</span></button>
         <button type="button" class="plus-cancel-btn" data-plus-cancel hidden>Cancel Plus</button>
         <p class="plus-error" data-plus-error hidden></p>
         <button type="button" class="plus-later" data-plus-close>Not now</button>
@@ -568,7 +518,7 @@
     </div>
     <div id="auth-modal" class="plus-modal auth-modal" hidden role="dialog" aria-modal="true" aria-labelledby="auth-modal-title" data-mode="signup">
       <div class="plus-dialog auth-dialog">
-        <button type="button" class="plus-dialog-close" data-auth-close aria-label="Close">Ã—</button>
+        <button type="button" class="plus-dialog-close" data-auth-close aria-label="Close">×</button>
         <p class="plus-kicker">UK Bus Tracker</p>
         <h2 id="auth-modal-title" class="plus-dialog-title">Create account</h2>
         <div data-auth-logged-in hidden>
@@ -593,7 +543,7 @@
           <button type="button" class="plus-later" data-auth-close>Close</button>
         </div>
         <form data-auth-form class="auth-form">
-          <p class="plus-dialog-lead">Free account â€” required before paying so Plus is saved to you, not just this phone.</p>
+          <p class="plus-dialog-lead">Free account — required before paying so Plus is saved to you, not just this phone.</p>
           <label class="auth-label" for="auth-email">Email</label>
           <input id="auth-email" name="email" type="email" autocomplete="email" required placeholder="you@example.com" />
           <label class="auth-label" for="auth-password">Password</label>

@@ -37,7 +37,7 @@ const factory = new Function(
   `
   const {
     esc, cameraPhotoTime, zoomGalleryHits, document: doc,
-    setInterval, clearInterval, createLongtonCamera3d,
+    setInterval, clearInterval,
   } = deps;
   const { camerasGridEl, camerasEmptyEl, camerasCountEl, camerasUpdatedEl,
           camerasOnlyHitsEl, camerasOnlyReadableEl } = deps;
@@ -46,9 +46,6 @@ const factory = new Function(
   // the real ones inside this scope, which is the point: the test needs to count
   // the timers rather than actually start them.
   const document = doc;
-  // The Longton virtual camera shares this tab's on-screen rule, so the polling
-  // test has to be able to see it start and stop too.
-  let longtonCamera = null;
   // In the app appTab is a plain string variable, not an object. Modelling it as
   // an object would make every comparison against "cameras" silently false.
   let appTab = deps.appTab;
@@ -66,7 +63,7 @@ const factory = new Function(
     loadCameraGallery,
     syncCameraGalleryPolling,
     setTab: (t) => { appTab = t; },
-    camera: () => longtonCamera,
+    camera: () => null,
     state: () => ({ loaded: cameraGalleryLoaded, sig: cameraGallerySig, busy: camerasRefreshBusy,
                     timer: camerasRefreshTimer, updatedAt: camerasUpdatedAt }),
   };
@@ -133,21 +130,7 @@ function makeHarness({ responses }) {
         return state.docHidden;
       },
       addEventListener() {},
-      getElementById: (id) => (id === "longton-camera-3d" ? { id } : null),
-    },
-    // Stand-in for the real WebGL camera. Records lifecycle only; the 3D scene
-    // itself is covered by scripts/test-longton-3d.cjs.
-    createLongtonCamera3d: (el) => {
-      if (!el) return null;
-      state.cameraBuilt = (state.cameraBuilt || 0) + 1;
-      return {
-        start() {
-          state.cameraRunning = true;
-        },
-        stop() {
-          state.cameraRunning = false;
-        },
-      };
+      getElementById: () => null,
     },
     setInterval: (fn, ms) => {
       state.timers.push(ms);
@@ -376,28 +359,6 @@ function scenario(responses) {
     ok("the timer starts again when the page returns", h.state().timer !== null);
   }
 
-  // 9b. The Longton virtual camera follows the same on-screen rule: built once,
-  // started with the tab, stopped when the tab is left or the page hidden.
-  {
-    const h = scenario([{ photos: [shot("AAA")], captured: 1 }]);
-    h.api.syncCameraGalleryPolling();
-    ok("the camera is not built while another tab is open", (h.cameraBuilt || 0) === 0);
-    h.api.setTab("cameras");
-    h.api.syncCameraGalleryPolling();
-    ok("the camera is built when the tab opens", h.cameraBuilt === 1);
-    ok("the camera is running with the tab", h.cameraRunning === true);
-    h.api.syncCameraGalleryPolling();
-    ok("the camera is built only once", h.cameraBuilt === 1, `built ${h.cameraBuilt} times`);
-    h.api.setTab("map");
-    h.api.syncCameraGalleryPolling();
-    ok("the camera stops when the tab is left", h.cameraRunning === false);
-    h.api.setTab("cameras");
-    h.api.syncCameraGalleryPolling();
-    ok("the camera restarts without rebuilding", h.cameraRunning === true && h.cameraBuilt === 1);
-    h.docHidden = true;
-    h.api.syncCameraGalleryPolling();
-    ok("the camera stops when the page is hidden", h.cameraRunning === false);
-  }
 
   // 10. Opening the tab refreshes immediately, and the count stays honest.
   {
