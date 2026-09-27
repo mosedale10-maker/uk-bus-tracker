@@ -29,6 +29,31 @@ SNAP_DIR = Path("/opt/uk-bus-tracker/data/camera-snapshots")
 # COCO class 5 is "bus"; coaches are annotated as buses.
 BUS_CLASS = 5
 MIN_CONF = 0.30
+#
+# Coach shape gates. Confidence does not separate a coach from a car - the
+# stored detections run 0.31 to 0.94 with no clean break, and the recorded box
+# lorry false positive sat at 0.399, in the middle of the genuine range. Size
+# does separate them, because a coach is 12m long and a car is 4.5m.
+#
+# Thresholds come from the store, not from taste. All 855 stored detections were
+# measured and the trade-off curve is flat in the useful direction: the floor
+# selects SIZE, not distance - the median distance of what survives is 58-59m at
+# every threshold, so this is not quietly throwing away distant coaches.
+#
+#   floor  kept   what it means
+#     46   684    rejects obvious junk: 19-45px blobs, and a "bus" detected 1m
+#                 from a camera where a coach would fill the frame
+#     75   425    the floor chosen. A frame checked by eye had a 46px "bus" on it
+#                 and the object was a white VAN, so 46 was not strict enough.
+#     90   334    stricter still, but starts costing real coaches
+#
+# Precision was the requirement, so 75 is the floor. It is not a complete answer:
+# at 80m a box lorry is the same size as a coach, and no size floor can separate
+# those. That residual risk is stated rather than hidden.
+MIN_COACH_PX = 75.0
+MIN_COACH_SHORT_PX = 34.0
+MAX_COACH_ASPECT = 3.6
+MIN_COACH_IMPLIED = 1500.0
 # Only genuinely dark frames are worth brightening. Measured across 2,411 stored
 # frames the brightness distribution runs: 6% under 40, 12% under 60, 22% under
 # 80. Daylight and dusk frames are already readable and rewriting them makes
@@ -155,6 +180,49 @@ def verify_shot(model, frame, conf=MIN_CONF):
     return count, best
 
 
+def coach_shape_ok(box, distance_m):
+    """Is this box big and solid enough to be a coach, rather than a car?
+
+    COCO class 5 is "bus", and the model applies it to cars, vans, lorries and
+    the occasional blob of tarmac. Confidence does not separate them: the stored
+    detections run from 0.31 to 0.94 with no clean break, and the one false
+    positive already on record - a box lorry at 0.399 - sits in the middle of
+    the genuine range.
+
+    Size does separate them, and it is the right thing to reason about because a
+    coach is 12m long and a car is 4.5m. On the same camera that is 2.7x in
+    linear size. A frame was checked with a 19x19px "bus" on it: a dozen cars, a
+    white van, no coach that size anywhere. And a detection recorded at 1m from
+    the camera came back 32x32px, where a coach would have filled the frame.
+
+    So two tests, both cheap and both independent of how the camera is framed:
+      - an absolute floor on the box, because anything tiny is not a 12m vehicle
+      - box width x distance, which is constant for a fixed object on a fixed
+        camera, so it is the size of the thing detected regardless of framing
+    """
+    if not (isinstance(box, (list, tuple)) and len(box) == 4):
+        return False, "box is not four numbers"
+    try:
+        x1, y1, x2, y2 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return False, "box contains something that is not a number"
+    w = abs(x2 - x1)
+    h = abs(y2 - y1)
+    if w <= 0 or h <= 0:
+        return False, "degenerate box"
+    long_side = max(w, h)
+    short_side = min(w, h)
+    if long_side < MIN_COACH_PX:
+        return False, f"box {long_side:.0f}px is too small for a coach"
+    if short_side < MIN_COACH_SHORT_PX:
+        return False, f"box {w:.0f}x{h:.0f} is too thin to be a coach"
+    if long_side / short_side > MAX_COACH_ASPECT:
+        return False, f"box aspect {long_side / short_side:.1f} is not a coach"
+    if distance_m and (w * distance_m) < MIN_COACH_IMPLIED:
+        return False, f"implied size {w * distance_m:.0f} is too small for a 12m coach"
+    return True, ""
+
+
 def shot_path(shot):
     name = str(shot.get("file") or "").rsplit("/", 1)[-1]
     return (SNAP_DIR / name) if name else None
@@ -192,6 +260,7 @@ def main() -> int:
     enhanced_used = 0
     attempted = 0
     improved = 0
+    shape_rejected = 0
     worsened = 0
     compared = 0
     orig_total = 0
@@ -281,16 +350,29 @@ def main() -> int:
             shots_checked += 1
             total_objects += count
             if best:
-                shot["busDetected"] = True
-                shot["busConfidence"] = best["conf"]
-                shot["busBox"] = best["box"]
-                hits += 1
-                if best_shot is None or best["conf"] > best_shot[1]["conf"]:
-                    best_shot = (shot, best)
+                # The model says "bus". Ask whether that is plausible before
+                # believing it, and keep the raw answer either way so the
+                # rejection is visible rather than silent.
+                ok_shape, why = coach_shape_ok(best["box"], shot.get("distanceM"))
+                if ok_shape:
+                    shot["busDetected"] = True
+                    shot["busConfidence"] = best["conf"]
+                    shot["busBox"] = best["box"]
+                    shot.pop("rejectedAs", None)
+                    hits += 1
+                    if best_shot is None or best["conf"] > best_shot[1]["conf"]:
+                        best_shot = (shot, best)
+                else:
+                    shape_rejected += 1
+                    shot["busDetected"] = False
+                    shot["rejectedAs"] = f"bus class at {best['conf']} but {why}"
+                    shot.pop("busConfidence", None)
+                    shot.pop("busBox", None)
             else:
                 shot["busDetected"] = False
                 shot.pop("busConfidence", None)
                 shot.pop("busBox", None)
+                shot.pop("rejectedAs", None)
 
         meta["shots"] = shots
         meta["shotCount"] = len(shots)
@@ -350,6 +432,11 @@ def main() -> int:
         f"\nchecked {checked} coaches, {shots_checked} frames; "
         f"coach found in {coaches} of them ({hits} shots)"
     )
+    if shape_rejected:
+        print(
+            f"{shape_rejected} bus-class detection(s) rejected as too small or "
+            f"wrongly shaped to be a coach"
+        )
     if compared:
         avg_o = orig_total / compared
         avg_c = chosen_total / compared
