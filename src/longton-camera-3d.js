@@ -594,7 +594,7 @@ function makeWallTexture(baseColor) {
  * something is a model; giving the roof its own darker material and adding a
  * thin eaves lip is what makes extruded boxes look like buildings.
  */
-function buildBuildings(scene, camAt = [0, 0]) {
+function buildBuildings(scene, camAt = [0, 0], aerialPlan = null) {
   const group = new THREE.Group();
   let built = 0;
   let skipped = 0;
@@ -610,6 +610,9 @@ function buildBuildings(scene, camAt = [0, 0]) {
     cornice: new THREE.MeshLambertMaterial({ color: 0xb9ac9a }),
     pipe: new THREE.MeshLambertMaterial({ color: 0x555049 }),
     shopGlass: new THREE.MeshLambertMaterial({ color: 0x1d2a33 }),
+    // Filled in with the aerial photograph once the tiles arrive. Until then the
+    // roofs fall back to the sampled flat colour.
+    roofPhoto: new THREE.MeshLambertMaterial({ color: 0xffffff }),
   };
   // Shop fascias are the one place a bit of colour is right: on a real high
   // street they are the signage, and they are what your eye reads as "shops".
@@ -701,6 +704,31 @@ function buildBuildings(scene, camAt = [0, 0]) {
       // the actual Longton roof they stand where, rather than an invented one.
       const roofGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.4, bevelEnabled: false });
       roofGeo.rotateX(-Math.PI / 2);
+      /*
+       * Roofs wear the actual photograph of the actual roof.
+       *
+       * The generator already samples one colour per roof out of the aerial
+       * imagery, which is better than an invented tone but still a flat fill -
+       * and from a camera 6.5m up, roofs are a large part of what you see. So
+       * the roof cap's UVs are remapped from local metres into the aerial
+       * mosaic, using the same projection the ground uses. Every roof then
+       * carries its own felt, its own slate and its own moss, straight from the
+       * photograph, and it is one shared texture for the whole street.
+       *
+       * The UVs are set here, before a single tile has been fetched, because the
+       * plan is pure geometry. The texture lands a moment later.
+       */
+      let roofMaterial;
+      if (aerialPlan) {
+        const uv = roofGeo.attributes.uv;
+        const pos = roofGeo.attributes.position;
+        for (let i = 0; i < uv.count; i += 1) {
+          const [u, v] = aerialUv(aerialPlan, pos.getX(i), pos.getZ(i));
+          uv.setXY(i, u, v);
+        }
+        uv.needsUpdate = true;
+        roofMaterial = trimMats.roofPhoto;
+      }
       let roofColor;
       if (b.roofColour) {
         roofColor = new THREE.Color(b.roofColour);
@@ -709,7 +737,7 @@ function buildBuildings(scene, camAt = [0, 0]) {
       } else {
         roofColor = new THREE.Color().setHSL(0.09, 0.14, 0.2 + (seed % 8) / 100);
       }
-      const roofMesh = new THREE.Mesh(roofGeo, pick(roofMats, roofColor));
+      const roofMesh = new THREE.Mesh(roofGeo, roofMaterial || pick(roofMats, roofColor));
       roofMesh.position.y = 0.02 + h - 0.4;
       roofMesh.castShadow = true;
       roofMesh.receiveShadow = true;
@@ -837,6 +865,59 @@ function buildBuildings(scene, camAt = [0, 0]) {
 }
 
 /** A wide plain beyond the photographed area, so the horizon is not a hard edge. */
+/**
+ * Work out the aerial photograph's coverage before any tile is fetched.
+ *
+ * Pure geometry - which tiles, which pixel box, what zoom - so it can be known
+ * synchronously. That matters because the roofs need their UVs set to the right
+ * part of the mosaic at build time, long before the pixels exist. They can be
+ * built pointing at the photograph and have the texture land a moment later.
+ */
+function aerialPlanFor(origin) {
+  const half = IMAGERY.extentM;
+  for (let z = IMAGERY.zoomStart; z >= IMAGERY.zoomFloor; z -= 1) {
+    if (tileCountFor(origin, z) > IMAGERY.maxTiles) continue;
+    const corners = [
+      latLonFrom(origin, -half, -half),
+      latLonFrom(origin, half, -half),
+      latLonFrom(origin, half, half),
+      latLonFrom(origin, -half, half),
+    ].map((c) => mercatorPx(c.lat, c.lon, origin, z));
+    const minX = Math.min(...corners.map((c) => c.x));
+    const maxX = Math.max(...corners.map((c) => c.x));
+    const minY = Math.min(...corners.map((c) => c.y));
+    const maxY = Math.max(...corners.map((c) => c.y));
+    const t0 = Math.floor(minX / IMAGERY.tile);
+    const t1 = Math.floor((maxX - 1) / IMAGERY.tile);
+    const r0 = Math.floor(minY / IMAGERY.tile);
+    const r1 = Math.floor((maxY - 1) / IMAGERY.tile);
+    const cols = t1 - t0 + 1;
+    const rows = r1 - r0 + 1;
+    return {
+      origin,
+      zoom: z,
+      t0,
+      r0,
+      cols,
+      rows,
+      uv: {
+        minX,
+        minY,
+        w: cols * IMAGERY.tile,
+        h: rows * IMAGERY.tile,
+      },
+    };
+  }
+  return null;
+}
+
+/** Local metres to a position in the aerial mosaic, 0..1 across it. */
+function aerialUv(plan, x, z) {
+  const ll = latLonFrom(plan.origin, x, z);
+  const p = mercatorPx(ll.lat, ll.lon, plan.origin, plan.zoom);
+  return [(p.x - plan.uv.minX) / plan.uv.w, 1 - (p.y - plan.uv.minY) / plan.uv.h];
+}
+
 /** Release the GPU memory of a group that is being replaced. */
 function disposeTree(root) {
   root.traverse((obj) => {
@@ -1286,7 +1367,17 @@ export function createLongtonCamera3d(container, opts = {}) {
 
     state.roads = buildRoads(data, { withAerial: false });
     scene.add(state.roads);
-    const buildings = buildBuildings(data, data.camera?.at || [0, 0]);
+    const camAt = data.camera?.at || [0, 0];
+    const camTo = data.camera?.towards || [0, 0];
+    const viewCentre = [(camAt[0] + camTo[0]) / 2, (camAt[1] + camTo[1]) / 2];
+    const viewOrigin = {
+      lat: origin.lat - viewCentre[1] / 111_320,
+      lon: origin.lon + viewCentre[0] / mLonFor(origin.lat),
+    };
+    // Worked out before anything is fetched, because the roofs need their UVs
+    // aimed at the right part of the photograph as they are built.
+    const plan = aerialPlanFor(viewOrigin);
+    const buildings = buildBuildings(data, camAt, plan);
     scene.add(buildings);
     const furniture = buildStreetFurniture(data, data.camera?.at || [0, 0]);
     scene.add(furniture);
@@ -1314,15 +1405,6 @@ export function createLongtonCamera3d(container, opts = {}) {
     }
 
     // Now the photography, and swap it in when it is all there.
-    //
-    // Centred on the middle of the view, not on the scene origin. The camera
-    // stands 165m from the origin, so a mosaic centred there put the camera on
-    // its edge - the least detailed corner, and the most likely to be clipped.
-    const camAt = data.camera?.at || [0, 0];
-    const camTo = data.camera?.towards || [0, 0];
-    const viewCentre = [(camAt[0] + camTo[0]) / 2, (camAt[1] + camTo[1]) / 2];
-    const viewOrigin = { lat: origin.lat - viewCentre[1] / 111_320, lon: origin.lon + viewCentre[0] / mLonFor(origin.lat) };
-
     loadBestAerial(viewOrigin)
       .then((res) => {
         if (res?.texture && res.uv) {
@@ -1330,6 +1412,11 @@ export function createLongtonCamera3d(container, opts = {}) {
           textured.position.y = -0.05;
           textured.receiveShadow = true;
           scene.add(textured);
+          // The same photograph on the roofs. One texture, whole street: the
+          // roof UVs were already aimed at it, so this is a single assignment.
+          trimMats.roofPhoto.map = res.texture;
+          trimMats.roofPhoto.color = new THREE.Color(0xffffff);
+          trimMats.roofPhoto.needsUpdate = true;
           state.aerial = res;
           // Now the photograph is the road: swap the stylised tarmac and its
           // painted lines for kerbs only, so the real street shows through

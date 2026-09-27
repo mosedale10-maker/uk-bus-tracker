@@ -280,6 +280,30 @@ for (let y = 0; y < H; y += 1) {
 console.log(`  ${tilesNeeded.size} tiles cover the view`);
 await Promise.all([...tilesNeeded].map((k) => getTile(k.split("/")[0], k.split("/")[1])));
 
+/** The aerial colour at a point on the ground plane, for roof textures. */
+globalThis.__aerial = async (x, z) => {
+  const ll = fromOrigin(x, z);
+  const m = merc(ll.lat, ll.lon);
+  const col = Math.floor(m.x / TILE);
+  const row = Math.floor(m.y / TILE);
+  const t = await getTile(col, row);
+  if (!t) return null;
+  const px = Math.round(m.x - col * TILE);
+  const py = Math.round(m.y - row * TILE);
+  const i = (py * t.w + px) * 3;
+  return [t.data[i], t.data[i + 1], t.data[i + 2]];
+};
+// Roof colours, sampled from the same photograph, one per building centroid.
+for (const b of scene.buildings) {
+  let sx = 0;
+  let sz = 0;
+  for (const [x, z] of b.ring) {
+    sx += x;
+    sz += z;
+  }
+  b.__roof = await globalThis.__aerial(sx / b.ring.length, sz / b.ring.length);
+}
+
 for (let y = 0; y < H; y += 1) {
   for (let x = 0; x < W; x += 1) {
     const ndcX = (x + 0.5 - W / 2) / (focal * W / 2);
@@ -337,6 +361,15 @@ for (const b of scene.buildings) {
     const n = [-ez / len, 0, ex / len];
     addFace([[ax, 0, az], [bx, 0, bz], [bx, h, bz], [ax, h, az]], n, wc);
   }
+  let cx = 0;
+  let cz = 0;
+  for (const [x, z] of ring) {
+    cx += x;
+    cz += z;
+  }
+  cx /= ring.length;
+  cz /= ring.length;
+
   // The silhouette trim the site adds: a wider plinth and a projecting cornice.
   // Drawn from the same ring, scaled out slightly, so what is visible here is
   // what the page draws.
@@ -366,19 +399,13 @@ for (const b of scene.buildings) {
     }
   }
 
-  // Roof, fanned from the centroid.
-  let cx = 0;
-  let cz = 0;
-  for (const [x, z] of ring) {
-    cx += x;
-    cz += z;
-  }
-  cx /= ring.length;
-  cz /= ring.length;
+  // Roof, fanned from the centroid, wearing the aerial photograph where the page
+  // will texture it and the flat sampled colour where it will not.
+  const roofCol = b.__roof || rc;
   for (let i = 0; i < ring.length; i += 1) {
     const a = ring[i];
     const b2 = ring[(i + 1) % ring.length];
-    addFace([[cx, h, cz], [a[0], h, a[1]], [b2[0], h, b2[1]]], [0, 1, 0], rc);
+    addFace([[cx, h, cz], [a[0], h, a[1]], [b2[0], h, b2[1]]], [0, 1, 0], roofCol);
   }
 }
 
